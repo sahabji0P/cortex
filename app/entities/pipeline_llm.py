@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from app.adapters.gemini_adp import GeminiAdapterClass
+from app.adapters.gemini_adp import GeminiAdapterClass, TextDelta
 from app.adapters.openai_adp import OpenAIAdapterClass
 
 type Provider = Literal["openai", "gemini"]
@@ -38,11 +38,13 @@ class LLMPipelineEntityClass:
                 yield chunk
 
     async def _gemini_stream(self, prompt: str) -> AsyncIterator[StreamChunk]:
-        """Convert a Gemini stream into normalized stream chunks."""
+        """Convert a Gemini Interactions SSE stream into normalized stream chunks."""
         try:
-            async for chunk in self._gemini.stream(prompt, model="3.5 Flash"):
-                if chunk.text:
-                    yield StreamChunk(provider="gemini", type="delta", text=chunk.text)
+            stream = await self._gemini.stream_model_interaction_events(prompt, model="3.5 Flash")
+            async for event in stream:
+                # step.delta carries the incremental content; text deltas are TextDelta.
+                if event.event_type == "step.delta" and isinstance(event.delta, TextDelta):
+                    yield StreamChunk(provider="gemini", type="delta", text=event.delta.text)
         except Exception as exc:  # surface provider errors as a stream event, don't crash the run
             yield StreamChunk(provider="gemini", type="error", text=str(exc))
             return
