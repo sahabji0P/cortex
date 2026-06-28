@@ -31,10 +31,6 @@ class Settings(BaseSettings):
     gcp_project_id: str = ""
     vertex_region: str = "global"  # "global" (recommended), "us"/"eu", or a specific region
 
-    # Default models (override per call as needed)
-    anthropic_model: str = "claude-opus-4-8"  # bare ID on Vertex, no provider prefix
-    gemini_model: str = "gemini-2.5-flash"
-
     # OpenAI
     openai_api_key: str = ""
 

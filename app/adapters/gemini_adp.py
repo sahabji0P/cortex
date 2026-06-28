@@ -1,10 +1,24 @@
 from collections.abc import AsyncIterator
+from types import MappingProxyType
+from typing import Literal
 
 from google import genai
 from google.genai import types
 from google.genai.client import AsyncClient
 
 from app.config import settings
+
+
+class _Types:
+    """Group private Gemini adapter model types."""
+
+    type AvailableModels = Literal["3.5 Flash", "3.1 Flash Lite"]
+    model_map = MappingProxyType[AvailableModels, str](
+        {
+            "3.5 Flash": "gemini-3.5-flash",
+            "3.1 Flash Lite": "gemini-3.1-flash-lite",
+        }
+    )
 
 
 class GeminiAdapterClass:
@@ -14,9 +28,11 @@ class GeminiAdapterClass:
     """
 
     def __init__(self) -> None:
+        """Create an empty Gemini async client holder."""
         self._client: AsyncClient | None = None
 
     async def initialize(self) -> None:
+        """Initialize the Gemini async client for Vertex AI."""
         # AsyncClient is only reachable via Client(...).aio — keep it, drop the sync wrapper.
         self._client = genai.Client(
             vertexai=True,
@@ -25,42 +41,32 @@ class GeminiAdapterClass:
         ).aio
 
     async def close(self) -> None:
+        """Complete Gemini adapter shutdown."""
         # google-genai holds no long-lived connection that needs explicit teardown.
         return
 
     @property
     def client(self) -> AsyncClient:
+        """Return the initialized Gemini async client."""
         if self._client is None:
             raise RuntimeError("Gemini client not initialized")
         return self._client
-
-    @staticmethod
-    def builtin_tools() -> list[types.Tool]:
-        """Gemini server-side tools: Google Search grounding, code execution, URL context."""
-        return [
-            types.Tool(google_search=types.GoogleSearch()),
-            types.Tool(code_execution=types.ToolCodeExecution()),
-            types.Tool(url_context=types.UrlContext()),
-        ]
 
     async def stream(
         self,
         # ContentListUnion is the SDK's own type; its union has an untyped (PIL) member.
         contents: types.ContentListUnion,  # pyright: ignore[reportUnknownParameterType]
         *,
-        model: str | None = None,
+        model: _Types.AvailableModels,
         tools: list[types.Tool] | None = None,
         config: types.GenerateContentConfig | None = None,
     ) -> AsyncIterator[types.GenerateContentResponse]:
-        """Stream a generation. Yields raw SDK chunks so callers can read text,
-        tool calls, and grounding metadata. Pass `tools=GeminiAdapterClass.builtin_tools()`
-        to enable the server-side tools, or a custom `config` to control everything.
-        """
+        """Stream Gemini generation chunks with raw SDK response metadata."""
         if config is None:
             config = types.GenerateContentConfig(tools=tools)
 
         stream = await self.client.models.generate_content_stream(
-            model=model or settings.gemini_model,
+            model=_Types.model_map[model],
             contents=contents,
             config=config,
         )
