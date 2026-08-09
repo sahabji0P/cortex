@@ -9,7 +9,7 @@ from app.core.security import decode_access_token
 from app.routers.user.models import UserModels
 from app.routers.user.service import UserServiceRegistry
 
-router = APIRouter(prefix="/users", tags=["users"])
+router = APIRouter(prefix="/v1/users", tags=["users"])
 
 _bearer = HTTPBearer(auto_error=False)
 

@@ -14,3 +14,7 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# One-off local tooling that reproduces another repo's secret-cache decryption;
+# keep it out of history.
+scripts/extract_vertex_key.py
