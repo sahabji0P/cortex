@@ -27,7 +27,6 @@ _DEFAULT_GEMINI_TOOLS: tuple[GeminiBuiltinTool, ...] = (
     "google_maps",
     "url_context",
 )
-_OPENAI_COMPACT_THRESHOLD = 150_000
 
 
 class Source(BaseModel):
@@ -139,12 +138,6 @@ class LLMPipelineEntityClass:
                     session_id=session_id,
                     request_id=request_id,
                     prompt=prompt,
-                    provider_parent_response_id=(
-                        context.previous_response_id
-                        if provider == "openai"
-                        or (provider == "gemini" and gemini_mode == "interactions")
-                        else None
-                    ),
                 ):
                     yield chunk
 
@@ -156,7 +149,6 @@ class LLMPipelineEntityClass:
         session_id: str,
         request_id: ObjectId,
         prompt: str,
-        provider_parent_response_id: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Persist one compact, ordered parts document for a provider run."""
         turn = await self._conversations.create_turn(
@@ -164,22 +156,14 @@ class LLMPipelineEntityClass:
             session_id=session_id,
             request_id=request_id,
             prompt=prompt,
-            provider_parent_response_id=provider_parent_response_id,
         )
         parts = turn.parts.copy()
-        provider_response_id: str | None = None
         try:
             async for chunk in stream:
-                if chunk.provider_response_id is not None:
-                    provider_response_id = chunk.provider_response_id
                 self._capture_part(parts, chunk)
                 yield chunk
         finally:
-            await self._conversations.save_turn_parts_shielded(
-                turn.id,
-                parts,
-                provider_response_id=provider_response_id,
-            )
+            await self._conversations.save_turn_parts_shielded(turn.id, parts)
 
     @staticmethod
     def _capture_part(parts: list[dict[str, str]], chunk: StreamChunk) -> None:
@@ -287,27 +271,21 @@ class LLMPipelineEntityClass:
         """Convert a Gemini Interactions SSE stream into normalized stream chunks.
 
         Used for explicit Interactions experiments such as code execution tools.
+        Stateless: the full transcript is rebuilt from Mongo on every request, so
+        no interaction is stored or continued provider-side.
         """
-        interaction_id: str | None = None
-        received_output = False
         try:
-            if context.previous_response_id is None:
-                provider_input = self._gemini.build_interaction_input(
+            stream = await self._gemini.stream_model_interaction_events(
+                self._gemini.build_interaction_input(
                     self._text_messages(context),
                     prompt,
-                )
-            else:
-                provider_input = prompt
-            stream = await self._gemini.stream_model_interaction_events(
-                provider_input,
+                ),
                 model="3.5 Flash",
                 tools=self._gemini.Tools.from_names(gemini_tools),
-                previous_interaction_id=context.previous_response_id,
-                store=True,
+                store=False,
             )
             async for event in stream:
                 if event.event_type == "step.delta":
-                    received_output = True
                     delta = event.delta
                     if isinstance(delta, TextDelta):
                         yield StreamChunk(provider="gemini", type="delta", text=delta.text)
@@ -346,23 +324,8 @@ class LLMPipelineEntityClass:
                         yield StreamChunk(provider="gemini", type="info", info=delta.type)
                 elif event.event_type == "error":
                     message = (event.error.message if event.error else None) or "Gemini error"
-                    if self._should_restart_without_continuation(
-                        event.error,
-                        context=context,
-                        received_output=received_output,
-                        field_name="previous_interaction_id",
-                    ):
-                        async for chunk in self._gemini_stream_via_interactions(
-                            prompt,
-                            gemini_tools,
-                            SessionContext(messages=context.messages),
-                        ):
-                            yield chunk
-                        return
                     yield StreamChunk(provider="gemini", type="error", text=message)
                     return
-                elif event.event_type == "interaction.completed":
-                    interaction_id = event.interaction.id
                 elif event.event_type == "interaction.status_update" and str(event.status) in {
                     "failed",
                     "cancelled",
@@ -376,26 +339,9 @@ class LLMPipelineEntityClass:
                     )
                     return
         except Exception as exc:  # surface provider errors as a stream event, don't crash the run
-            if self._should_restart_without_continuation(
-                exc,
-                context=context,
-                received_output=received_output,
-                field_name="previous_interaction_id",
-            ):
-                async for chunk in self._gemini_stream_via_interactions(
-                    prompt,
-                    gemini_tools,
-                    SessionContext(messages=context.messages),
-                ):
-                    yield chunk
-                return
             yield StreamChunk(provider="gemini", type="error", text=str(exc))
             return
-        yield StreamChunk(
-            provider="gemini",
-            type="done",
-            provider_response_id=interaction_id,
-        )
+        yield StreamChunk(provider="gemini", type="done")
 
     async def _anthropic_stream(
         self,
@@ -492,22 +438,18 @@ class LLMPipelineEntityClass:
         thinking: OpenAIThinking | None,
         context: SessionContext,
     ) -> AsyncIterator[StreamChunk]:
-        """Convert an OpenAI Responses SSE stream into normalized stream chunks."""
-        response_id: str | None = None
-        received_output = False
+        """Convert an OpenAI Responses SSE stream into normalized stream chunks.
+
+        Stateless: the full transcript is rebuilt from Mongo on every request, so
+        no response is stored or continued provider-side.
+        """
         try:
-            if context.previous_response_id is None:
-                provider_input = self._openai.build_text_input(
-                    self._text_messages(context),
-                    prompt,
-                )
-                previous_response_id = omit
-            else:
-                provider_input = prompt
-                previous_response_id = context.previous_response_id
             stream = await self._openai.stream_response(
                 model="Luna",
-                input=provider_input,
+                input=self._openai.build_text_input(
+                    self._text_messages(context),
+                    prompt,
+                ),
                 # outputs are null in the stream unless explicitly included
                 include=["code_interpreter_call.outputs"],
                 tools=[
@@ -515,21 +457,12 @@ class LLMPipelineEntityClass:
                     self._openai.Tools.code_interpreter(),
                 ],
                 reasoning=thinking if thinking is not None else omit,
-                previous_response_id=previous_response_id,
-                context_management=[
-                    {
-                        "type": "compaction",
-                        "compact_threshold": _OPENAI_COMPACT_THRESHOLD,
-                    }
-                ],
-                store=True,
+                store=False,
             )
             async for event in stream:
                 if event.type == "response.output_text.delta":
-                    received_output = True
                     yield StreamChunk(provider="openai", type="delta", text=event.delta)
                 elif event.type == "response.output_text.annotation.added":
-                    received_output = True
                     annotation = event.annotation
                     if isinstance(annotation, AnnotationURLCitation):
                         yield StreamChunk(
@@ -538,7 +471,6 @@ class LLMPipelineEntityClass:
                             sources=[Source(url=annotation.url, title=annotation.title)],
                         )
                 elif event.type == "response.code_interpreter_call_code.delta":
-                    received_output = True
                     yield StreamChunk(
                         provider="openai",
                         type="info",
@@ -548,7 +480,6 @@ class LLMPipelineEntityClass:
                         tool_language="python",
                     )
                 elif event.type == "response.output_item.done":
-                    received_output = True
                     item = event.item
                     if item.type == "code_interpreter_call":
                         outputs = item.outputs or []
@@ -589,23 +520,8 @@ class LLMPipelineEntityClass:
                             is_error=item.status == "failed",
                         )
                 elif event.type == "error":
-                    if self._should_restart_without_continuation(
-                        event,
-                        context=context,
-                        received_output=received_output,
-                        field_name="previous_response_id",
-                    ):
-                        async for chunk in self._openai_stream(
-                            prompt,
-                            thinking,
-                            SessionContext(messages=context.messages),
-                        ):
-                            yield chunk
-                        return
                     yield StreamChunk(provider="openai", type="error", text=event.message)
                     return
-                elif event.type == "response.completed":
-                    response_id = event.response.id
                 elif event.type == "response.failed":
                     error = event.response.error
                     yield StreamChunk(
@@ -625,78 +541,9 @@ class LLMPipelineEntityClass:
                     return
                 elif "_call" in event.type:
                     # web_search/code_interpreter/file_search/etc. lifecycle — informational.
-                    received_output = True
                     yield StreamChunk(provider="openai", type="info", info=event.type)
         except Exception as exc:  # surface provider errors as a stream event, don't crash the run
-            if self._should_restart_without_continuation(
-                exc,
-                context=context,
-                received_output=received_output,
-                field_name="previous_response_id",
-            ):
-                async for chunk in self._openai_stream(
-                    prompt,
-                    thinking,
-                    SessionContext(messages=context.messages),
-                ):
-                    yield chunk
-                return
             yield StreamChunk(provider="openai", type="error", text=str(exc))
             return
-        yield StreamChunk(
-            provider="openai",
-            type="done",
-            provider_response_id=response_id,
-        )
+        yield StreamChunk(provider="openai", type="done")
 
-    @staticmethod
-    def _should_restart_without_continuation(
-        error: object,
-        *,
-        context: SessionContext,
-        received_output: bool,
-        field_name: Literal["previous_response_id", "previous_interaction_id"],
-    ) -> bool:
-        """Decide whether to rerun from full history: a continuation was requested,
-        nothing streamed yet, and the provider rejected the continuation id."""
-        return (
-            context.previous_response_id is not None
-            and not received_output
-            and LLMPipelineEntityClass._is_unusable_continuation_error(
-                error,
-                field_name=field_name,
-            )
-        )
-
-    @staticmethod
-    def _is_unusable_continuation_error(
-        error: object,
-        *,
-        field_name: Literal["previous_response_id", "previous_interaction_id"],
-    ) -> bool:
-        """Recognize an expired/invalid provider continuation without broad retries."""
-        if error is None:
-            return False
-
-        body = getattr(error, "body", None)
-        code = getattr(error, "code", None)
-        message = getattr(error, "message", None)
-        details = " ".join(str(value) for value in (error, body, code, message) if value)
-        normalized = details.lower().replace("-", "_")
-        resource = "response" if field_name == "previous_response_id" else "interaction"
-        identifier_matches = field_name in normalized or f"previous {resource}" in normalized
-        failure_matches = any(
-            marker in normalized
-            for marker in (
-                "not found",
-                "expired",
-                "invalid",
-                "cannot be resolved",
-                "does not exist",
-            )
-        )
-        if identifier_matches and failure_matches:
-            return True
-
-        status_code = getattr(error, "status_code", None)
-        return status_code in {400, 404, 410} and resource in normalized and failure_matches

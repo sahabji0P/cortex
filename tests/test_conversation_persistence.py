@@ -24,7 +24,7 @@ from app.routers.cortex.service import CortexServiceV1Class
 
 class _ConversationFake:
     def __init__(self) -> None:
-        self.saved: list[tuple[list[dict[str, str]], str | None]] = []
+        self.saved: list[list[dict[str, str]]] = []
 
     async def create_turn(
         self,
@@ -33,12 +33,10 @@ class _ConversationFake:
         session_id: str,
         request_id: ObjectId,
         prompt: str,
-        provider_parent_response_id: str | None = None,
     ) -> SimpleNamespace:
         assert provider == "openai"
         assert session_id == "507f1f77bcf86cd799439011"
         assert isinstance(request_id, ObjectId)
-        assert provider_parent_response_id is None
         return SimpleNamespace(
             id=ObjectId(),
             parts=[{"type": "user", "text": prompt}],
@@ -48,9 +46,8 @@ class _ConversationFake:
         self,
         _turn_id: ObjectId,
         parts: list[dict[str, str]],
-        provider_response_id: str | None = None,
     ) -> None:
-        self.saved.append((parts.copy(), provider_response_id))
+        self.saved.append(parts.copy())
 
 
 class _DocDBFake:
@@ -106,8 +103,6 @@ def _turn(
     prompt: str,
     response: str,
     request_id: ObjectId | None,
-    response_id: str | None = None,
-    parent_response_id: str | None = None,
     done: bool = True,
     error: str | None = None,
 ) -> SessionTurn:
@@ -123,8 +118,6 @@ def _turn(
         provider=provider,
         parts=parts,
         request_id=request_id,
-        provider_response_id=response_id,
-        provider_parent_response_id=parent_response_id,
         session_id=ObjectId(),
         created_at="2026-07-14T00:00:00Z",
         updated_at="2026-07-14T00:00:00Z",
@@ -370,7 +363,6 @@ def test_context_groups_provider_fanout_and_prefers_target_provider() -> None:
             prompt="first",
             response="openai first",
             request_id=first_request,
-            response_id="resp_first",
         ),
         _turn(
             provider="gemini",
@@ -388,25 +380,6 @@ def test_context_groups_provider_fanout_and_prefers_target_provider() -> None:
         ContextMessage(role="user", content="second"),
         ContextMessage(role="assistant", content="gemini second"),
     )
-    assert context.previous_response_id is None
-
-
-def test_context_uses_latest_target_provider_response_id() -> None:
-    request_id = ObjectId()
-    context = ConversationEntityClass.build_context(
-        [
-            _turn(
-                provider="openai",
-                prompt="first",
-                response="answer",
-                request_id=request_id,
-                response_id="resp_latest",
-            )
-        ],
-        "openai",
-    )
-
-    assert context.previous_response_id == "resp_latest"
 
 
 def test_context_falls_back_from_failed_target_and_ignores_partial_output() -> None:
@@ -432,7 +405,6 @@ def test_context_falls_back_from_failed_target_and_ignores_partial_output() -> N
                 prompt="second",
                 response="truncated",
                 request_id=second_request,
-                response_id="must_not_resume",
                 done=False,
             ),
         ],
@@ -443,7 +415,6 @@ def test_context_falls_back_from_failed_target_and_ignores_partial_output() -> N
         ContextMessage(role="user", content="first"),
         ContextMessage(role="assistant", content="successful fallback"),
     )
-    assert context.previous_response_id is None
 
 
 def test_context_groups_legacy_fanout_without_random_request_ids() -> None:
@@ -463,32 +434,6 @@ def test_context_groups_legacy_fanout_without_random_request_ids() -> None:
         ContextMessage(role="user", content="same"),
         ContextMessage(role="assistant", content="o2"),
     )
-
-
-def test_context_rebuilds_after_concurrent_provider_continuation_branches() -> None:
-    turns = [
-        _turn(
-            provider="openai",
-            prompt="first branch",
-            response="first answer",
-            request_id=ObjectId(),
-            response_id="resp_branch_one",
-            parent_response_id="resp_parent",
-        ),
-        _turn(
-            provider="openai",
-            prompt="second branch",
-            response="second answer",
-            request_id=ObjectId(),
-            response_id="resp_branch_two",
-            parent_response_id="resp_parent",
-        ),
-    ]
-
-    context = ConversationEntityClass.build_context(turns, "openai")
-
-    assert context.previous_response_id is None
-    assert len(context.messages) == 4
 
 
 def test_sdk_history_builders_preserve_roles_and_append_current_prompt() -> None:
@@ -593,29 +538,22 @@ async def test_closing_stream_persists_partial_turn() -> None:
     await persisted_stream.aclose()
 
     assert fake.saved == [
-        (
-            [
-                {"type": "user", "text": "question"},
-                {"type": "text", "text": "partial"},
-            ],
-            None,
-        )
+        [
+            {"type": "user", "text": "question"},
+            {"type": "text", "text": "partial"},
+        ]
     ]
 
 
 @pytest.mark.asyncio
-async def test_completed_stream_persists_provider_response_id() -> None:
+async def test_completed_stream_persists_done_part() -> None:
     fake = _ConversationFake()
     pipeline = object.__new__(LLMPipelineEntityClass)
     pipeline._conversations = fake  # type: ignore[assignment]
 
     async def stream():
         yield StreamChunk(provider="openai", type="delta", text="answer")
-        yield StreamChunk(
-            provider="openai",
-            type="done",
-            provider_response_id="resp_saved",
-        )
+        yield StreamChunk(provider="openai", type="done")
 
     chunks = [
         chunk
@@ -630,19 +568,16 @@ async def test_completed_stream_persists_provider_response_id() -> None:
 
     assert [chunk.type for chunk in chunks] == ["delta", "done"]
     assert fake.saved == [
-        (
-            [
-                {"type": "user", "text": "question"},
-                {"type": "text", "text": "answer"},
-                {"type": "done"},
-            ],
-            "resp_saved",
-        )
+        [
+            {"type": "user", "text": "question"},
+            {"type": "text", "text": "answer"},
+            {"type": "done"},
+        ]
     ]
 
 
 @pytest.mark.asyncio
-async def test_openai_chain_uses_native_compaction_and_captures_response_id() -> None:
+async def test_openai_sends_full_mongo_history_and_never_stores() -> None:
     class _OpenAIFake:
         def __init__(self) -> None:
             self.kwargs: dict[str, object] = {}
@@ -651,67 +586,7 @@ async def test_openai_chain_uses_native_compaction_and_captures_response_id() ->
             self.kwargs = kwargs
 
             async def events():
-                yield SimpleNamespace(
-                    type="response.completed",
-                    response=SimpleNamespace(id="resp_new"),
-                )
-
-            return events()
-
-        build_text_input = staticmethod(OpenAIAdapterClass.build_text_input)
-        Tools = OpenAIAdapterClass.Tools
-
-    openai = _OpenAIFake()
-    pipeline = object.__new__(LLMPipelineEntityClass)
-    pipeline._openai = openai  # type: ignore[assignment]
-    context = SessionContext(previous_response_id="resp_previous", messages=())
-
-    chunks = [chunk async for chunk in pipeline._openai_stream("next question", None, context)]
-
-    assert openai.kwargs["input"] == "next question"
-    assert openai.kwargs["previous_response_id"] == "resp_previous"
-    assert openai.kwargs["store"] is True
-    assert openai.kwargs["context_management"] == [
-        {"type": "compaction", "compact_threshold": 150_000}
-    ]
-    assert chunks == [
-        StreamChunk(
-            provider="openai",
-            type="done",
-            provider_response_id="resp_new",
-        )
-    ]
-    assert "provider_response_id" not in chunks[0].model_dump()
-
-
-@pytest.mark.asyncio
-async def test_openai_expired_chain_retries_with_complete_mongo_history() -> None:
-    class _ExpiredResponseError(Exception):
-        status_code = 404
-
-        def __init__(self, message: str) -> None:
-            super().__init__(message)
-            self.body = {
-                "error": {
-                    "param": "previous_response_id",
-                    "message": "Previous response not found",
-                }
-            }
-
-    class _OpenAIFake:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, object]] = []
-
-        async def stream_response(self, **kwargs):
-            self.calls.append(kwargs)
-            if len(self.calls) == 1:
-                raise _ExpiredResponseError("Previous response not found")
-
-            async def events():
-                yield SimpleNamespace(
-                    type="response.completed",
-                    response=SimpleNamespace(id="resp_rebuilt"),
-                )
+                yield SimpleNamespace(type="response.output_text.delta", delta="answer")
 
             return events()
 
@@ -722,7 +597,6 @@ async def test_openai_expired_chain_retries_with_complete_mongo_history() -> Non
     pipeline = object.__new__(LLMPipelineEntityClass)
     pipeline._openai = openai  # type: ignore[assignment]
     context = SessionContext(
-        previous_response_id="resp_expired",
         messages=(
             ContextMessage(role="user", content="old question"),
             ContextMessage(role="assistant", content="old answer"),
@@ -731,15 +605,14 @@ async def test_openai_expired_chain_retries_with_complete_mongo_history() -> Non
 
     chunks = [chunk async for chunk in pipeline._openai_stream("new question", None, context)]
 
-    assert len(openai.calls) == 2
-    assert openai.calls[0]["input"] == "new question"
-    assert openai.calls[0]["previous_response_id"] == "resp_expired"
-    assert openai.calls[1]["input"] == [
+    assert openai.kwargs["input"] == [
         {"type": "message", "role": "user", "content": "old question"},
         {"type": "message", "role": "assistant", "content": "old answer"},
         {"type": "message", "role": "user", "content": "new question"},
     ]
-    assert chunks[-1].provider_response_id == "resp_rebuilt"
+    assert openai.kwargs["store"] is False
+    assert "previous_response_id" not in openai.kwargs
+    assert [chunk.type for chunk in chunks] == ["delta", "done"]
 
 
 @pytest.mark.asyncio
@@ -788,7 +661,7 @@ async def test_openai_noncompleted_terminal_events_are_errors_not_done(
 
 
 @pytest.mark.asyncio
-async def test_gemini_interactions_chain_falls_back_and_captures_new_id() -> None:
+async def test_gemini_interactions_sends_full_mongo_history_and_never_stores() -> None:
     class _GeminiFake:
         def __init__(self) -> None:
             self.calls: list[tuple[object, dict[str, object]]] = []
@@ -797,19 +670,10 @@ async def test_gemini_interactions_chain_falls_back_and_captures_new_id() -> Non
             self.calls.append((input, kwargs))
 
             async def events():
-                if len(self.calls) == 1:
-                    yield SimpleNamespace(
-                        event_type="error",
-                        error=SimpleNamespace(
-                            code="not_found",
-                            message="previous_interaction_id expired",
-                        ),
-                    )
-                else:
-                    yield SimpleNamespace(
-                        event_type="interaction.completed",
-                        interaction=SimpleNamespace(id="interaction_rebuilt"),
-                    )
+                yield SimpleNamespace(
+                    event_type="step.delta",
+                    delta=SimpleNamespace(type="thought", text="ignored"),
+                )
 
             return events()
 
@@ -820,7 +684,6 @@ async def test_gemini_interactions_chain_falls_back_and_captures_new_id() -> Non
     pipeline = object.__new__(LLMPipelineEntityClass)
     pipeline._gemini = gemini  # type: ignore[assignment]
     context = SessionContext(
-        previous_response_id="interaction_expired",
         messages=(
             ContextMessage(role="user", content="old question"),
             ContextMessage(role="assistant", content="old answer"),
@@ -836,19 +699,16 @@ async def test_gemini_interactions_chain_falls_back_and_captures_new_id() -> Non
         )
     ]
 
-    assert len(gemini.calls) == 2
-    first_input, first_kwargs = gemini.calls[0]
-    assert first_input == "new question"
-    assert first_kwargs["previous_interaction_id"] == "interaction_expired"
-    assert first_kwargs["store"] is True
-    second_input, second_kwargs = gemini.calls[1]
-    assert [step["type"] for step in second_input] == [
+    assert len(gemini.calls) == 1
+    provider_input, kwargs = gemini.calls[0]
+    assert [step["type"] for step in provider_input] == [
         "user_input",
         "model_output",
         "user_input",
     ]
-    assert second_kwargs["previous_interaction_id"] is None
-    assert chunks[-1].provider_response_id == "interaction_rebuilt"
+    assert kwargs["store"] is False
+    assert "previous_interaction_id" not in kwargs
+    assert [chunk.type for chunk in chunks] == ["info", "done"]
 
 
 @pytest.mark.asyncio
@@ -879,15 +739,3 @@ async def test_gemini_failed_status_is_error_not_done() -> None:
     ]
 
     assert [chunk.type for chunk in chunks] == ["error"]
-
-
-def test_continuation_detection_does_not_retry_unrelated_provider_errors() -> None:
-    error = SimpleNamespace(
-        status_code=404,
-        body={"error": {"message": "Model not found"}},
-    )
-
-    assert not LLMPipelineEntityClass._is_unusable_continuation_error(
-        error,
-        field_name="previous_response_id",
-    )

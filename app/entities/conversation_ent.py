@@ -48,8 +48,6 @@ class SessionTurn(_MongoModel):
     # nullable on reads instead of manufacturing a different id every time an old
     # document is deserialized; all newly-created turns still provide a real id.
     request_id: PydanticObjectId | None = None
-    provider_response_id: str | None = None
-    provider_parent_response_id: str | None = None
     created_at: datetime
     updated_at: datetime
     session_id: PydanticObjectId
@@ -64,7 +62,6 @@ class ContextMessage:
 @dataclass(frozen=True, slots=True)
 class SessionContext:
     messages: tuple[ContextMessage, ...]
-    previous_response_id: str | None = None
 
 
 def _object_id(value: str, resource: str) -> PydanticObjectId:
@@ -187,7 +184,6 @@ class ConversationEntityClass:
         session_id: str,
         request_id: PydanticObjectId,
         prompt: str,
-        provider_parent_response_id: str | None = None,
     ) -> SessionTurn:
         resolved_session_id = _object_id(session_id, "Session")
         now = datetime.now(UTC)
@@ -204,7 +200,6 @@ class ConversationEntityClass:
                     provider=provider,
                     parts=[{"type": "user", "text": prompt}],
                     request_id=request_id,
-                    provider_parent_response_id=provider_parent_response_id,
                     session_id=resolved_session_id,
                     created_at=now,
                     updated_at=now,
@@ -234,14 +229,11 @@ class ConversationEntityClass:
         self,
         turn_id: PydanticObjectId,
         parts: list[dict[str, str]],
-        provider_response_id: str | None = None,
     ) -> None:
         update_data: dict[str, object] = {
             "parts": parts,
             "updated_at": datetime.now(UTC),
         }
-        if provider_response_id is not None:
-            update_data["provider_response_id"] = provider_response_id
         task = asyncio.create_task(
             self._docdb.update(
                 SessionTurn,
@@ -329,38 +321,7 @@ class ConversationEntityClass:
                 )
             )
 
-        previous_response_id: str | None = None
-        if groups:
-            latest_target = next(
-                (
-                    turn
-                    for turn in groups[-1]
-                    if turn.provider == target_provider
-                    and ConversationEntityClass._completed_response(turn) is not None
-                ),
-                None,
-            )
-            if latest_target is not None:
-                previous_response_id = latest_target.provider_response_id
-                parent_response_id = latest_target.provider_parent_response_id
-                if parent_response_id is not None:
-                    sibling_branches = sum(
-                        1
-                        for turn in turns
-                        if turn.provider == target_provider
-                        and turn.provider_parent_response_id == parent_response_id
-                        and ConversationEntityClass._completed_response(turn) is not None
-                    )
-                    if sibling_branches > 1:
-                        # Concurrent workers branched from the same provider-side
-                        # continuation. Neither branch contains the other, so force the
-                        # next request to rebuild from the complete Mongo transcript.
-                        previous_response_id = None
-
-        return SessionContext(
-            messages=tuple(messages),
-            previous_response_id=previous_response_id,
-        )
+        return SessionContext(messages=tuple(messages))
 
     @staticmethod
     def _part_text(parts: Sequence[dict[str, str]], part_type: str) -> str:

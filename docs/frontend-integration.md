@@ -97,8 +97,8 @@ providers; their output streams back as it's generated.
 - Each provider run is persisted as a `SessionTurn` with an ObjectId `session_id`,
   provider, the user prompt plus compact ordered output parts, and server-managed
   timestamps. Prior turns are replayed as context on the next request in that session.
-  OpenAI and Gemini Interactions use provider-side continuation while available and
-  transparently rebuild that continuation from Mongo after provider retention expires.
+  All providers are stateless: the full transcript is rebuilt from Mongo on every
+  request and nothing is stored or continued provider-side.
 - `geminiMode` is optional. Allowed: `"generate_content"` (default) or
   `"interactions"`.
 - `geminiTools` is optional. Allowed: `"google_search"`, `"google_maps"`,
