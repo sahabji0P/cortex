@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HeyClicky — the closed half</title>
+<style>
+  :root{
+    --bg:#0b0f14; --bg2:#0f151c; --panel:#121a23; --panel2:#16212c;
+    --line:#233240; --line2:#2f4353;
+    --ink:#e7eef4; --ink-soft:#9fb1bf; --ink-dim:#6b8091;
+    --cyan:#4fd6c9; --cyan-dim:#1c3a3a;
+    --amber:#f0a552; --amber-dim:#3a2c17;
+    --violet:#9c8cf5; --violet-dim:#241f3d;
+    --red:#f0736b; --red-dim:#3a1f1e;
+    --green:#6fd08c; --blue:#5aa7f0;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --radius:14px; --shadow:0 24px 60px rgba(0,0,0,.45);
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#eef3f6; --bg2:#e6edf1; --panel:#ffffff; --panel2:#f4f8fa;
+      --line:#d3dee5; --line2:#bccbd5;
+      --ink:#12222d; --ink-soft:#41586a; --ink-dim:#6d8494;
+      --cyan:#0f9e91; --cyan-dim:#cdeeea; --amber:#c06d1a; --amber-dim:#f5e2c9;
+      --violet:#6a54d8; --violet-dim:#e4defb; --red:#c6423a; --red-dim:#f6d8d5;
+      --green:#2c9c56; --blue:#1d6fc2; --shadow:0 24px 60px rgba(24,52,72,.18);
+    }
+  }
+  :root[data-theme="light"]{
+      --bg:#eef3f6; --bg2:#e6edf1; --panel:#ffffff; --panel2:#f4f8fa;
+      --line:#d3dee5; --line2:#bccbd5; --ink:#12222d; --ink-soft:#41586a; --ink-dim:#6d8494;
+      --cyan:#0f9e91; --cyan-dim:#cdeeea; --amber:#c06d1a; --amber-dim:#f5e2c9;
+      --violet:#6a54d8; --violet-dim:#e4defb; --red:#c6423a; --red-dim:#f6d8d5;
+      --green:#2c9c56; --blue:#1d6fc2; --shadow:0 24px 60px rgba(24,52,72,.18);
+  }
+  :root[data-theme="dark"]{
+      --bg:#0b0f14; --bg2:#0f151c; --panel:#121a23; --panel2:#16212c;
+      --line:#233240; --line2:#2f4353; --ink:#e7eef4; --ink-soft:#9fb1bf; --ink-dim:#6b8091;
+      --cyan:#4fd6c9; --cyan-dim:#1c3a3a; --amber:#f0a552; --amber-dim:#3a2c17;
+      --violet:#9c8cf5; --violet-dim:#241f3d; --red:#f0736b; --red-dim:#3a1f1e;
+      --green:#6fd08c; --blue:#5aa7f0; --shadow:0 24px 60px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0; background:
+      radial-gradient(1100px 550px at 85% -10%, rgba(156,140,245,.08), transparent 60%),
+      radial-gradient(900px 500px at -10% 25%, rgba(79,214,201,.06), transparent 55%),
+      var(--bg);
+    color:var(--ink); font-family:var(--sans); line-height:1.6; -webkit-font-smoothing:antialiased}
+  a{color:var(--cyan); text-underline-offset:3px}
+  .wrap{max-width:1120px; margin:0 auto; padding:26px}
+  .mono{font-family:var(--mono)}
+  code,.kbd{font-family:var(--mono); font-size:.86em; background:var(--panel2);
+    border:1px solid var(--line); border-radius:6px; padding:.08em .4em; color:var(--ink)}
+  .topbar{display:flex; align-items:center; justify-content:space-between; gap:16px;
+    padding:14px 0 22px; flex-wrap:wrap}
+  .brand{display:flex; align-items:center; gap:12px; font-family:var(--mono);
+    font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-dim)}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--violet);
+    box-shadow:0 0 0 4px var(--violet-dim)}
+  .themebtn{font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+    background:var(--panel); color:var(--ink-soft); border:1px solid var(--line);
+    padding:8px 12px; border-radius:9px; cursor:pointer}
+  .hero{border:1px solid var(--line); border-radius:22px; padding:clamp(26px,4vw,52px);
+    background:linear-gradient(180deg,var(--panel),var(--bg2)); box-shadow:var(--shadow);
+    position:relative; overflow:hidden}
+  .eyebrow{font-family:var(--mono); font-size:12px; letter-spacing:.18em; text-transform:uppercase;
+    color:var(--violet); margin:0 0 14px}
+  h1{font-size:clamp(30px,5vw,52px); line-height:1.04; margin:0 0 16px; letter-spacing:-.02em; font-weight:800}
+  h1 .g{background:linear-gradient(90deg,var(--violet),var(--cyan)); -webkit-background-clip:text;
+    background-clip:text; color:transparent}
+  .lede{font-size:clamp(16px,2.2vw,20px); color:var(--ink-soft); max-width:72ch; margin:0}
+  .metarow{display:flex; gap:10px; flex-wrap:wrap; margin-top:22px}
+  .pill{font-family:var(--mono); font-size:11px; color:var(--ink-soft); background:var(--panel2);
+    border:1px solid var(--line); border-radius:999px; padding:7px 12px}
+  .pill b{color:var(--ink); font-weight:600}
+  section{margin-top:46px}
+  .kicker{font-family:var(--mono); font-size:11px; letter-spacing:.2em; text-transform:uppercase;
+    color:var(--ink-dim); display:flex; align-items:center; gap:10px; margin:0 0 10px}
+  .kicker::before{content:""; width:26px; height:1px; background:var(--line2)}
+  h2{font-size:clamp(22px,3.2vw,32px); margin:0 0 10px; letter-spacing:-.01em; font-weight:750}
+  h2 + p.sub{color:var(--ink-soft); margin:0 0 22px; max-width:76ch}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:22px}
+  .grid{display:grid; gap:16px}
+  @media(min-width:760px){.g2{grid-template-columns:1fr 1fr}}
+
+  /* open vs closed */
+  .split{display:grid; gap:16px}
+  @media(min-width:820px){.split{grid-template-columns:1fr 1.4fr}}
+  .half{border-radius:14px; padding:22px; border:1px solid var(--line)}
+  .half.open{background:var(--cyan-dim); border-color:var(--cyan)}
+  .half.closed{background:var(--violet-dim); border-color:var(--violet)}
+  .half h3{margin:0 0 4px; font-size:17px}
+  .half .lab{font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--ink-dim); margin-bottom:10px}
+  .half ul{margin:10px 0 0; padding-left:18px; color:var(--ink); font-size:14px}
+  .half li{margin:5px 0}
+  .half li b{font-family:var(--mono); font-weight:600; font-size:.92em}
+  .half .why{margin-top:12px; font-size:13px; color:var(--ink-soft); border-top:1px dashed var(--line2);
+    padding-top:10px}
+
+  /* PTT timeline */
+  .flow{position:relative; display:grid; gap:0}
+  .fstep{display:grid; grid-template-columns:56px 1fr; gap:0; cursor:pointer}
+  .fstep .rail{position:relative}
+  .fstep .rail::before{content:""; position:absolute; left:27px; top:0; bottom:0; width:2px; background:var(--line)}
+  .fstep:first-child .rail::before{top:22px}
+  .fstep:last-child .rail::before{bottom:auto; height:22px}
+  .fstep .node{position:absolute; left:18px; top:14px; width:20px; height:20px; border-radius:50%;
+    background:var(--panel); border:2px solid var(--line2); z-index:1; transition:.2s;
+    display:flex; align-items:center; justify-content:center; font-size:9px; color:var(--ink-dim);
+    font-family:var(--mono)}
+  .fstep.active .node{border-color:var(--cyan); background:var(--cyan); color:#04211d; font-weight:700}
+  .fstep .body{padding:10px 0 10px 8px}
+  .fstep .head{display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; padding:8px 12px;
+    border:1px solid transparent; border-radius:10px; transition:.15s}
+  .fstep:hover .head{background:var(--panel)}
+  .fstep.active .head{background:var(--panel); border-color:var(--cyan)}
+  .fstep .t{font-weight:650; font-size:15.5px}
+  .fstep .phase{font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--cyan)}
+  .fstep .detail{display:none; margin:8px 0 6px 12px; padding:14px 16px; background:var(--panel);
+    border:1px solid var(--line); border-left:3px solid var(--cyan); border-radius:10px;
+    font-size:14px; color:var(--ink-soft)}
+  .fstep.active .detail{display:block}
+  .fstep .detail code{color:var(--cyan)}
+  .ev{display:block; margin-top:8px; font-family:var(--mono); font-size:11.5px; color:var(--ink-dim);
+    border-top:1px dashed var(--line); padding-top:8px}
+  .ev b{color:var(--amber); font-weight:600}
+
+  /* beat language */
+  .beatgrid{display:grid; gap:10px}
+  @media(min-width:700px){.beatgrid{grid-template-columns:1fr 1fr}}
+  .beat{background:var(--panel); border:1px solid var(--line); border-radius:11px; padding:14px 16px}
+  .beat .sig{font-family:var(--mono); font-size:13px; color:var(--amber); margin-bottom:6px; word-break:break-all}
+  .beat p{margin:0; font-size:13.5px; color:var(--ink-soft)}
+  .codeblock{font-family:var(--mono); font-size:12.5px; background:var(--bg2); border:1px solid var(--line);
+    border-radius:10px; padding:16px; overflow-x:auto; color:var(--ink-soft); white-space:pre; margin:0}
+  .codeblock .t{color:var(--cyan)} .codeblock .s{color:var(--amber)} .codeblock .c{color:var(--ink-dim)}
+
+  .note{border-radius:12px; padding:16px 18px; border:1px solid var(--line); background:var(--panel);
+    display:flex; gap:14px; align-items:flex-start}
+  .note .ic{font-family:var(--mono); font-weight:700; font-size:13px; padding:3px 9px; border-radius:7px; white-space:nowrap}
+  .note.amber{border-color:var(--amber); background:var(--amber-dim)}
+  .note.amber .ic{background:var(--amber); color:#241606}
+  .note.cyan{border-color:var(--cyan); background:var(--cyan-dim)}
+  .note.cyan .ic{background:var(--cyan); color:#04211d}
+  .note.violet{border-color:var(--violet); background:var(--violet-dim)}
+  .note.violet .ic{background:var(--violet); color:#160f33}
+  .note p{margin:0; font-size:14.5px; color:var(--ink)}
+
+  .tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:12px}
+  table{border-collapse:collapse; width:100%; font-size:14px; min-width:560px}
+  th,td{text-align:left; padding:11px 14px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{font-family:var(--mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--ink-dim); background:var(--panel2)}
+  tbody tr:last-child td{border-bottom:none}
+
+  .imp{display:grid; gap:14px}
+  @media(min-width:760px){.imp{grid-template-columns:1fr 1fr}}
+  .impcard{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px}
+  .impcard .h{display:flex; align-items:center; gap:10px; margin-bottom:8px}
+  .impcard .h b{font-size:15px}
+  .impcard .badge{font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+    padding:3px 8px; border-radius:6px; background:var(--violet-dim); color:var(--violet); border:1px solid var(--violet)}
+  .impcard p{margin:0; color:var(--ink-soft); font-size:14px}
+  footer{margin:56px 0 20px; color:var(--ink-dim); font-size:12.5px; font-family:var(--mono);
+    text-align:center; letter-spacing:.04em}
+  .opinion{font-size:15.5px; color:var(--ink); max-width:78ch}
+  .opinion p{margin:0 0 14px}
+  .opinion b{color:var(--cyan)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> Cortex · Research Field Note · Part 2</div>
+    <button class="themebtn" id="themebtn">◐ Theme</button>
+  </div>
+
+  <header class="hero">
+    <p class="eyebrow">Binary teardown · the proprietary half · 22 Jul 2026</p>
+    <h1>HeyClicky:<br><span class="g">the closed half</span></h1>
+    <p class="lede">Part 1 covered the open piece — the MIT-licensed cua-driver that clicks apps in the
+      background. This is the other half: the <b>push-to-talk → cursor-companion → circle-anything →
+      region-focused-answer</b> flow you experienced. None of it is open source — the app's own binary
+      embeds build paths from a repo literally named <span class="kbd">clicky-closed</span>. Everything
+      below is reconstructed from strings, class names, and prompt text inside the signed
+      HeyClicky&nbsp;1.0.42 binary on this Mac.</p>
+    <div class="metarow">
+      <span class="pill">source · <b>HeyClicky binary (46 MB, arm64)</b></span>
+      <span class="pill">repo path · <b>clicky-closed/leanring-buddy</b></span>
+      <span class="pill">voice · <b>gpt-realtime-2.1 + Deepgram</b></span>
+      <span class="pill">capture · <b>ScreenCaptureKit</b></span>
+    </div>
+  </header>
+
+  <!-- OPEN VS CLOSED -->
+  <section>
+    <p class="kicker">Your first question</p>
+    <h2>What's public, what isn't</h2>
+    <p class="sub">The split is deliberate — and the closed side is where the product actually lives.</p>
+    <div class="split">
+      <div class="half open">
+        <div class="lab">Open · MIT · trycua/cua</div>
+        <h3>The hands</h3>
+        <ul>
+          <li><b>cua-driver</b> — AX-tree snapshots, element-index clicks, background input</li>
+          <li><b>ClickyComputerUseRuntime</b> — their build of it, bundled as a helper</li>
+          <li><b>Skill docs</b> — SKILL.md / WEB_APPS.md / RECORDING.md ship readable in the bundle</li>
+        </ul>
+        <div class="why">Commodity layer. Anyone can click an AX element; open-sourcing it buys ecosystem
+          goodwill and costs nothing competitively.</div>
+      </div>
+      <div class="half closed">
+        <div class="lab">Closed · clicky-closed/leanring-buddy</div>
+        <h3>The eyes, ears, and voice — the whole experience</h3>
+        <ul>
+          <li><b>GlobalPushToTalkShortcutMonitor</b> — CGEvent tap on modifier+mouse events (the hold-ctrl-option gate)</li>
+          <li><b>OverlayWindow(Manager)</b> — transparent windows on every display (<span class="kbd">overlayWindowsByScreenID</span>)</li>
+          <li><b>BlueCursorView</b> — the companion at your pointer: waveform, spinner, stop icon, guided-target states</li>
+          <li><b>ScreenAnnotationManager / CanvasView / Overlay</b> — your ink: strokes, shape classification, dwell events</li>
+          <li><b>AnnotationAccessibilityHarvester</b> — pulls real AX strings/URLs from inside your circle</li>
+          <li><b>Realtime voice stack</b> — OpenAI Realtime + Deepgram sockets, AEC, tool calls, Spotify control</li>
+          <li><b>The beat language + parser</b> — how the model draws back on your screen (below)</li>
+          <li><b>All prompts, HUD, worker API</b> (api.heyclicky.com), Supabase auth, escalation to a "higher model"</li>
+        </ul>
+        <div class="why">This is the moat: not the clicking, but the <i>interaction grammar</i> — voice +
+          pointer + ink fused into one turn.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE FLOW -->
+  <section>
+    <p class="kicker">Your second question — traced end to end</p>
+    <h2>What happens when you hold the key and circle something</h2>
+    <p class="sub">Click each step. <span class="mono" style="color:var(--amber)">EVIDENCE</span> lines are
+      strings or symbols found verbatim in the binary.</p>
+
+    <div class="flow" id="flow">
+      <div class="fstep active">
+        <div class="rail"><div class="node">1</div></div>
+        <div class="body">
+          <div class="head"><span class="phase">Hold</span><span class="t">You press and hold ctrl + option</span></div>
+          <div class="detail">A global <b>CGEvent tap</b> — installed system-wide, watching modifier and mouse
+            events — recognizes the chord. A chime plays, and a realtime voice session opens (or a warm one is
+            reused). Nothing was watching before this: capture is strictly gated on the hotkey.
+            <span class="ev"><b>EVIDENCE</b> · "Global push-to-talk: couldn't create modifier/mouse event tap" ·
+            "[Realtime] PTT begin: reusing healthy session" · "I only see your screen when you press the hotkey." ·
+            marketing copy in-binary: "hold ctrl+option and talk about anything on screen"</span></div>
+        </div>
+      </div>
+      <div class="fstep">
+        <div class="rail"><div class="node">2</div></div>
+        <div class="body">
+          <div class="head"><span class="phase">Follow</span><span class="t">A companion appears at your pointer — and follows it</span></div>
+          <div class="detail">The <code>OverlayWindowManager</code> raises a transparent, click-through
+            <code>OverlayWindow</code> on <b>every connected display</b>. Riding on it is
+            <code>BlueCursorView</code> — the blue thing at your cursor — with a live <b>waveform</b> while you
+            speak, a spinner while it thinks, a stop icon. It tracks you via a mouse-location polling timer +
+            <code>NSTrackingArea</code>. So "it knows where my trackpad is" = the app polls the global pointer
+            position the whole time the chord is held. It is <b>not</b> streaming video anywhere at this point —
+            it's just following the pointer.
+            <span class="ev"><b>EVIDENCE</b> · symbols: <code>OverlayWindowManager.overlayWindowsByScreenID</code>,
+            <code>BlueCursorWaveformView</code>, <code>BlueCursorSpinnerView</code>,
+            <code>mouseLocationPollingTimer</code>, <code>_lastObservedMouseLocation</code>, <code>NSTrackingArea</code></span></div>
+        </div>
+      </div>
+      <div class="fstep">
+        <div class="rail"><div class="node">3</div></div>
+        <div class="body">
+          <div class="head"><span class="phase">Speak</span><span class="t">Your voice streams live over two socket rails</span></div>
+          <div class="detail">Audio goes to <b>OpenAI's Realtime API</b>
+            (<code>wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1</code>) for the conversational
+            assistant, and <b>Deepgram</b> (<code>wss://api.deepgram.com/v1/listen</code>) powers the dictation
+            rail. There's real acoustic-echo-cancellation plumbing so it can hear you over its own speech.
+            <span class="ev"><b>EVIDENCE</b> · both wss URLs verbatim · "gpt-realtime-2.1" ·
+            "[Realtime] AEC topology verdict stored" · <code>DictationDeepgramTranscriber.swift</code></span></div>
+        </div>
+      </div>
+      <div class="fstep">
+        <div class="rail"><div class="node">4</div></div>
+        <div class="body">
+          <div class="head"><span class="phase">Draw</span><span class="t">Moving the pointer while holding = ink on the overlay</span></div>
+          <div class="detail">The overlay window doubles as a canvas. <code>ScreenAnnotationManager</code>
+            records your <b>strokes</b> and classifies their shape — an enclosing loop ("circled the …") vs a
+            line ("drew a line across the …"). It also records <b>dwell events</b>: pause the pointer somewhere
+            (there's a dwell radius + minimum duration) and that hover itself becomes part of the gesture — you
+            can <i>point</i> without drawing. All of this is compressed into a "PTT gesture summary."
+            <span class="ev"><b>EVIDENCE</b> · <code>ScreenAnnotationManager.Stroke/.StrokeShape/.DwellEvent</code> ·
+            <code>dwellRadius</code>, <code>dwellMinimumDuration</code>, <code>dwell_ms</code> ·
+            "[Annotation] PTT gesture summary:" · "circled the", "scribbled over the", "drew a line from the",
+            "had no enclosing shape"</span></div>
+        </div>
+      </div>
+      <div class="fstep">
+        <div class="rail"><div class="node">5</div></div>
+        <div class="body">
+          <div class="head"><span class="phase">Release</span><span class="t">Key up → NOW the screen is captured</span></div>
+          <div class="detail">This answers "how is it capturing the screen at that point": it mostly isn't,
+            until you let go. On key-up the audio commits (with a ~400&nbsp;ms tail) and a
+            <b>ScreenCaptureKit</b> capture fires — a still capture of the screen, persisted <b>with your drawn
+            highlight baked into the image</b>. Multi-display is handled (the coordinate grammar carries a
+            <code>screenN</code> suffix). So: not a continuous recording — a per-turn photograph, taken at the
+            moment your question ends.
+            <span class="ev"><b>EVIDENCE</b> · <code>SCShareableContent</code>, <code>SCStreamConfiguration</code> ·
+            "[Realtime] PTT end tail cancelled after screen capture" · "PTT end: scheduling 400ms tail, then commit" ·
+            "failed to persist annotated capture" · "screenshot images show their screen WITH the drawn highlight" ·
+            regex fragment <code>(?::screen(\d+))?</code></span></div>
+        </div>
+      </div>
+      <div class="fstep">
+        <div class="rail"><div class="node">6</div></div>
+        <div class="body">
+          <div class="head"><span class="phase">Harvest</span><span class="t">The circled region gets a second, structural read</span></div>
+          <div class="detail">Here's the trick that makes region answers precise: an
+            <code>AnnotationAccessibilityHarvester</code> walks the <b>accessibility tree inside your circle</b>
+            and extracts the real element strings and URLs. The model is told to trust those over its own OCR:
+            <i>"Accessibility data inside the highlighted region (use these exact strings/URLs when relevant,
+            don't re-read them from the image)."</i> Pixels for context, AX for ground truth.
+            <span class="ev"><b>EVIDENCE</b> · <code>AnnotationAccessibilityHarvester.HarvestedElement</code> ·
+            "[Annotation] AX context:" · the quoted prompt string verbatim</span></div>
+        </div>
+      </div>
+      <div class="fstep">
+        <div class="rail"><div class="node">7</div></div>
+        <div class="body">
+          <div class="head"><span class="phase">Answer</span><span class="t">The model is ordered to focus on what you marked</span></div>
+          <div class="detail">The turn ships: annotated screenshot(s) + gesture summary + harvested AX
+            elements + your transcript. The prompt is blunt: <i>"look at the highlighted region and answer
+            their actual question about it, brief and specific. Do not deflect and do not say you can't see the
+            screen"</i> — and <i>"focus on what they marked."</i> That's why the response locks onto your circle
+            and nothing else. Harder questions escalate over <code>/chat-tool-call</code> to a "higher model"
+            with explicit <code>annotation_elements</code> and <code>annotation_gesture</code> payload fields.
+            <span class="ev"><b>EVIDENCE</b> · both prompt strings verbatim · "higher model annotation_elements:" ·
+            "[Realtime] /chat-tool-call raw response"</span></div>
+        </div>
+      </div>
+      <div class="fstep">
+        <div class="rail"><div class="node">8</div></div>
+        <div class="body">
+          <div class="head"><span class="phase">Draw back</span><span class="t">…and it can annotate your screen in return</span></div>
+          <div class="detail">The response isn't only speech. The model emits <b>tag-first "beat" lines with
+            pixel coordinates</b> — a little drawing language (next section) that Swift parses with regexes and
+            renders on the same overlay: rings around targets, arrows for motion, highlights for work areas.
+            Walkthroughs loop: after you act, it <b>re-captures</b>, verifies your click landed, and moves to the
+            next beat — with rules against re-pointing at the same button twice.
+            <span class="ev"><b>EVIDENCE</b> · parse regexes for <code>[POINT:…]</code> / <code>[SHAPE:…]</code> ·
+            "run screenshot walkthrough beats=… captures=…" · "Do not repeat completed targets unless the new
+            screenshot proves the action failed"</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- BEAT LANGUAGE -->
+  <section>
+    <p class="kicker">The proprietary grammar</p>
+    <h2>The beat language — how a model draws on your Mac</h2>
+    <p class="sub">Reverse-engineered from the parser regexes and prompt instructions in the binary. Each
+      "beat" is one tag-first line; Swift renders the tag, and the sentence after it is spoken/shown.</p>
+    <div class="beatgrid">
+      <div class="beat"><div class="sig">[TARGET:x,y,r:label]</div>
+        <p>A click target — ring at (x,y) radius r. Only for the ONE next action the app can observe,
+          re-capture, and verify. "The TARGET sentence must contain only that one immediate action."</p></div>
+      <div class="beat"><div class="sig">[HOVER:x,y,r:label]</div>
+        <p>Same, for hover-reveals the app can detect ("Hovered guided target").</p></div>
+      <div class="beat"><div class="sig">[POINT:x,y:label] · [POINT:none]</div>
+        <p>Point at an exact handle/control without demanding a click. <code>none</code> = explicitly no visual
+          this turn. Optional <code>:screenN</code> suffix for multi-display.</p></div>
+      <div class="beat"><div class="sig">[HIGHLIGHT]</div>
+        <p>Marks the general work area for manual tasks (typing, dragging a knob, picking a color) — used
+          when faking a click target would be dishonest.</p></div>
+      <div class="beat"><div class="sig">[SHAPE:circle:cx,cy;ex,ey:label]</div>
+        <p>An enclosing ring: center + a point on the edge "just past the thing." The same vocabulary you use
+          when you circle — now spoken back at you.</p></div>
+      <div class="beat"><div class="sig">[SHAPE:line|arrow|curve|polygon:…]</div>
+        <p>Motion and region shapes — arrows for "drag from here to here," polygons for irregular areas.</p></div>
+    </div>
+    <div style="margin-top:14px">
+    <pre class="codeblock"><span class="c">// prompt excerpt, verbatim from the binary:</span>
+<span class="s">"Use exactly one tag-first [TARGET:x,y,r:label] or [HOVER:x,y,r:label] only when the
+ next visible step is a click/tap/focus/commit or hover reveal that Swift can observe,
+ recapture, and continue from. Example: [TARGET:120,210,40:add modifier] Click Add
+ Modifier to open the list. … If the next step is manual work Swift cannot reliably
+ detect as complete … do NOT fake a target. Use [HIGHLIGHT] for the work area, [POINT]
+ for the exact handle/control, and [SHAPE:arrow] or [SHAPE:curve] for the motion."</span></pre>
+    </div>
+    <div class="note cyan" style="margin-top:14px"><span class="ic">SHARP</span>
+      <p>Notice the honesty rule baked into the grammar: a <b>TARGET</b> is only allowed when the app can
+        <i>verify completion from a fresh capture</i>. Anything it can't verify gets downgraded to
+        HIGHLIGHT/POINT + words. Capability truthfulness enforced at the protocol level — same philosophy as
+        hiding the recording tools in Part 1.</p>
+    </div>
+  </section>
+
+  <!-- PRIVACY / CAPTURE MODEL -->
+  <section>
+    <p class="kicker">"Is it recording the screen?"</p>
+    <h2>The capture model, precisely</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Moment</th><th>What's captured</th><th>Where it goes</th></tr></thead>
+        <tbody>
+          <tr><td>Before the hotkey</td><td>Nothing — "I only see your screen when you press the hotkey"</td><td>—</td></tr>
+          <tr><td>While holding</td><td>Pointer position (local overlay tracking) + mic audio</td><td>Audio → OpenAI Realtime / Deepgram sockets</td></tr>
+          <tr><td>On release</td><td>One ScreenCaptureKit still, annotated with your ink</td><td>Model turn (+ persisted locally for the worker)</td></tr>
+          <tr><td>During a walkthrough</td><td>Fresh stills after each of your actions, to verify beats</td><td>Follow-up model turns</td></tr>
+          <tr><td>Background tasks</td><td>Separate plane — the Part-1 cua-driver window snapshots</td><td>Codex worker threads</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note amber" style="margin-top:14px"><span class="ic">SO</span>
+      <p><b>Event-gated stills, not a video stream.</b> The "recording" feeling comes from three overlays
+        composited live and locally (cursor companion, your ink, its beats) — while actual pixel egress is a
+        photograph per conversational turn. That's a much easier privacy story than continuous capture, and
+        it's the design worth copying.</p>
+    </div>
+  </section>
+
+  <!-- OPINION -->
+  <section>
+    <p class="kicker">What I think about it</p>
+    <h2>Read on the strategy — and on us</h2>
+    <div class="card opinion">
+      <p><b>The open/closed split is the tell.</b> They open-sourced the layer that was already a commodity
+        (background clicking via AX) and kept every gram of the experience: the hotkey gate, the cursor
+        companion, the ink pipeline, the AX harvest, the beat grammar, the voice stack. The moat isn't
+        "can an AI click a button" — it's that <i>voice + pointer + ink arrive at the model as one fused
+        gesture</i>. Nobody else's turn contains "the user said X while circling Y and pausing over Z."</p>
+      <p><b>The engineering is disciplined, not exotic.</b> Every piece is a standard macOS primitive —
+        CGEvent tap, transparent NSWindows, ScreenCaptureKit stills, an AX walk — composed with unusual care
+        (dwell detection, echo cancellation, verify-before-next-beat, don't-repeat-targets). Which means the
+        flow is <b>fully replicable for Cortex</b>; what takes taste is the grammar and the restraint.</p>
+      <p><b>Two dependencies worth noting:</b> the assistant personality currently rides on OpenAI's Realtime
+        API (gpt-realtime-2.1) with Deepgram as the second rail — a real vendor coupling — and heavier turns
+        route through their worker at api.heyclicky.com, so the "local" app has a cloud spine.</p>
+    </div>
+    <div class="imp" style="margin-top:16px">
+      <div class="impcard"><div class="h"><span class="badge">adopt</span><b>The fused turn</b></div>
+        <p>Cortex's screen plane should treat {transcript + gesture summary + annotated still + region AX
+          harvest} as ONE input event. This is the single highest-leverage idea in the teardown.</p></div>
+      <div class="impcard"><div class="h"><span class="badge">adopt</span><b>Event-gated capture</b></div>
+        <p>Never stream. Capture on turn boundaries, gate on an explicit hold, and be able to say the
+          sentence "it only sees when you press."</p></div>
+      <div class="impcard"><div class="h"><span class="badge">adopt</span><b>AX inside the ink</b></div>
+        <p>The circle isn't just a crop hint — harvest the accessibility elements under it and hand the model
+          ground-truth strings. Pixels orient, structure answers.</p></div>
+      <div class="impcard"><div class="h"><span class="badge">design</span><b>A beat-like output grammar</b></div>
+        <p>Define our own tag-first visual protocol early — with the same honesty rule (only promise a target
+          you can verify). It doubles as the UI contract between model and native host.</p></div>
+    </div>
+  </section>
+
+  <!-- SOURCES -->
+  <section>
+    <p class="kicker">Provenance</p>
+    <h2>Evidence trail</h2>
+    <div class="card" style="font-size:14px; color:var(--ink-soft)">
+      All findings are from <b>this Mac</b>: strings/symbols extracted from
+      <code>/Applications/HeyClicky.app/Contents/MacOS/HeyClicky</code> (46&nbsp;MB arm64 slice, v1.0.42
+      build&nbsp;51), <code>Contents/Info.plist</code> (permission strings, API endpoints, worker URL, Sparkle
+      feed), and <code>Contents/Helpers/ClickyComputerUseRuntime</code>. Embedded compile paths
+      (<code>/Users/nilesh/…/clicky-closed/leanring-buddy/*.swift</code>) establish the closed repo; the
+      Sparkle appcast at <a href="https://farzaa.github.io/clicky-releases/appcast.xml">farzaa.github.io/clicky-releases</a>
+      carries no release notes. Companion docs: <a href="heyclicky-screen-perception.html">Part 1 — screen
+      perception

@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How HeyClicky sees the screen</title>
+<style>
+  :root{
+    --bg:#0b0f14; --bg2:#0f151c; --panel:#121a23; --panel2:#16212c;
+    --line:#233240; --line2:#2f4353;
+    --ink:#e7eef4; --ink-soft:#9fb1bf; --ink-dim:#6b8091;
+    --cyan:#4fd6c9; --cyan-dim:#1c3a3a;
+    --amber:#f0a552; --amber-dim:#3a2c17;
+    --violet:#9c8cf5; --violet-dim:#241f3d;
+    --red:#f0736b; --red-dim:#3a1f1e;
+    --green:#6fd08c;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --radius:14px; --shadow:0 24px 60px rgba(0,0,0,.45);
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#eef3f6; --bg2:#e6edf1; --panel:#ffffff; --panel2:#f4f8fa;
+      --line:#d3dee5; --line2:#bccbd5;
+      --ink:#12222d; --ink-soft:#41586a; --ink-dim:#6d8494;
+      --cyan:#0f9e91; --cyan-dim:#cdeeea;
+      --amber:#c06d1a; --amber-dim:#f5e2c9;
+      --violet:#6a54d8; --violet-dim:#e4defb;
+      --red:#c6423a; --red-dim:#f6d8d5;
+      --green:#2c9c56;
+      --shadow:0 24px 60px rgba(24,52,72,.18);
+    }
+  }
+  :root[data-theme="light"]{
+      --bg:#eef3f6; --bg2:#e6edf1; --panel:#ffffff; --panel2:#f4f8fa;
+      --line:#d3dee5; --line2:#bccbd5;
+      --ink:#12222d; --ink-soft:#41586a; --ink-dim:#6d8494;
+      --cyan:#0f9e91; --cyan-dim:#cdeeea; --amber:#c06d1a; --amber-dim:#f5e2c9;
+      --violet:#6a54d8; --violet-dim:#e4defb; --red:#c6423a; --red-dim:#f6d8d5;
+      --green:#2c9c56; --shadow:0 24px 60px rgba(24,52,72,.18);
+  }
+  :root[data-theme="dark"]{
+      --bg:#0b0f14; --bg2:#0f151c; --panel:#121a23; --panel2:#16212c;
+      --line:#233240; --line2:#2f4353; --ink:#e7eef4; --ink-soft:#9fb1bf; --ink-dim:#6b8091;
+      --cyan:#4fd6c9; --cyan-dim:#1c3a3a; --amber:#f0a552; --amber-dim:#3a2c17;
+      --violet:#9c8cf5; --violet-dim:#241f3d; --red:#f0736b; --red-dim:#3a1f1e;
+      --green:#6fd08c; --shadow:0 24px 60px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(79,214,201,.07), transparent 60%),
+      radial-gradient(900px 500px at -10% 20%, rgba(156,140,245,.06), transparent 55%),
+      var(--bg);
+    color:var(--ink); font-family:var(--sans); line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--cyan); text-underline-offset:3px}
+  .wrap{max-width:1120px; margin:0 auto; padding:26px}
+  .mono{font-family:var(--mono)}
+  .kbd,code{font-family:var(--mono); font-size:.86em; background:var(--panel2);
+    border:1px solid var(--line); border-radius:6px; padding:.08em .4em; color:var(--ink)}
+
+  /* ---- top bar ---- */
+  .topbar{display:flex; align-items:center; justify-content:space-between; gap:16px;
+    padding:14px 0 22px; flex-wrap:wrap}
+  .brand{display:flex; align-items:center; gap:12px; font-family:var(--mono);
+    font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-dim)}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--cyan);
+    box-shadow:0 0 0 4px var(--cyan-dim)}
+  .themebtn{font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+    background:var(--panel); color:var(--ink-soft); border:1px solid var(--line);
+    padding:8px 12px; border-radius:9px; cursor:pointer}
+  .themebtn:hover{border-color:var(--line2); color:var(--ink)}
+
+  /* ---- hero ---- */
+  .hero{border:1px solid var(--line); border-radius:22px; padding:clamp(26px,4vw,52px);
+    background:linear-gradient(180deg,var(--panel),var(--bg2)); box-shadow:var(--shadow);
+    position:relative; overflow:hidden}
+  .hero::after{content:""; position:absolute; inset:0;
+    background:repeating-linear-gradient(0deg,transparent 0 26px,rgba(127,160,180,.05) 27px 28px);
+    pointer-events:none; mask:linear-gradient(90deg,transparent,#000 70%)}
+  .eyebrow{font-family:var(--mono); font-size:12px; letter-spacing:.18em; text-transform:uppercase;
+    color:var(--cyan); margin:0 0 14px}
+  h1{font-size:clamp(30px,5vw,52px); line-height:1.04; margin:0 0 16px; letter-spacing:-.02em;
+    font-weight:800}
+  h1 .g{background:linear-gradient(90deg,var(--cyan),var(--violet)); -webkit-background-clip:text;
+    background-clip:text; color:transparent}
+  .lede{font-size:clamp(16px,2.2vw,20px); color:var(--ink-soft); max-width:70ch; margin:0}
+  .metarow{display:flex; gap:10px; flex-wrap:wrap; margin-top:22px; position:relative; z-index:1}
+  .pill{font-family:var(--mono); font-size:11px; letter-spacing:.06em; color:var(--ink-soft);
+    background:var(--panel2); border:1px solid var(--line); border-radius:999px; padding:7px 12px}
+  .pill b{color:var(--ink); font-weight:600}
+
+  /* ---- section scaffold ---- */
+  section{margin-top:46px}
+  .kicker{font-family:var(--mono); font-size:11px; letter-spacing:.2em; text-transform:uppercase;
+    color:var(--ink-dim); display:flex; align-items:center; gap:10px; margin:0 0 10px}
+  .kicker::before{content:""; width:26px; height:1px; background:var(--line2)}
+  h2{font-size:clamp(22px,3.2vw,32px); margin:0 0 10px; letter-spacing:-.01em; font-weight:750}
+  h2 + p.sub{color:var(--ink-soft); margin:0 0 22px; max-width:74ch}
+
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:22px}
+  .grid{display:grid; gap:16px}
+  @media(min-width:760px){.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}}
+
+  /* ---- TL;DR ---- */
+  .tldr{display:grid; gap:14px}
+  .tldr .row{display:flex; gap:14px; align-items:flex-start; padding:14px 16px;
+    background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--cyan);
+    border-radius:10px}
+  .tldr .n{font-family:var(--mono); color:var(--cyan); font-weight:700; font-size:14px; min-width:22px}
+  .tldr .row b{color:var(--ink)}
+  .tldr .row span{color:var(--ink-soft)}
+
+  /* ---- cursor demo ---- */
+  .demoStage{position:relative; border:1px solid var(--line2); border-radius:16px;
+    background:
+      linear-gradient(180deg,var(--panel2),var(--bg2));
+    overflow:hidden; padding:0}
+  .desktopbar{height:30px; display:flex; align-items:center; gap:7px; padding:0 12px;
+    border-bottom:1px solid var(--line); background:var(--panel);
+    font-family:var(--mono); font-size:11px; color:var(--ink-dim)}
+  .tl{width:11px;height:11px;border-radius:50%}
+  .appwin{position:absolute; left:5%; top:64px; width:min(360px,64%); background:var(--panel);
+    border:1px solid var(--line2); border-radius:12px; box-shadow:var(--shadow); overflow:hidden}
+  .appwin .title{height:28px; display:flex; align-items:center; padding:0 10px; gap:6px;
+    background:var(--panel2); border-bottom:1px solid var(--line); font-size:11px;
+    color:var(--ink-soft); font-family:var(--mono)}
+  .appbody{padding:16px; display:grid; gap:10px}
+  .btnrow{display:flex; gap:10px; flex-wrap:wrap}
+  .fakebtn{border:1px solid var(--line2); background:var(--panel2); color:var(--ink);
+    padding:9px 14px; border-radius:9px; font-size:13px; cursor:pointer; transition:.15s}
+  .fakebtn[data-primary]{background:var(--cyan-dim); border-color:var(--cyan); color:var(--ink)}
+  .fakebtn:hover{border-color:var(--cyan)}
+  .fakefield{border:1px solid var(--line2); background:var(--bg2); border-radius:9px;
+    padding:9px 12px; font-size:13px; color:var(--ink-dim); font-family:var(--mono)}
+  .stageHalf{min-height:340px; position:relative}
+  #agentCursor{position:absolute; left:0; top:0; width:26px; height:26px; pointer-events:none;
+    transform:translate(-4px,-2px); filter:drop-shadow(0 3px 6px rgba(0,0,0,.5)); z-index:5;
+    opacity:0; transition:opacity .4s}
+  #ripple{position:absolute; width:10px; height:10px; border-radius:50%; pointer-events:none;
+    border:2px solid var(--cyan); left:0; top:0; opacity:0; z-index:4}
+  .controls{display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:14px}
+  .controls .hint{color:var(--ink-dim); font-size:13px}
+  .toggle{display:inline-flex; align-items:center; gap:9px; cursor:pointer; user-select:none;
+    font-family:var(--mono); font-size:12px; color:var(--ink-soft)}
+  .switch{width:40px;height:22px;border-radius:999px;background:var(--line2);position:relative;transition:.2s}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+    background:var(--ink);transition:.2s}
+  .toggle input{display:none}
+  .toggle input:checked + .switch{background:var(--cyan)}
+  .toggle input:checked + .switch::after{left:20px;background:#06231f}
+  .btn{font-family:var(--mono); font-size:12px; letter-spacing:.04em; background:var(--cyan);
+    color:#04211d; border:none; padding:10px 16px; border-radius:9px; cursor:pointer; font-weight:700}
+  .btn.sec{background:var(--panel2); color:var(--ink); border:1px solid var(--line2)}
+  .btn:hover{filter:brightness(1.08)}
+  .status{font-family:var(--mono); font-size:12px; color:var(--cyan); min-height:18px}
+
+  /* ---- loop stepper ---- */
+  .loop{display:grid; gap:12px}
+  @media(min-width:820px){.loop{grid-template-columns:repeat(3,1fr)}}
+  .step{position:relative; background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:18px; cursor:pointer; transition:.18s}
+  .step:hover{border-color:var(--line2); transform:translateY(-2px)}
+  .step.active{border-color:var(--cyan); box-shadow:0 0 0 1px var(--cyan) inset}
+  .step .tag{font-family:var(--mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--cyan)}
+  .step h4{margin:8px 0 6px; font-size:16px}
+  .step p{margin:0; color:var(--ink-soft); font-size:14px}
+  .step .idx{position:absolute; top:14px; right:16px; font-family:var(--mono); color:var(--ink-dim);
+    font-size:22px; font-weight:700; opacity:.5}
+  .stepdetail{margin-top:14px; background:var(--panel2); border:1px solid var(--line); border-radius:12px;
+    padding:18px; font-size:14.5px; color:var(--ink-soft)}
+  .stepdetail code{color:var(--cyan)}
+
+  /* ---- capture-mode tabs ---- */
+  .tabs{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px}
+  .tab{font-family:var(--mono); font-size:12px; letter-spacing:.06em; padding:9px 15px;
+    border:1px solid var(--line); background:var(--panel); color:var(--ink-soft); border-radius:9px;
+    cursor:pointer}
+  .tab.active{background:var(--cyan-dim); border-color:var(--cyan); color:var(--ink)}
+  .tabpane{display:none}
+  .tabpane.active{display:block}
+  .codeblock{font-family:var(--mono); font-size:12.5px; background:var(--bg2); border:1px solid var(--line);
+    border-radius:10px; padding:16px; overflow-x:auto; color:var(--ink-soft); white-space:pre; margin:0}
+  .codeblock .k{color:var(--violet)} .codeblock .s{color:var(--amber)} .codeblock .c{color:var(--ink-dim)}
+  .codeblock .t{color:var(--cyan)}
+
+  /* ---- tables ---- */
+  .tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:12px}
+  table{border-collapse:collapse; width:100%; font-size:14px; min-width:520px}
+  th,td{text-align:left; padding:11px 14px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{font-family:var(--mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--ink-dim); background:var(--panel2)}
+  tbody tr:last-child td{border-bottom:none}
+  td code{white-space:nowrap}
+  .yes{color:var(--green)} .no{color:var(--red)} .warn{color:var(--amber)}
+
+  /* ---- callouts ---- */
+  .note{border-radius:12px; padding:16px 18px; border:1px solid var(--line); background:var(--panel);
+    display:flex; gap:14px; align-items:flex-start}
+  .note .ic{font-family:var(--mono); font-weight:700; font-size:13px; padding:3px 9px; border-radius:7px;
+    white-space:nowrap}
+  .note.amber{border-color:var(--amber); background:var(--amber-dim)}
+  .note.amber .ic{background:var(--amber); color:#241606}
+  .note.violet{border-color:var(--violet); background:var(--violet-dim)}
+  .note.violet .ic{background:var(--violet); color:#160f33}
+  .note.cyan{border-color:var(--cyan); background:var(--cyan-dim)}
+  .note.cyan .ic{background:var(--cyan); color:#04211d}
+  .note p{margin:0; font-size:14.5px; color:var(--ink)}
+
+  /* ---- cortex implications ---- */
+  .imp{display:grid; gap:14px}
+  @media(min-width:760px){.imp{grid-template-columns:1fr 1fr}}
+  .impcard{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px}
+  .impcard .h{display:flex; align-items:center; gap:10px; margin-bottom:8px}
+  .impcard .h b{font-size:15px}
+  .impcard .badge{font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+    padding:3px 8px; border-radius:6px; background:var(--violet-dim); color:var(--violet);
+    border:1px solid var(--violet)}
+  .impcard p{margin:0; color:var(--ink-soft); font-size:14px}
+
+  /* ---- sources ---- */
+  .src{display:grid; gap:8px}
+  .src a{display:flex; gap:10px; align-items:baseline; padding:11px 14px; background:var(--panel);
+    border:1px solid var(--line); border-radius:10px; text-decoration:none; color:var(--ink)}
+  .src a:hover{border-color:var(--cyan)}
+  .src .tagp{font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--ink-dim); min-width:104px}
+  .src .u{color:var(--cyan); font-family:var(--mono); font-size:12.5px; word-break:break-all}
+  footer{margin:56px 0 20px; color:var(--ink-dim); font-size:12.5px; font-family:var(--mono);
+    text-align:center; letter-spacing:.04em}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> Cortex · Research Field Note</div>
+    <button class="themebtn" id="themebtn">◐ Theme</button>
+  </div>
+
+  <!-- HERO -->
+  <header class="hero">
+    <p class="eyebrow">Screen perception · primary-source teardown · 22 Jul 2026</p>
+    <h1>How HeyClicky<br><span class="g">sees the screen</span></h1>
+    <p class="lede">It doesn't watch pixels and guess. It reads the <b>accessibility tree</b> of a
+      single named window, acts by element index in the background, then re-reads to prove the action
+      landed — and paints a synthetic <b>pointer overlay</b> so a human can watch. This is a teardown of
+      the mechanism, read straight out of HeyClicky 1.0.42's own bundled skill, and what it means for the
+      Cortex screen plane.</p>
+    <div class="metarow">
+      <span class="pill">source · <b>HeyClicky.app 1.0.42 (51)</b></span>
+      <span class="pill">engine · <b>Codex + cua-driver MCP</b></span>
+      <span class="pill">helper · <b>ClickyComputerUseRuntime</b></span>
+      <span class="pill">upstream · <b>trycua/cua · MIT</b></span>
+    </div>
+  </header>
+
+  <!-- TLDR -->
+  <section>
+    <p class="kicker">The short answer</p>
+    <h2>Five facts, then the detail</h2>
+    <div class="tldr">
+      <div class="row"><span class="n">1</span><p><b>It reads structure, not pixels.</b>
+        <span>The primary "sight" is the macOS <b>accessibility (AX) tree</b> of one window, returned as
+        marked-up text with clickable <span class="kbd">element_index</span> handles — a screenshot rides
+        along only to disambiguate.</span></p></div>
+      <div class="row"><span class="n">2</span><p><b>The pointer you saw is an overlay, not your cursor.</b>
+        <span>A triangle glides along a Bézier path to each target and ring-ripples on landing. It's a
+        <i>visual</i> for demos — the real actions are injected in the background and never move your mouse.</span></p></div>
+      <div class="row"><span class="n">3</span><p><b>Snapshot → act → re-snapshot, every time.</b>
+        <span>Every action is bracketed by a fresh window read. The "after" read is the proof the click
+        actually did something.</span></p></div>
+      <div class="row"><span class="n">4</span><p><b>Your foreground app never changes.</b>
+        <span>The entire product exists to drive a background app while you keep typing — no focus steal,
+        no Space switch, no window raise.</span></p></div>
+      <div class="row"><span class="n">5</span><p><b>"Recording" is real upstream, but switched off here.</b>
+        <span>Cua can record full action trajectories; HeyClicky's shipped build deliberately does not
+        expose recording/replay as a callable tool.</span></p></div>
+    </div>
+  </section>
+
+  <!-- CURSOR DEMO -->
+  <section>
+    <p class="kicker">Live · the feature that caught your eye</p>
+    <h2>The agent cursor overlay</h2>
+    <p class="sub">This is a faithful recreation of HeyClicky's <span class="kbd">set_agent_cursor_enabled</span>
+      overlay: <i>"a triangle pointer Bézier-glides to each click target, ring-ripples on landing, idle-hides
+      after ~1.5s."</i> Hit <b>Run task</b> to watch the entity drive the window. Toggle the overlay off and
+      the same actions still happen — you just can't see them.</p>
+
+    <div class="card">
+      <div class="demoStage stageHalf" id="stage">
+        <div class="desktopbar">
+          <span class="tl" style="background:var(--red)"></span>
+          <span class="tl" style="background:var(--amber)"></span>
+          <span class="tl" style="background:var(--green)"></span>
+          <span style="margin-left:8px">your desktop — you keep working up here ↑</span>
+        </div>
+        <div class="appwin" id="appwin">
+          <div class="title">● ● ●&nbsp;&nbsp;Numbers — backgrounded, pid 844</div>
+          <div class="appbody">
+            <div class="fakefield" id="f-name" data-tag="text field · element_index 7">client name…</div>
+            <div class="btnrow">
+              <button class="fakebtn" data-i="1" id="b1">Format</button>
+              <button class="fakebtn" data-i="2" id="b2">Insert</button>
+              <button class="fakebtn" data-i="3" id="b3">Sort</button>
+            </div>
+            <div class="btnrow">
+              <button class="fakebtn" data-primary data-i="4" id="b4">Save ⌘S</button>
+            </div>
+          </div>
+        </div>
+        <svg id="agentCursor" viewBox="0 0 26 26"><path d="M2 2 L2 22 L8 16 L12 24 L15 22 L11 14 L20 14 Z"
+          fill="var(--cyan)" stroke="#04211d" stroke-width="1"/></svg>
+        <div id="ripple"></div>
+      </div>
+
+      <div class="controls">
+        <button class="btn" id="run">▶ Run task</button>
+        <button class="btn sec" id="reset">Reset</button>
+        <label class="toggle"><input type="checkbox" id="ovToggle" checked><span class="switch"></span>
+          agent cursor overlay</label>
+        <span class="hint mono" id="status">idle</span>
+      </div>
+    </div>
+    <div class="note cyan" style="margin-top:14px">
+      <span class="ic">KEY</span>
+      <p>The overlay is <b>default-on</b> and purely cosmetic — <i>"HeyClicky's MCP helper bootstraps the
+        AppKit runloop required by the overlay."</i> The click itself is a stamped background event; the
+        triangle is there so a watching human understands what the entity is touching. Motion is tunable
+        (<span class="kbd">start_handle</span>, <span class="kbd">end_handle</span>, <span class="kbd">arc_size</span>,
+        <span class="kbd">arc_flow</span>, <span class="kbd">spring</span>).</p>
+    </div>
+  </section>
+
+  <!-- THE LOOP -->
+  <section>
+    <p class="kicker">The mechanism</p>
+    <h2>The canonical loop</h2>
+    <p class="sub">One invariant governs everything: <b>every action is bracketed by a fresh
+      <span class="kbd">get_window_state(pid, window_id)</span></b>. Click a phase to expand it.</p>
+    <div class="loop">
+      <div class="step active" data-step="0">
+        <span class="idx">01</span><span class="tag">Before</span>
+        <h4>Snapshot</h4>
+        <p>Read the AX tree of the exact window. This assigns the element indices you're about to use.</p>
+      </div>
+      <div class="step" data-step="1">
+        <span class="idx">02</span><span class="tag">Act</span>
+        <h4>Element action</h4>
+        <p>Click / type / scroll by <span class="kbd">element_index</span> — dispatched at the AX layer, in the background.</p>
+      </div>
+      <div class="step" data-step="2">
+        <span class="idx">03</span><span class="tag">After</span>
+        <h4>Re-snapshot &amp; verify</h4>
+        <p>Read again. A changed tree is the evidence the action fired. No change ⇒ silent no-op — say so.</p>
+      </div>
+    </div>
+    <div class="stepdetail" id="stepDetail"></div>
+  </section>
+
+  <!-- CAPTURE MODES -->
+  <section>
+    <p class="kicker">What a "look" actually returns</p>
+    <h2>Three ways to see — <span class="mono" style="font-size:.7em;color:var(--ink-dim)">capture_mode</span></h2>
+    <p class="sub">A single knob decides whether a snapshot returns structure, pixels, or both. The default
+      (<b>som</b> — "set of marks") is why element clicks work on the very first look.</p>
+    <div class="tabs">
+      <button class="tab active" data-tab="som">som · default</button>
+      <button class="tab" data-tab="ax">ax</button>
+      <button class="tab" data-tab="vision">vision</button>
+    </div>
+    <div class="tabpane active" data-pane="som">
+      <div class="grid g2">
+        <div class="card">
+          <h4 style="margin:0 0 8px">Tree <b style="color:var(--cyan)">+</b> screenshot</h4>
+          <p style="color:var(--ink-soft);margin:0 0 12px;font-size:14px">The AX tree says what's clickable and
+            hands back <span class="kbd">element_index</span> handles; the screenshot disambiguates when labels
+            repeat or are empty. Preferred addressing: <b>element_index</b> (pixels are diagnostic only in HeyClicky).</p>
+          <pre class="codeblock"><span class="t">get_window_state</span>({pid:844, window_id:10725})
+<span class="c">// → tree_markdown: "[7] AXTextField …</span>
+<span class="c">//                  [14] AXButton 'Save' …"</span>
+<span class="c">// → screenshot: &lt;PNG&gt;</span></pre>
+        </div>
+        <div class="card">
+          <h4 style="margin:0 0 8px">Why it's the default</h4>
+          <p style="color:var(--ink-soft);margin:0;font-size:14px">Element-indexed clicks land on the first
+            snapshot <i>with</i> visual confirmation. The other two modes are opt-in when the caller explicitly
+            wants only one half of the work.</p>
+        </div>
+      </div>
+    </div>
+    <div class="tabpane" data-pane="ax">
+      <div class="card">
+        <h4 style="margin:0 0 8px">Tree only — no PNG</h4>
+        <p style="color:var(--ink-soft);margin:0 0 12px;font-size:14px">Pure structure. Fastest, cheapest,
+          fully deterministic addressing by <span class="kbd">element_index</span>. No visual to reason over.</p>
+        <pre class="codeblock"><span class="t">set_config</span>({capture_mode:<span class="s">"ax"</span>})
+<span class="c">// snapshots now return tree_markdown, no screenshot</span></pre>
+      </div>
+    </div>
+    <div class="tabpane" data-pane="vision">
+      <div class="card">
+        <h4 style="margin:0 0 8px">PNG only — no tree</h4>
+        <p style="color:var(--ink-soft);margin:0 0 12px;font-size:14px">Read-only visual inspection. The
+          model reasons purely from pixels — grounding is slower on dense text because the vision pipeline
+          downsamples aggressively. In HeyClicky, coordinate clicks are blocked, so this is for
+          <i>looking</i>, not driving. (Renamed from <span class="kbd">screenshot</span>; the old value still decodes.)</p>
+        <pre class="codeblock"><span class="c">// empty tree_markdown? capture_mode is almost certainly "vision"</span>
+<span class="t">get_config</span>() <span class="c">// inspect before anything else</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- NO FOREGROUND -->
+  <section>
+    <p class="kicker">The rule the whole product is built on</p>
+    <h2>The no-foreground contract</h2>
+    <p class="sub">Quoting the skill: <i>"The user's frontmost app MUST NOT change. Users pay for the right
+      to keep typing in their editor while an agent drives another app in the background."</i></p>
+    <div class="grid g2">
+      <div class="note violet"><span class="ic">NEVER</span>
+        <p>No <span class="kbd">open</span> (any form routes through LaunchServices &amp; activates), no
+          <span class="kbd">osascript … activate</span>, no <span class="kbd">cliclick</span> (warps your real
+          cursor), no tab-switch shortcuts (visible flip). Even <span class="kbd">⌘L</span> is banned — a
+          "focus here" shortcut is a focus-steal.</p></div>
+      <div class="note cyan"><span class="ic">INSTEAD</span>
+        <p>Launch via idempotent <span class="kbd">launch_app({bundle_id})</span> with a
+          <span class="kbd">FocusRestoreGuard</span> that clobbers any activation back. Drive backgrounded
+          windows by element index. Prefer <b>windows over tabs</b> — each window has its own AX tree and can
+          be inspected without activating.</p></div>
+    </div>
+  </section>
+
+  <!-- TOOL SURFACE -->
+  <section>
+    <p class="kicker">The exposed surface</p>
+    <h2>What the entity is actually allowed to call</h2>
+    <p class="sub">A <b>curated</b> subset of cua-driver's 25+ tools, exposed over a local
+      <span class="kbd">computer-use</span> MCP server. Note what's deliberately absent.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Intent</th><th>Tool</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>See a window</td><td><code>get_window_state</code></td><td>AX tree + screenshot, keyed on <code>(pid, window_id)</code></td></tr>
+          <tr><td>Raw pixels</td><td><code>screenshot</code></td><td>PNG, no AX walk — separate from capture_mode</td></tr>
+          <tr><td>Launch / hand a URL</td><td><code>launch_app</code></td><td>Idempotent; returns pid + <code>windows[]</code>; focus-guarded</td></tr>
+          <tr><td>Enumerate</td><td><code>list_apps</code> · <code>list_windows</code></td><td>No <code>ps</code>/<code>pgrep</code> side channels</td></tr>
+          <tr><td>Act</td><td><code>click</code> · <code>set_value</code> · <code>type_text</code> · <code>press_key</code> · <code>hotkey</code> · <code>scroll</code> · <code>page</code></td><td>By <code>element_index</code> wherever possible</td></tr>
+          <tr><td>Show progress</td><td><code>set_agent_cursor_enabled</code> · <code>set_agent_cursor_motion</code></td><td>The overlay from the demo above</td></tr>
+          <tr><td>Config</td><td><code>get_config</code> · <code>set_config</code></td><td>Read/flip <code>capture_mode</code> etc.</td></tr>
+          <tr><td class="no">Drag / marquee</td><td class="no">— not exposed —</td><td>Stop &amp; explain; no safe drag/pixel mode in this build</td></tr>
+          <tr><td class="no">Pixel-coordinate click</td><td class="no">— blocked —</td><td>AX-only; coordinates are diagnostic</td></tr>
+          <tr><td class="no">Record / replay trajectory</td><td class="no">— not exposed —</td><td>Upstream Cua capability, hidden here (see below)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- RECORDING -->
+  <section>
+    <p class="kicker">The "recording" feature, precisely</p>
+    <h2>What recording is — and why it's dark in this build</h2>
+    <div class="grid g2">
+      <div class="card">
+        <h4 style="margin:0 0 8px">Upstream, it's real</h4>
+        <p style="color:var(--ink-soft);margin:0;font-size:14.5px">Cua's driver both <b>paints and records</b>
+          the agent cursor, and standalone Cua can capture full <b>trajectories</b>: action inputs, post-action
+          snapshots, screenshots, and timing metadata into per-turn folders — for demos, regression diffs, or
+          training data. That's the "it records the screen with the cursor" idea you spotted.</p>
+      </div>
+      <div class="card">
+        <h4 style="margin:0 0 8px">In HeyClicky 1.0.42, it's off</h4>
+        <p style="color:var(--ink-soft);margin:0;font-size:14.5px">The shipped <span class="kbd">RECORDING.md</span>
+          is explicit: <i>"HeyClicky's default managed runtime does not expose Computer Use recording or replay
+          tools."</i> The only shipped loop is snapshot → act → re-snapshot. Recording tools aren't registered —
+          capability is gated at the <b>tool manifest</b>, not just by prompt wording.</p>
+      </div>
+    </div>
+    <div class="note amber" style="margin-top:14px"><span class="ic">NUANCE</span>
+      <p>So the visible <b>synthetic cursor overlay</b> (default-on, the pointer you saw gliding) and full
+        <b>trajectory recording/replay</b> (off) are two different things. What "just shipped" as a visible,
+        toggleable pointer is the overlay; the record-and-replay machinery exists in the Cua lineage but is
+        intentionally unregistered in the current signed build.</p>
+    </div>
+  </section>
+
+  <!-- CORTEX IMPLICATIONS -->
+  <section>
+    <p class="kicker">Why this matters for us</p>
+    <h2>Read-across to the Cortex screen plane</h2>
+    <p class="sub">This corroborates the direction already sketched in
+      <a href="cortex-local-execution-adapters.html">cortex-local-execution-adapters.html</a>: the screen is a
+      <b>separate native capability plane</b>, not a flag on a provider adapter. Concrete lessons:</p>
+    <div class="imp">
+      <div class="impcard"><div class="h"><span class="badge">adopt</span><b>Structure-first perception</b></div>
+        <p>Default to the AX tree + element indices; keep raw-pixel/vision as an opt-in fallback. It's cheaper,
+          deterministic, and dodges the pixel-grounding correction loops.</p></div>
+      <div class="impcard"><div class="h"><span class="badge">adopt</span><b>Snapshot-verify invariant</b></div>
+        <p>Bracket every action with before/after reads and treat "tree unchanged" as failure. Cheap honesty;
+          maps cleanly onto a <span class="kbd">tool.completed{is_error}</span> event.</p></div>
+      <div class="impcard"><div class="h"><span class="badge">adopt</span><b>Capability gated at the manifest</b></div>
+        <p>Don't rely on prompt wording to withhold dangerous tools. Register only the safe subset —
+          exactly how recording/replay and pixel clicks are kept out here.</p></div>
+      <div class="impcard"><div class="h"><span class="badge">adopt</span><b>A signed native host owns TCC</b></div>
+        <p>One signed macOS helper owns Accessibility + Screen Recording grants and the overlay; the FastAPI
+          core stays provider-neutral and never touches pixels directly.</p></div>
+      <div class="impcard"><div class="h"><span class="badge">brand</span><b>It's a capability, not an "agent"</b></div>
+        <p>HeyClicky frames one assistant privately invoking a computer-use capability. Same posture we want:
+          a single entity that <i>does the work</i> — the word "agent" never surfaces.</p></div>
+      <div class="impcard"><div class="h"><span class="badge">re-test</span><b>Don't assume the entitlement transfers</b></div>
+        <p>Permission inheritance, background-event behavior, Cua licensing and code-signing must be validated
+          independently for a Cortex bundle. The teardown proves what Clicky ships, not that we may copy it.</p></div>
+    </div>
+  </section>
+
+  <!-- SOURCES -->
+  <section>
+    <p class="kicker">Provenance</p>
+    <h2>Sources</h2>
+    <div class="src">
+      <a href="#" onclick="return false"><span class="tagp">primary · local</span>
+        <span><b>HeyClicky.app 1.0.42</b> — <span class="u">Contents/Resources/ClickyBundledSkills/cua-driver/{SKILL,README,RECORDING}.md</span> (read directly from the installed bundle)</span></a>
+      <a href="https://github.com/trycua/cua/tree/main/libs/cua-driver" target="_blank" rel="noopener"><span class="tagp">upstream</span>
+        <span>trycua/cua · cua-driver — <span class="u">github.com/trycua/cua/tree/main/libs/cua-driver</span></span></a>
+      <a href="https://deepwiki.com/trycua/cua/6-cua-driver:-background-computer-use" target="_blank" rel="noopener"><span class="tagp">reference</span>
+        <span>cua-driver: Background Computer-Use — <span class="u">deepwiki.com/trycua/cua</span></span></a>
+      <a href="https://github.com/trycua/cua/blob/main/blog/inside-macos-window-internals.md" target="_blank" rel="noopener"><span class="tagp">reference</span>
+        <span>Inside macOS window internals — <span class="u">github.com/trycua/cua/blob/main/blog/inside-macos-window-internals.md</span></span></a>
+      <a href="https://cua.ai/" target="_blank" rel="noopener"><span class="tagp">vendor</span>
+        <span>Cua — computer-use agents — <span class="u">cua.ai</span></span></a>
+      <a href="cortex-local-execution-adapters.html"><span class="tagp">internal</span>
+        <span>Cortex local execution adapter research — <span class="u">docs/research/cortex-local-execution-adapters.html</span></span></a>
+    </div>
+  </section>
+
+  <footer>Cortex · research only · point-in-time teardown of HeyClicky 1.0.42 (build 51) · 22 Jul 2026 · claims re-test before shipping</footer>
+</div>
+
+<script>
+(function(){
+  // theme toggle
+  var root=document.documentElement, tb=document.getElementById('themebtn');
+  tb.addEventListener('click',function(){
+    var cur=root.getAttribute('data-theme');
+    if(!cur){cur=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}
+    root.setAttribute('data-theme', cur==='dark'?'light':'dark');
+  });
+
+  // ---- loop stepper ----
+  var details=[
+    "<b>Before — the pre-action snapshot.</b> <code>get_window_state(pid, window_id)</code> walks the "+
+    "accessibility tree and returns marked-up text plus a screenshot. Crucially it <b>replaces the element-index "+
+    "map</b> on every call, keyed on <code>(pid, window_id)</code>. Indices from turn N don't resolve in N+1, and "+
+    "indices from window A never resolve against window B of the same app. Skip this and every element action fails "+
+    "with <code>No cached AX state</code>.",
+    "<b>Act — dispatch by element_index.</b> <code>click</code>, <code>set_value</code>, <code>type_text</code>, "+
+    "<code>scroll</code> and friends each take <code>(pid, window_id, element_index)</code> and fire at the AX layer "+
+    "in the <b>background</b> — no window raise, no cursor warp. The visible triangle overlay is cosmetic. Minimized "+
+    "windows still accept AX actions in place; keyboard <i>commit</i> is the one thing that needs a workaround.",
+    "<b>After — re-snapshot and verify.</b> Read the window again. A changed tree (new value, new window, a menu that "+
+    "closed, a button gone disabled) is your <b>proof</b> the action landed. If nothing changed, it was a silent "+
+    "no-op — the skill's rule is to <i>say so, don't assume success.</i> This applies even to pixel clicks."
+  ];
+  var stepEls=[].slice.call(document.querySelectorAll('.step'));
+  var detailBox=document.getElementById('stepDetail');
+  function selStep(i){stepEls.forEach(function(e,j){e.classList.toggle('active',j===i);});
+    detailBox.innerHTML=details[i];}
+  stepEls.forEach(function(e){e.addEventListener('click',function(){selStep(+e.dataset.step);});});
+  selStep(0);
+
+  // ---- capture tabs ----
+  var tabs=[].slice.call(document.querySelectorAll('.tab'));
+  tabs.forEach(function(t){t.addEventListener('click',function(){
+    tabs.forEach(function(x){x.classList.remove('active');}); t.classList.add('active');
+    document.querySelectorAll('.tabpane').forEach(function(p){
+      p.classList.toggle('active', p.dataset.pane===t.dataset.tab);});
+  });});
+
+  // ---- agent cursor demo ----
+  var stage=document.getElementById('stage'),
+      cursor=document.getElementById('agentCursor'),
+      ripple=document.getElementById('ripple'),
+      status=document.getElementById('status'),
+      ov=document.getElementById('ovToggle');
+  var seq=[
+    {sel:'#b1', say:'get_window_state → click [Format]'},
+    {sel:'#f-name', say:'set_value [7] "Acme Corp"'},
+    {sel:'#b3', say:'click [Sort]'},
+    {sel:'#b4', say:'click [Save]  ⌘S'},
+    {done:true, say:'re-snapshot ✓ tree changed — verified'}
+  ];
+  var running=false;
+
+  function centerOf(sel){
+    var el=stage.querySelector(sel), s=stage.getBoundingClientRect(), r=el.getBoundingClientRect();
+    return {x:r.left-s.left+r.width/2, y:r.top-s.top+r.height/2, el:el};
+  }
+  function bez(p0,p1,c,t){ // quadratic bezier for the arc
+    var u=1-t;
+    return {x:u*u*p0.x+2*u*t*c.x+t*t*p1.x, y:u*u*p0.y+2*u*t*c.y+t*t*p1.y};
+  }
+  var pos={x:40,y:40};
+  function glide(target){
+    return new Promise(function(res){
+      if(!ov.checked){ // overlay off: jump state, act immediately
+        pos=target; setTimeout(res,180); return;
+      }
+      cursor.style.opacity=1;
+      var start={x:pos.x,y:pos.y}, end={x:target.x-2,y:target.y-2};
+      var mx=(start.x+end.x)/2, my=(start.y+end.y)/2;
+      var arc=Math.min(90,Math.hypot(end.x-start.x,end.y-start.y)*0.35);
+      var ctrl={x:mx, y:my-arc};
+      var dur=560, t0=performance.now(), settled=false;
+      function step(now){
+        if(settled) return;
+        var t=Math.min(1,(now-t0)/dur);
+        var e=t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2; // easeInOut
+        var p=bez(start,end,ctrl,e);
+        cursor.style.transform='translate('+p.x+'px,'+p.y+'px)';
+        if(t>=1){settled=true; pos={x:end.x,y:end.y}; res();}
+      }
+      function frame(now){ step(now); if(!settled) requestAnimationFrame(frame); }
+      requestAnimationFrame(frame);
+      // rAF gets throttled in backgrounded/embedded panes — a timer keeps the
+      // glide advancing (and resolving) even when frames stop being painted.
+      var tick=setInterval(function(){ step(performance.now());
+        if(settled) clearInterval(tick); },40);
+    });
+  }
+  function ringAt(target){
+    if(!ov.checked) return;
+    ripple.style.transition='none';
+    ripple.style.left=(target.x-5)+'px'; ripple.style.top=(target.y-5)+'px';
+    ripple.style.width='10px'; ripple.style.height='10px'; ripple.style.opacity='1';
+    ripple.style.borderColor='var(--cyan)';
+    requestAnimationFrame(function(){
+      ripple.style.transition='all .5s ease-out';
+      ripple.style.left=(target.x-26)+'px'; ripple.style.top=(target.y-26)+'px';
+      ripple.style.width='52px'; ripple.style.height='52px'; ripple.style.opacity='0';
+    });
+  }
+  function flash(el){
+    el.style.transition='box-shadow .2s'; el.style.boxShadow='0 0 0 3px var(--cyan)';
+    setTimeout(function(){el.style.boxShadow='';},420);
+  }
+  function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+
+  async function run(){
+    if(running) return; running=true;
+    document.getElementById('run').disabled=true;
+    document.getElementById('f-name').textContent='client name…';
+    for(var i=0;i<seq.length;i++){
+      var step=seq[i]; status.textContent='▸ '+step.say;
+      if(step.done){ await sleep(700); break; }
+      var c=centerOf(step.sel);
+      await glide(c); ringAt(c); flash(c.el);
+      if(step.sel==='#f-name'){ c.el.textContent='Acme Corp'; c.el.style.color='var(--ink)'; }
+      await sleep(ov.checked?420:260);
+    }
+    status.textContent='✓ done — foreground never changed';
+    if(ov.checked){ setTimeout(function(){cursor.style.opacity=0;},1500); } // idle-hide ~1.5s
+    running=false; document.getElementById('run').disabled=false;
+  }
+  function reset(){
+    document.getElementById('f-name').textContent='client name…';
+    document.getElementById('f-name').style.color='var(--ink-dim)';
+    cursor.style.opacity=0; pos={x:40,y:40}; status.textContent='idle';
+  }
+  document.getElementById('run').addEventListener('click',run);
+  document.getElementById('reset').addEventListener('click',reset);
+  ov.addEventListener('change',function(){
+    status.textContent=ov.checked?'overlay on — you can watch':'overlay off — actions still happen, invisibly';
+    if(!ov.checked) cursor.style.opacity=0;
+  });
+})();
+</script>
+</body>
+</html>
