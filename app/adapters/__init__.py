@@ -1,6 +1,7 @@
 import asyncio
 
 from app.adapters.anthropic_adp import AnthropicAdapterClass
+from app.adapters.cartesia_stt_adp import CartesiaSTTAdapterClass
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.adapters.gemini_adp import GeminiAdapterClass
 from app.adapters.http_adp import HttpAdapterClass
@@ -16,6 +17,7 @@ class AdapterRegistry:
         self.Anthropic = AnthropicAdapterClass()
         self.Gemini = GeminiAdapterClass()
         self.OpenAI = OpenAIAdapterClass()
+        self.CartesiaSTT = CartesiaSTTAdapterClass()
         await asyncio.gather(
             self.DocDB.initialize(),
             self.Cache.initialize(),
@@ -23,6 +25,7 @@ class AdapterRegistry:
             self.Anthropic.initialize(),
             self.Gemini.initialize(),
             self.OpenAI.initialize(),
+            self.CartesiaSTT.initialize(),
         )
 
     async def close(self) -> None:
@@ -33,6 +36,7 @@ class AdapterRegistry:
             self.Anthropic.close(),
             self.Gemini.close(),
             self.OpenAI.close(),
+            self.CartesiaSTT.close(),
         )
 
 
