@@ -16,6 +16,8 @@ dependencies = [
     "pydantic-mongo>=3.1.0",
     "openai>=2.44.0",
     "google-genai>=2.10.0",
+    "cartesia[websockets]>=3.3.0",
+    "claude-agent-sdk>=0.2.128",
 ]
 
 [project.optional-dependencies]
@@ -99,3 +101,5 @@ reportUnknownVariableType = "none"
 # ── Pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Make `app` importable when running pytest from the repo root.
+pythonpath = ["."]
