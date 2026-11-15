@@ -8,6 +8,7 @@ from app.entities.conversation_ent import (
 from app.entities.pipeline_agent_sdk import AgentSDKPipelineEntityClass
 from app.entities.stt_ent import STTEntityClass
 from app.entities.user_ent import User, UserEntityClass
+from app.entities.voice_ent import VoiceEntityClass
 
 
 class EntitiesRegistry:
@@ -33,6 +34,12 @@ class EntitiesRegistry:
         cls.Conversations = ConversationEntityClass(docdb=adapter.DocDB)
         cls.STT = STTEntityClass(stt=adapter.CartesiaSTT)
         cls.AgentSDKPipeline = AgentSDKPipelineEntityClass()
+        cls.Voice = VoiceEntityClass(
+            stt=adapter.CartesiaSTT,
+            tts=adapter.CartesiaTTS,
+            llm=adapter.OpenAI,
+            search=adapter.Parallel,
+        )
 
 
 __all__ = ["EntitiesRegistry"]
