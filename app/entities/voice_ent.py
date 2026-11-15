@@ -245,6 +245,8 @@ class _Reply:
         self.speech = speech
         # Whether this reply is the one that tells the user of a late search result.
         self.brings_results = brings_results
+        # Whether it was produced to the end, as opposed to cut off or failed.
+        self.finished = False
         self._parts: list[Utterance | _ToolCall] = []
         # How many of the parts have been sent back to the model, in a later call of
         # this same reply. Those are final: the model has seen them as they are.
@@ -471,8 +473,10 @@ class VoiceConversation:
             if call.output is None:
                 self._outlive(call)
         heard = reply.heard(self._playback.hearing())
-        if reply.brings_results and (heard.spoke or heard.kept is None):
-            # Heard at least in part, or played to its end: the user has been told.
+        if reply.brings_results and (heard.spoke or (reply.finished and heard.kept is None)):
+            # Heard at least in part, or produced in full and played to its end: the
+            # user has been told. (One that was cut off or failed before it said
+            # anything also has nothing "cut", but has told them nothing.)
             self._results_owed = False
         if heard.items and self._labelling is not None:
             # Some of this reply was heard, so a note still being worded for the reply
@@ -675,6 +679,7 @@ class VoiceConversation:
             await reply.speech.stop()
             self._emit("error", f"reply failed: {exc}")
         else:
+            reply.finished = True
             self._emit("assistant.done", reply.speech.text.strip())
 
     async def _model_round(self, reply: _Reply, *, must_answer: bool) -> bool:

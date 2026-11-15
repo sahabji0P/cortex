@@ -1576,6 +1576,54 @@ async def test_a_reply_about_a_result_that_says_nothing_does_not_set_off_reminde
     await f.conversation.close()
 
 
+async def test_a_result_is_still_owed_if_its_reply_was_cut_off_before_it_said_anything() -> None:
+    never = asyncio.Event()
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [never],  # the model is still thinking about the result when the user speaks
+        [_delta("Four."), _completed(_message("Four."))],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    await _interrupted_search_then_hello(f, finish)
+    await asyncio.sleep(0.25)  # the reply about the result has been asked for
+    assert len(llm.requests) == 3
+    f.stt.say("what is two plus two?")
+    outputs = await _read_until(f.conversation, "assistant.done")
+    assert outputs[-1].text == "Four."
+
+    f.clock.advance(60)
+    outputs = await _read_until(f.conversation, "assistant.done")
+    assert outputs[-1].text == "It is sunny."
+    await f.conversation.close()
+
+
+async def test_a_result_is_still_owed_if_its_reply_failed() -> None:
+    failed = SimpleNamespace(
+        type="response.failed",
+        response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
+    )
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [failed],
+        [_delta("Four."), _completed(_message("Four."))],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    await _interrupted_search_then_hello(f, finish)
+    await _read_until(f.conversation, "error")
+    f.stt.say("what is two plus two?")
+    outputs = await _read_until(f.conversation, "assistant.done")
+    assert outputs[-1].text == "Four."
+
+    f.clock.advance(60)
+    outputs = await _read_until(f.conversation, "assistant.done")
+    assert outputs[-1].text == "It is sunny."
+    await f.conversation.close()
+
+
 async def test_a_result_is_brought_up_again_only_once() -> None:
     never = asyncio.Event()
     llm, finish = _slow_search_then(
