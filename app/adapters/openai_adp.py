@@ -23,6 +23,7 @@ from openai.types.responses import (
 )
 
 # Re-exported (see __all__) so the pipeline can isinstance-narrow web-search citations.
+from openai.types.responses.response_input_param import FunctionCallOutput
 from openai.types.responses.response_output_text import AnnotationURLCitation
 from openai.types.responses.tool_param import ParseableToolParam
 from openai.types.shared_params import Reasoning as OpenAIThinking
@@ -32,6 +33,7 @@ from app.config import settings
 
 __all__ = [
     "AnnotationURLCitation",
+    "FunctionCallOutput",
     "OpenAIAdapterClass",
     "OpenAIThinking",
     "ResponseInputItemParam",

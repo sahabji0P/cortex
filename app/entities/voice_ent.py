@@ -19,8 +19,10 @@ joins the history once it has been heard in full or cut off. A reply that is cut
 stored as the words that were heard, ending in "…". The rest is never sent back.
 
 Nothing the model has been sent is changed afterwards, so each request starts with the
-whole of the one before it. The one exception is the user's open turn, always the last
-item, which can gain a line (see below).
+whole of the one before it. There are two exceptions. The user's open turn, always the
+last item, can gain a line (see below). And once several search results have piled up,
+all but the newest are replaced by a short marker in one go, when the user's turn ends:
+a deliberate break of the prompt cache, made rarely, to keep the context small.
 
 A user turn stays open until some of the reply to it has been heard. Words that arrive
 before that join the same turn on a new line: speech recognition often splits one
@@ -45,13 +47,17 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel
 
 from app.adapters.cartesia_stt_adp import CartesiaSTTAdapterClass, CartesiaSTTSession
 from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
-from app.adapters.openai_adp import OpenAIAdapterClass, ResponseInputItemParam
+from app.adapters.openai_adp import (
+    FunctionCallOutput,
+    OpenAIAdapterClass,
+    ResponseInputItemParam,
+)
 from app.adapters.parallel_adp import ParallelAdapterClass, SearchResult
 from app.entities.voice_speech import Clock, Playback, Speech, Utterance
 
@@ -95,6 +101,12 @@ _PLACEHOLDER = (
     'separate call with "deferred_result_for": "{call_id}". If the user no longer wants '
     "it, stop it with cancel_tool_call and that call_id."
 )
+
+# Search results are long. Once more than this many are in the history in full, all but
+# the newest few are replaced by the marker below, in one go.
+_FULL_RESULTS_ALLOWED = 6
+_FULL_RESULTS_KEPT = 2
+_CLEARED = "[Cleared to save context. Search again if this is still needed.]"
 
 # Added to the history when a turn with no words in it cut a reply off.
 _NOISE_NOTE = (
@@ -527,6 +539,7 @@ class VoiceConversation:
         # Results that came in while the user was speaking go in before what they said.
         self._add_late_results()
         if said:
+            self._clear_old_results()
             self._turn.append(transcript)
             self._emit("user.final", transcript)
         elif not unanswered:
@@ -613,6 +626,25 @@ class VoiceConversation:
             if call.running is not None:
                 call.output = await asyncio.shield(call.running)
         return True
+
+    def _clear_old_results(self) -> None:
+        """Replace all but the newest search results with a marker, once enough pile up.
+
+        This rewrites items the model has already been sent, which breaks a prompt cache
+        from the first one onward. So it is done only between turns, never while a reply
+        is being made, and for a whole batch at a time.
+        """
+        full = [
+            result
+            for item in self._history
+            if item.get("type") == "function_call_output"
+            and (result := cast("FunctionCallOutput", item))["output"] != _CLEARED
+            # A placeholder is the only result its call has until the real one arrives.
+            and result["call_id"] not in self._outliving
+        ]
+        if len(full) > _FULL_RESULTS_ALLOWED:
+            for result in full[:-_FULL_RESULTS_KEPT]:
+                result["output"] = _CLEARED
 
     def _open_turn(self) -> list[ResponseInputItemParam]:
         """The user's unanswered turn as one message, for a model call."""
