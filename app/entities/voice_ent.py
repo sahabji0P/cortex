@@ -336,6 +336,7 @@ class VoiceConversation:
         producing, self._producing = self._producing, None
         if self._announcing is not None:
             self._announcing.cancel()
+            self._announcing = None
         heard = self._settle()
         self._cut_a_reply = heard is not None
         if producing is not None:
@@ -459,7 +460,10 @@ class VoiceConversation:
             self._history.append({"role": "developer", "content": _NOISE_NOTE})
         if self._announcing is not None:
             # This reply covers any late results, so nothing needs to wait for quiet.
+            # Forgotten at once: a cancelled task still looks busy until it next runs,
+            # and a result landing before then would find no one waiting for it.
             self._announcing.cancel()
+            self._announcing = None
         self._producing = asyncio.create_task(self._respond())
 
     async def _respond(self) -> None:
