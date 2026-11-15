@@ -94,6 +94,6 @@ To check the model and the pipeline together without any audio, with the real mo
 uv run python -m scripts.voice_pipeline_check
 ```
 
-It fakes speech so each scenario can say how much of a reply was heard, and prints PASS or CHECK for 22 behaviours: context, search, cut replies, late search results, cancelling, noise, merged turns, clearing, another language, service failure and spoken style.
+It fakes speech so each scenario can say how much of a reply was heard, and prints PASS or CHECK for 23 behaviours: context, search, cut replies, late search results, cancelling, noise, merged turns, clearing, another language, service failure and spoken style. A scenario that does not finish is shown as CHECK and the rest still run.
 
 Configuration is read from the environment by `app/config.py`. `.env.example` lists every setting. Never commit credentials.

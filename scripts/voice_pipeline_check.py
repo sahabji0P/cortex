@@ -10,7 +10,8 @@ scenario decides how much of a reply was "heard". Every request the model is sen
 recorded and checked for the rule that earlier input is never changed.
 
 Each line of output is PASS or CHECK. CHECK means look at it: a model's wording varies,
-and some checks are about what it said.
+and some checks are about what it said. A scenario that does not finish is a CHECK too,
+and the rest still run.
 """
 
 import asyncio
@@ -26,6 +27,7 @@ from tests import test_voice_conversation as T
 
 DELAY = T._DELAY
 RESULTS = []  # (scenario, verdict, detail)
+OPEN = []  # conversations not yet closed, so that a scenario that fails can be cleaned up
 
 
 class Recorder:
@@ -68,18 +70,22 @@ class Recorder:
 
 
 class Search:
-    """The real search, which can be held back or made to fail."""
+    """The real search. Its first call can be held back, and all of them made to fail."""
 
     configured = True
 
     def __init__(self, real):
         self._real, self.gate, self.fail, self.count = real, None, False, 0
+        self._held = False
 
     async def search(self, **kw):
         self.count += 1
         if self.fail:
             raise RuntimeError("search service is down")
-        if self.gate is not None:
+        if self.gate is not None and not self._held:
+            # Only one search is held back. If the model searches again while it waits,
+            # that search runs, as it would for a real user.
+            self._held = True
             await self.gate.wait()
         return await self._real.search(**kw)
 
@@ -152,6 +158,7 @@ class Talk:
             stt=self.stt, tts=self.tts, llm=self.llm, search=self.search, clock=self.clock
         )
         self.events = []
+        OPEN.append(self)
 
     async def until(self, kind, seconds=60):
         async with asyncio.timeout(seconds):
@@ -177,6 +184,10 @@ class Talk:
         return [*self.c._history, *self.c._open_turn()]
 
     async def close(self):
+        if self in OPEN:
+            OPEN.remove(self)
+        if self.search.gate is not None:
+            self.search.gate.set()
         await self.c.close()
 
 
@@ -192,12 +203,8 @@ def note(name, ok, detail):
 STORY = "Tell me a long story about a dragon. At least ten sentences."
 
 
-async def main():
-    llm, par = OpenAIAdapterClass(), ParallelAdapterClass()
-    await asyncio.gather(llm.initialize(), par.initialize())
-    replies = []  # every reply the model produced, for the style checks
-
-    # 1. context across turns
+async def scenario_1(llm, par, replies):
+    """context across turns"""
     t = Talk(llm, par)
     a = await t.ask("What is the capital of France?")
     b = await t.ask("And of Japan?")
@@ -205,7 +212,9 @@ async def main():
     note("context across turns", "Paris" in a and "Tokyo" in b and not t.errors(), f"{a!r} / {b!r}")
     await t.close()
 
-    # 2. a web search, answered with its source
+
+async def scenario_2(llm, par, replies):
+    """a web search, answered with its source"""
     t = Talk(llm, par)
     a = await t.ask("Who won the most recent Formula One race?")
     replies.append(a)
@@ -217,7 +226,9 @@ async def main():
     )
     await t.close()
 
-    # 3. a cut reply: the model only knows the words that were heard
+
+async def scenario_3(llm, par, replies):
+    """a cut reply: the model only knows the words that were heard"""
     t = Talk(llm, par)
     t.stt.say(STORY)
     await t.until("assistant.delta")
@@ -261,7 +272,9 @@ async def main():
     )
     await t.close()
 
-    # 5. your case: an unrelated question over a running search, then the result unprompted
+
+async def scenario_5(llm, par, replies):
+    """your case: an unrelated question over a running search, then the result unprompted"""
     t = Talk(llm, par)
     t.search.gate = asyncio.Event()
     t.stt.say("Who won the most recent Formula One race?")
@@ -284,8 +297,8 @@ async def main():
     )
     note(
         "late result: brought up unprompted, in the spec's order",
-        no_user_turn and len(b) > 20 and len(stub) == 1 and not t.errors(),
-        f"{b[:120]!r}; history {shape(h)}",
+        no_user_turn and len(b) > 20 and len(stub) == 1 and t.search.count == 1 and not t.errors(),
+        f"{b[:120]!r}; history {shape(h)}; searches started {t.search.count}",
     )
     t.clock.advance(600)
     c = await t.ask("Thanks.")
@@ -297,7 +310,9 @@ async def main():
     )
     await t.close()
 
-    # 6. the model cancels a search the user no longer wants
+
+async def scenario_6(llm, par, replies):
+    """the model cancels a search the user no longer wants"""
     t = Talk(llm, par)
     t.search.gate = asyncio.Event()
     t.stt.say("Who won the most recent Formula One race?")
@@ -316,7 +331,9 @@ async def main():
     )
     await t.close()
 
-    # 7. a wordless turn: the reply is picked up where it stopped
+
+async def scenario_7(llm, par, replies):
+    """a wordless turn: the reply is picked up where it stopped"""
     t = Talk(llm, par)
     t.stt.say(STORY)
     await t.until("assistant.delta")
@@ -335,7 +352,9 @@ async def main():
     )
     await t.close()
 
-    # 8. one sentence split in two by the recognizer
+
+async def scenario_8(llm, par, replies):
+    """one sentence split in two by the recognizer"""
     t = Talk(llm, par)
     t.stt.say("Tell me the name of")
     await t.until("assistant.delta")
@@ -350,7 +369,9 @@ async def main():
     )
     await t.close()
 
-    # 9. the reply about a late result is talked over before any of it is heard
+
+async def scenario_9(llm, par, replies):
+    """the reply about a late result is talked over before any of it is heard"""
     t = Talk(llm, par)
     t.search.gate = asyncio.Event()
     t.stt.say("Who won the most recent Formula One race?")
@@ -372,12 +393,18 @@ async def main():
     )
     note(
         "late result: told again after being talked over",
-        re.search(r"six|6", a.lower()) is not None and reminded and len(b) > 20 and not t.errors(),
-        f"{a!r} then {b[:110]!r}",
+        re.search(r"six|6", a.lower()) is not None
+        and reminded
+        and len(b) > 20
+        and t.search.count == 1
+        and not t.errors(),
+        f"{a!r} then {b[:110]!r}; searches started {t.search.count}",
     )
     await t.close()
 
-    # 10. many searches: clearing, and whether the provider reuses the request's unchanged start
+
+async def scenario_10(llm, par, replies):
+    """many searches: clearing, and whether the provider reuses the request's unchanged start"""
     t = Talk(llm, par)
     cities = ["Oslo", "Lima", "Cairo", "Rome", "Seoul", "Delhi", "Tokyo", "Paris", "Quito"]
     for city in cities:
@@ -405,14 +432,18 @@ async def main():
     )
     await t.close()
 
-    # 11. Hindi
+
+async def scenario_11(llm, par, replies):
+    """Hindi"""
     t = Talk(llm, par)
     a = await t.ask("भारत की राजधानी क्या है?")
     replies.append(a)
     note("another language", ("दिल्ली" in a or "Delhi" in a) and not t.errors(), f"{a!r}")
     await t.close()
 
-    # 12. the search service is down
+
+async def scenario_12(llm, par, replies):
+    """the search service is down"""
     t = Talk(llm, par)
     t.search.fail = True
     a = await t.ask("Who won the most recent Formula One race?")
@@ -427,7 +458,9 @@ async def main():
     note("search failure: next turn works", "Paris" in b, f"{b!r}")
     await t.close()
 
-    # 13. more searches than one reply is allowed
+
+async def scenario_13(llm, par, replies):
+    """more searches than one reply is allowed"""
     t = Talk(llm, par)
     a = await t.ask(
         "Search the web separately, one search each, for the population of Oslo, Lima, "
@@ -443,7 +476,9 @@ async def main():
     )
     await t.close()
 
-    # 14. a stray word in another script never reaches the model
+
+async def scenario_14(llm, par, replies):
+    """a stray word in another script never reaches the model"""
     t = Talk(llm, par)
     t.stt.say("What is the capital of France?")
     await t.until("assistant.delta")
@@ -454,7 +489,26 @@ async def main():
     note("noise word: dropped before the model", "हूँ" not in seen and "Paris" in a, f"{a!r}")
     await t.close()
 
-    # style, across every reply
+
+async def scenario_15(llm, par, replies):
+    """the user only checks in while a search is running"""
+    t = Talk(llm, par)
+    t.search.gate = asyncio.Event()
+    t.stt.say("Who won the most recent Formula One race?")
+    await t.until("tool.call")
+    a = await t.ask("Hello?")
+    replies.append(a)
+    calls = [c[0] for r in t.llm.requests[1:] for c in r["calls"]]
+    note(
+        "running search: a check-in starts no second search and cancels nothing",
+        t.search.count == 1 and not calls and not t.errors(),
+        f"{a!r}; searches started {t.search.count}; calls after the first: {calls or 'none'}",
+    )
+    await t.close()
+
+
+def style(replies):
+    """Checks across every reply the model produced."""
     marks = [
         r
         for r in replies
@@ -471,12 +525,46 @@ async def main():
         not ends,
         f"{len(ends)} of {len(replies)}",
     )
-    words = sorted(len(r.split()) for r in replies if r)
+    words = sorted(len(r.split()) for r in replies if r) or [0]
     note(
         "reply length for speech",
         True,
         f"median {words[len(words) // 2]} words, longest {words[-1]}",
     )
+
+
+SCENARIOS = [
+    scenario_1,
+    scenario_2,
+    scenario_3,
+    scenario_5,
+    scenario_6,
+    scenario_7,
+    scenario_8,
+    scenario_9,
+    scenario_10,
+    scenario_11,
+    scenario_12,
+    scenario_13,
+    scenario_14,
+    scenario_15,
+]
+
+
+async def main():
+    llm, par = OpenAIAdapterClass(), ParallelAdapterClass()
+    await asyncio.gather(llm.initialize(), par.initialize())
+    replies = []  # every reply the model produced, for the style checks
+    for scenario in SCENARIOS:
+        try:
+            await scenario(llm, par, replies)
+        except Exception as exc:
+            # Mostly a timeout: the model did something the scenario did not allow for.
+            # It is shown as something to look at, and the rest still run.
+            note(scenario.__doc__, False, f"did not finish: {exc!r}")
+            for talk in list(OPEN):
+                await talk.close()
+    style(replies)
     print(f"\n{sum(1 for _, v, _ in RESULTS if v == 'PASS')} of {len(RESULTS)} passed")
     await asyncio.gather(llm.close(), par.close())
 
