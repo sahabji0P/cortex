@@ -669,8 +669,72 @@ async def test_a_reply_cut_off_by_a_noise_is_picked_up_again() -> None:
     await f.conversation.close()
 
 
+async def test_a_stray_word_just_after_the_reply_starts_is_dropped_and_the_reply_resumes() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("The capital of France is Paris."), never],
+        [_delta("of France is Paris."), _completed(_message("of France is Paris."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("What is the capital of France?")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 2.5)  # two words of the reply heard, 2.65 s after the question
+    f.stt.say("हूँ")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert "user.final" not in _types(outputs)
+    sent = llm.requests[1]["input"]
+    assert _shape(sent) == ["user", "assistant", "developer"]
+    assert sent[1]["content"] == "The capital…"
+    assert "background noise" in sent[2]["content"]
+    await f.conversation.close()
+
+
+async def test_the_same_word_well_into_the_reply_is_taken_as_the_user_speaking() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("Once upon a time there was a dragon who lived in a cave."), never],
+        [_delta("ठीक है."), _completed(_message("ठीक है."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("Tell me a story.")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 6.5)
+    f.stt.say("रुको")  # "stop", six seconds in: far too late to be a trailing noise
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert _event(outputs, "user.final").text == "रुको"
+    assert llm.requests[1]["input"][-1] == {"role": "user", "content": "रुको"}
+    await f.conversation.close()
+
+
+async def test_a_language_the_user_has_already_spoken_is_never_noise() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("नमस्ते."), _completed(_message("नमस्ते."))],
+        [_delta("The capital"), never],
+        [_delta("ठीक है."), _completed(_message("ठीक है."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("मुझे हिंदी में जवाब दो।")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    f.stt.say("What is the capital of France?")
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("रुको")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert _event(outputs, "user.final").text == "रुको"
+    await f.conversation.close()
+
+
 @pytest.mark.parametrize(
-    ("fragment", "turn_so_far", "stray"),
+    ("fragment", "sentence_before", "stray"),
     [
         ("हूँ", "What is the capital of France?", True),
         ("да нет", "Tell me a story.", True),
@@ -686,9 +750,13 @@ async def test_a_reply_cut_off_by_a_noise_is_picked_up_again() -> None:
     ],
 )
 def test_only_a_short_fragment_in_a_new_script_after_a_whole_sentence_is_stray(
-    fragment: str, turn_so_far: str, stray: bool
+    fragment: str, sentence_before: str, stray: bool
 ) -> None:
-    assert _is_stray(fragment, turn_so_far) is stray
+    assert _is_stray(fragment, sentence_before, {"LATIN"}) is stray
+
+
+def test_a_script_spoken_at_any_point_in_the_conversation_is_not_stray() -> None:
+    assert _is_stray("रुको", "What is the capital of France?", {"LATIN", "DEVANAGARI"}) is False
 
 
 # ---- searching

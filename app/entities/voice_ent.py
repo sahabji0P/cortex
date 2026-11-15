@@ -135,6 +135,9 @@ places, events, facts, numbers, choices or outcomes. No full stop.
 
 # A trailing fragment longer than this many words is never treated as noise.
 _STRAY_MAX_WORDS = 2
+# Nor is one that starts later than this after the user's sentence ended, once a reply
+# to that sentence has been heard. Past that it is taken as the user speaking.
+_STRAY_WINDOW_SECONDS = 3.0
 # Latin, Devanagari and CJK sentence endings (the last two are the full-width ? and !).
 _SENTENCE_ENDS = (".", "?", "!", "।", "。", "\uff1f", "\uff01")
 
@@ -303,6 +306,12 @@ class VoiceConversation:
         self._turn: list[str] = []
         # Whether the turn the user has just opened cut a reply short.
         self._cut_a_reply = False
+        # For telling noise from speech: the user's last words and when they ended, when
+        # the turn now open began, and every writing system they have spoken in so far.
+        self._said = ""
+        self._said_at = 0.0
+        self._turn_began_at = 0.0
+        self._user_scripts: set[str] = set()
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
@@ -369,6 +378,7 @@ class VoiceConversation:
             async for event in self._stt.events():
                 if event.type == "turn.start":
                     self._user_speaking = True
+                    self._turn_began_at = self._clock()
                     await self._interrupt()
                 elif event.type == "turn.update":
                     self._emit("user.partial", event.transcript)
@@ -527,7 +537,7 @@ class VoiceConversation:
         if self._producing is not None or self._reply is not None:
             # A turn ended without the start that normally comes first.
             await self._interrupt()
-        said = bool(transcript) and not _is_stray(transcript, "\n".join(self._turn))
+        said = bool(transcript) and not self._is_noise(transcript)
         # Not after a turn with no words: there the reply is picked up again instead.
         await self._note_the_remainder(wanted=said)
         self._user_speaking = False
@@ -541,6 +551,8 @@ class VoiceConversation:
         if said:
             self._clear_old_results()
             self._turn.append(transcript)
+            self._said, self._said_at = transcript, self._clock()
+            self._user_scripts |= _scripts(transcript)
             self._emit("user.final", transcript)
         elif not unanswered:
             # Nothing was said, yet it stopped a reply that was being heard. (If the
@@ -626,6 +638,13 @@ class VoiceConversation:
             if call.running is not None:
                 call.output = await asyncio.shield(call.running)
         return True
+
+    def _is_noise(self, transcript: str) -> bool:
+        """Whether a turn's words are a stray fragment trailing the user's last sentence."""
+        trailing = bool(self._turn) or (
+            self._turn_began_at - self._said_at <= _STRAY_WINDOW_SECONDS
+        )
+        return trailing and _is_stray(transcript, self._said, self._user_scripts)
 
     def _clear_old_results(self) -> None:
         """Replace all but the newest search results with a marker, once enough pile up.
@@ -723,20 +742,23 @@ _CANCEL_TOOL = OpenAIAdapterClass.Tools.function(
 )
 
 
-def _is_stray(fragment: str, turn_so_far: str) -> bool:
-    """Whether a fragment that trails an unanswered turn is more likely noise than speech.
+def _is_stray(fragment: str, sentence_before: str, scripts_spoken: set[str]) -> bool:
+    """Whether a fragment that trails a sentence is more likely noise than speech.
 
     Speech recognition is not tied to one language. It can turn a cough or a door into a
     word or two in some other script, which then arrives just after a finished sentence.
-    This is kept narrow, because people do mix languages: only a fragment of a word or
-    two, in a script the sentence before it did not use, counts.
+
+    Dropping a real word is the worse mistake: the reply it interrupted is resumed, so
+    someone who said "stop" would be talked over. So this is narrow. Only a fragment of
+    a word or two counts, only in a writing system this user has not spoken in at any
+    point in the conversation, and only after a sentence that was finished.
     """
-    if not turn_so_far.rstrip().endswith(_SENTENCE_ENDS):
+    if not sentence_before.rstrip().endswith(_SENTENCE_ENDS):
         return False
     if len(fragment.split()) > _STRAY_MAX_WORDS:
         return False
     scripts = _scripts(fragment)
-    return bool(scripts) and scripts.isdisjoint(_scripts(turn_so_far))
+    return bool(scripts) and scripts.isdisjoint(scripts_spoken)
 
 
 def _scripts(text: str) -> set[str]:
