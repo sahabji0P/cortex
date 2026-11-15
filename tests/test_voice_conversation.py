@@ -938,6 +938,12 @@ def test_only_a_short_fragment_in_a_new_script_after_a_whole_sentence_is_stray(
         ("Hello what's हूँ", "Hello what's हूँ"),
         ("हूँ", "हूँ"),
         ("", ""),
+        # Nothing but punctuation before it: left whole, for the fragment rule to judge.
+        ("? हूँ", "? हूँ"),
+        ("123. हाँ जी", "123. हाँ जी"),
+        # One language in several scripts, or the same letters in a wider form.
+        ("今日は晴れです。 カメラ", "今日は晴れです。 カメラ"),
+        ("Is it ok? \uff2f\uff2b", "Is it ok? \uff2f\uff2b"),  # "OK" in full-width letters
     ],
 )
 def test_a_stray_word_run_on_to_the_end_of_a_sentence_is_cut_off(
@@ -949,6 +955,23 @@ def test_a_stray_word_run_on_to_the_end_of_a_sentence_is_cut_off(
 def test_a_tail_in_a_script_the_user_has_spoken_is_left_on_the_sentence() -> None:
     transcript = "What is the capital of France? रुको"
     assert _without_stray_tail(transcript, {"DEVANAGARI"}) == transcript
+
+
+async def test_a_noise_turn_that_starts_with_punctuation_is_still_dropped() -> None:
+    never = asyncio.Event()
+    llm = _LLM([_delta("The capital"), never], [_delta("Paris."), _completed(_message("Paris."))])
+    f = _conversation(llm)
+
+    f.stt.say("What is the capital of France?")
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("? हूँ")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert "user.final" not in _types(outputs)
+    assert llm.requests[1]["input"] == [
+        {"role": "user", "content": "What is the capital of France?"},
+    ]
+    await f.conversation.close()
 
 
 async def test_a_noise_word_inside_the_users_sentence_never_reaches_the_model() -> None:
@@ -1746,32 +1769,40 @@ def test_a_word_timing_that_does_not_match_the_text_ends_the_count_there() -> No
     assert utterance.heard(4.5) == ("It costs", False)
 
 
-def test_a_slow_sound_device_pushes_back_when_audio_is_heard() -> None:
+def test_a_slow_sound_device_puts_the_user_behind_the_schedule() -> None:
     clock = _Clock()
     playback = Playback(clock)
+    started = playback.schedule(2.0)
+    assert playback.hearing() == clock.now
 
-    playback.set_output_delay(0.25)  # Bluetooth, say
-    assert playback.schedule(1.0) == pytest.approx(clock.now + _DELAY + 0.25)
+    # Bluetooth, say. Reported after the audio was sent, and it still applies to it.
+    playback.set_output_delay(0.25)
+    assert playback.schedule(1.0) == started + 2.0
+    assert playback.hearing() == pytest.approx(clock.now - 0.25)
+    assert playback.ends_at == pytest.approx(started + 3.0 + 0.25)
 
     # A report that makes no sense is held to sane limits rather than trusted.
-    playback.reset()
     playback.set_output_delay(30)
-    assert playback.schedule(1.0) == pytest.approx(clock.now + _DELAY + 1.0)
-    playback.reset()
+    assert playback.hearing() == pytest.approx(clock.now - 1.0)
     playback.set_output_delay(-5)
-    assert playback.schedule(1.0) == pytest.approx(clock.now + _DELAY)
+    assert playback.hearing() == clock.now
+    # Dropping the queue does not forget the device.
+    playback.set_output_delay(0.25)
+    playback.reset()
+    assert playback.hearing() == pytest.approx(clock.now - 0.25)
 
 
-async def test_with_a_slow_sound_device_fewer_words_count_as_heard() -> None:
+async def test_a_delay_reported_mid_reply_counts_for_the_words_already_sent() -> None:
     never = asyncio.Event()
     llm = _LLM([_delta("Once upon a time there was a dragon."), never])
     f = _conversation(llm)
-    f.conversation.set_output_delay(1.0)
 
     f.stt.say("tell me a story")
     await _read_until(f.conversation, "assistant.delta")
     await _let_audio_out()
-    f.clock.advance(_DELAY + 3.5)  # three and a half words sent, but the device is a second behind
+    # All eight words have been sent. Only now does the browser know its real delay.
+    f.conversation.set_output_delay(1.0)
+    f.clock.advance(_DELAY + 3.5)  # three and a half words played, but heard a second later
     f.stt.turn_start()
     outputs = await _read_until(f.conversation, "interrupt")
 

@@ -450,7 +450,7 @@ class VoiceConversation:
         for call in reply.calls():
             if call.output is None:
                 self._outlive(call)
-        heard = reply.heard(self._clock())
+        heard = reply.heard(self._playback.hearing())
         if heard.items and self._labelling is not None:
             # Some of this reply was heard, so a note still being worded for the reply
             # before it is out of date. (A reply cut before any of it was heard changes
@@ -822,13 +822,26 @@ def _without_stray_tail(transcript: str, scripts_spoken: set[str]) -> str:
     if split is None:
         return transcript
     sentence, tail = split.groups()
-    stray = _is_stray(tail, sentence, scripts_spoken | _scripts(sentence))
+    spoken_in = _scripts(sentence)
+    # A "sentence" with no letters in it is just punctuation: nothing to compare with.
+    stray = bool(spoken_in) and _is_stray(tail, sentence, scripts_spoken | spoken_in)
     return sentence if stray else transcript
+
+
+# Japanese is written in three scripts at once, so they count as one writing system.
+_SAME_WRITING_SYSTEM = {"HIRAGANA": "CJK", "KATAKANA": "CJK", "KATAKANA-HIRAGANA": "CJK"}
 
 
 def _scripts(text: str) -> set[str]:
     """The writing systems used in a text, by the first word of each letter's Unicode name."""
-    return {unicodedata.name(letter, "?").split()[0] for letter in text if letter.isalpha()}
+    # Full-width and half-width forms are folded first: a full-width "OK" is Latin, not a
+    # new script.
+    names = {
+        unicodedata.name(letter, "?").split()[0]
+        for letter in unicodedata.normalize("NFKC", text)
+        if letter.isalpha()
+    }
+    return {_SAME_WRITING_SYSTEM.get(name, name) for name in names}
 
 
 def _format_search(result: SearchResult) -> str:

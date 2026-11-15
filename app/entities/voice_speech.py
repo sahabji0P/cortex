@@ -50,19 +50,21 @@ class Playback:
     def __init__(self, clock: Clock = time.monotonic) -> None:
         self.clock = clock
         self._free_at = 0.0
-        self._delay = _CLIENT_DELAY
+        self._device_delay = 0.0
 
     def set_output_delay(self, seconds: float) -> None:
         """Take the client's word for how long its sound device holds audio before it is heard.
 
         A speaker adds a few hundredths of a second and Bluetooth a few tenths. Without
         this the user would be taken to have heard words still on their way to their ears.
+        It is kept apart from the schedule, so that a figure reported part-way through a
+        reply also applies to the audio already sent.
         """
-        self._delay = _CLIENT_DELAY + min(max(seconds, 0.0), _MAX_OUTPUT_DELAY)
+        self._device_delay = min(max(seconds, 0.0), _MAX_OUTPUT_DELAY)
 
     def schedule(self, seconds: float) -> float:
-        """Record a chunk of this length being sent now. Return when it starts playing."""
-        start = max(self._free_at, self.clock() + self._delay)
+        """Record a chunk of this length being sent now. Return when the client plays it."""
+        start = max(self._free_at, self.clock() + _CLIENT_DELAY)
         self._free_at = start + seconds
         return start
 
@@ -70,10 +72,18 @@ class Playback:
         """The client dropped everything it had queued."""
         self._free_at = 0.0
 
+    def hearing(self) -> float:
+        """The moment on the schedule that the user is hearing right now.
+
+        Sound the client is playing now reaches the user one device delay later, so what
+        they hear now is what it played that long ago.
+        """
+        return self.clock() - self._device_delay
+
     @property
     def ends_at(self) -> float:
-        """When the client finishes playing everything sent so far."""
-        return self._free_at
+        """When the user has heard the last of everything sent so far."""
+        return self._free_at + self._device_delay
 
 
 class Utterance:
