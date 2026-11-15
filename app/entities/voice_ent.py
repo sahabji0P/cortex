@@ -695,8 +695,9 @@ class VoiceConversation:
             # still running in the background, or finished and waiting to be delivered.
             # Asked without thinking, the model searched for the same thing again in a
             # third to a half of measured runs where the user only said "hello?". With a
-            # little thinking it was about one in twenty. That costs about half a second,
-            # and one prompt-cache miss: the provider keeps a separate cache per setting,
+            # little thinking it was about one in twenty. That costs about half a second
+            # at the median and 1.5 s for the slowest tenth, on every request made while
+            # this holds, and one prompt-cache miss: the provider keeps a cache per setting,
             # so the first request after the switch is read in full. Going back to no
             # thinking finds the earlier cache again.
             reasoning={"effort": "low" if self._outliving or self._late else "none"},
