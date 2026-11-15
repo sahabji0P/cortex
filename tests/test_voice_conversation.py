@@ -12,13 +12,7 @@ import pytest
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.entities import voice_ent
-from app.entities.voice_ent import (
-    VoiceConversation,
-    VoiceEvent,
-    _is_stray,
-    _same_query,
-    _without_stray_tail,
-)
+from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
 from app.entities.voice_speech import Playback, Utterance
 from app.routers.voice.service import VoiceServiceV1Class
 
@@ -1401,6 +1395,7 @@ async def test_a_result_that_lands_while_the_user_speaks_is_brought_up_after_the
     llm, finish = _slow_search_then(
         [_delta("Four."), _completed(_message("Four."))],
         [_delta("It is sunny."), _completed(_message("It is sunny."))],
+        [_delta("Welcome."), _completed(_message("Welcome."))],
     )
     f = _conversation(llm, _Search(gate=finish))
 
@@ -1429,52 +1424,75 @@ async def test_a_result_that_lands_while_the_user_speaks_is_brought_up_after_the
     assert _shape(told)[-4:] == ["user", "assistant", "function_call", "function_call_output"]
     assert json.loads(told[-2]["arguments"]) == {"deferred_result_for": "call_1"}
     assert "Norris won in Las Vegas." in told[-1]["output"]
+
+    # They have now heard it. Their next turn is answered and nothing is brought up again.
+    f.clock.advance(60)
+    f.stt.say("thanks")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 4
     await f.conversation.close()
 
 
-async def test_asking_for_the_same_search_again_gets_the_one_already_running() -> None:
-    again = _search_call("the weather in Pune today", "call_2")  # reworded, as models do
-    llm, finish = _slow_search_then(
-        [_starts(again), _completed(again)],
-        [_delta("It is sunny."), _completed(_message("It is sunny."))],
-    )
-    search = _Search(gate=finish)
-    f = _conversation(llm, search)
-
+async def _interrupted_search_then_hello(f: _Fixture, finish: asyncio.Event) -> None:
+    """A search is interrupted with "hello?", that is answered and heard, and the result lands."""
     f.stt.say("what's the weather")
     await _read_until(f.conversation, "tool.call")
     f.stt.say("hello?")
-    await _read_until(f.conversation, "tool.call")  # the model asks for the same thing again
+    await _read_until(f.conversation, "assistant.done")
     finish.set()
+    f.clock.advance(60)
+
+
+async def test_a_result_whose_reply_was_cut_off_unheard_by_noise_is_told_again() -> None:
+    never = asyncio.Event()
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [_delta("It is"), never],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    await _interrupted_search_then_hello(f, finish)
+    # The reply about the result starts, and a noise cuts it off before a word is heard.
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("")
     outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert outputs[-1].text == "It is sunny."
+    again = llm.requests[3]["input"]
+    assert _shape(again)[-3:] == ["function_call", "function_call_output", "developer"]
+    assert "has not been told to the user" in again[-1]["content"]
+
+    # Once it has been heard, the user is owed nothing more.
     f.clock.advance(60)
     await asyncio.sleep(0.25)
-
-    # One search was made, its result answered the second call, and it is not then
-    # announced all over again.
-    assert search.queries == ["weather in Pune"]
-    assert outputs[-1].text == "Let me check. It is sunny."
-    assert len(llm.requests) == 3
-    assert f.conversation._late == []
+    assert len(llm.requests) == 4
     await f.conversation.close()
 
 
-@pytest.mark.parametrize(
-    ("earlier", "query", "same"),
-    [
-        ("weather in Pune", "weather in Pune", True),
-        (
-            "most recent Formula One Grand Prix race winner November 2026 latest F1 race result",
-            "most recent Formula One Grand Prix race winner as of November 15 2026 F1 winner",
-            True,
-        ),
-        ("weather in Pune", "population of Tokyo", False),
-        ("weather in Pune", "weather in Paris and the forecast for tomorrow", False),
-        ("", "", False),
-    ],
-)
-def test_a_reworded_search_counts_as_the_same_one(earlier: str, query: str, same: bool) -> None:
-    assert _same_query(json.dumps({"query": earlier}), query) is same
+async def test_a_result_whose_reply_the_user_talked_over_is_told_after_their_answer() -> None:
+    never = asyncio.Event()
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [_delta("It is"), never],
+        [_delta("Four."), _completed(_message("Four."))],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    await _interrupted_search_then_hello(f, finish)
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("what is two plus two?")
+    outputs = await _read_until(f.conversation, "assistant.done")
+    assert outputs[-1].text == "Four."
+
+    f.clock.advance(60)
+    outputs = await _read_until(f.conversation, "assistant.done")
+    assert outputs[-1].text == "It is sunny."
+    assert "has not been told to the user" in llm.requests[4]["input"][-1]["content"]
+    await f.conversation.close()
 
 
 async def test_a_result_waiting_its_turn_keeps_waiting_while_the_user_talks() -> None:

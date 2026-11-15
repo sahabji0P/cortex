@@ -94,7 +94,8 @@ background. Do not search for the same thing again: say it is still coming, and 
 whatever else they asked. The result reaches you by itself, as a web_search call with \
 "deferred_result_for" in its arguments. You did not make that call: it only delivers the \
 late result. When it arrives, tell the user what it found straight away, without being \
-asked, unless they have said they no longer want it.
+asked, unless they have said they no longer want it. If you have already told them the \
+same thing, do not repeat it: say in a few words that the search confirms it.
 """
 
 # Stands in for the result of a call that was still running when the user spoke.
@@ -110,6 +111,13 @@ _PLACEHOLDER = (
 _FULL_RESULTS_ALLOWED = 6
 _FULL_RESULTS_KEPT = 2
 _CLEARED = "[Cleared to save context. Search again if this is still needed.]"
+
+# Added when the reply that was to tell the user of a late result was cut off unheard.
+_RESULT_REMINDER = (
+    "The search result above has not been told to the user: the reply meant to tell them "
+    "was cut off before they heard any of it. Tell them what it found now, unless they "
+    "have said they no longer want it."
+)
 
 # Added to the history when a turn with no words in it cut a reply off.
 _NOISE_NOTE = (
@@ -193,9 +201,6 @@ class _ToolCall:
     placeholder: bool = False
     # Whether the result has been sent back to the model, in a later call of its reply.
     seen: bool = False
-    # Whether the result of this call, left running, was handed over some other way,
-    # so that it must not also be delivered late.
-    collected: bool = False
     # The result item most recently built by `items()`: the one in the history, once
     # this call is there.
     result_item: FunctionCallOutput | None = None
@@ -228,6 +233,7 @@ class _Heard:
     """A reply as the user heard it."""
 
     items: list[ResponseInputItemParam]  # what joins the history
+    spoke: bool  # whether any of the reply's speech is among them
     kept: str | None  # the text kept of a reply that was cut short; None if heard in full
     unheard: str  # the text that was dropped
 
@@ -235,8 +241,10 @@ class _Heard:
 class _Reply:
     """One reply while it is produced and played: what was said and what was looked up."""
 
-    def __init__(self, speech: Speech) -> None:
+    def __init__(self, speech: Speech, *, brings_results: bool = False) -> None:
         self.speech = speech
+        # Whether this reply is the one that tells the user of a late search result.
+        self.brings_results = brings_results
         self._parts: list[Utterance | _ToolCall] = []
         # How many of the parts have been sent back to the model, in a later call of
         # this same reply. Those are final: the model has seen them as they are.
@@ -298,7 +306,7 @@ class _Reply:
             if text:
                 spoken.append(text)
                 items.append({"role": "assistant", "content": text})
-        return _Heard(items, " ".join(spoken) if cut else None, " ".join(unheard))
+        return _Heard(items, bool(spoken), " ".join(spoken) if cut else None, " ".join(unheard))
 
 
 class VoiceConversation:
@@ -325,8 +333,10 @@ class VoiceConversation:
         # The user's turn that has not been answered yet, as the pieces it arrived in.
         # It joins the history when some of the reply to it has been heard.
         self._turn: list[str] = []
-        # Whether the turn the user has just opened cut a reply short.
+        # Whether the turn the user has just opened cut a reply short, and whether any
+        # of that reply had been heard.
         self._cut_a_reply = False
+        self._cut_after_hearing = False
         # For telling noise from speech: the user's last words and when they ended, when
         # the turn now open began, and every writing system they have spoken in so far.
         self._said = ""
@@ -352,6 +362,8 @@ class VoiceConversation:
         self._outliving: dict[str, _ToolCall] = {}
         # Results of such calls, waiting for a quiet moment to be given to the model.
         self._late: list[tuple[_ToolCall, str]] = []
+        # Whether a late result is in the history that the user has not been told of.
+        self._results_owed = False
         self._announcing: asyncio.Task[None] | None = None
         # The calls in the history that we wrote to carry a late result: stub call id to
         # the id of the call the model really made.
@@ -429,6 +441,7 @@ class VoiceConversation:
         heard = self._settle()
         kept = heard.kept if heard is not None else None
         self._cut_a_reply = kept is not None
+        self._cut_after_hearing = bool(kept)
         if producing is not None:
             producing.cancel()
         self._playback.reset()
@@ -456,6 +469,8 @@ class VoiceConversation:
             if call.output is None:
                 self._outlive(call)
         heard = reply.heard(self._playback.hearing())
+        if reply.brings_results and heard.spoke:
+            self._results_owed = False
         if heard.items and self._labelling is not None:
             # Some of this reply was heard, so a note still being worded for the reply
             # before it is out of date. (A reply cut before any of it was heard changes
@@ -521,7 +536,7 @@ class VoiceConversation:
 
     def _finished_late(self, call: _ToolCall, finished: asyncio.Task[str]) -> None:
         self._outliving.pop(call.call_id, None)
-        if finished.cancelled() or self._closed or call.collected:
+        if finished.cancelled() or self._closed:
             return
         self._late.append((call, finished.result()))
         self._announce_when_quiet()
@@ -529,15 +544,20 @@ class VoiceConversation:
     def _announce_when_quiet(self) -> None:
         """Make sure something is waiting to give the model its late results."""
         waiting = self._announcing is not None and not self._announcing.done()
-        if self._late and not self._user_speaking and not waiting:
+        owed = bool(self._late) or self._results_owed
+        if owed and not self._user_speaking and not waiting:
             self._announcing = asyncio.create_task(self._announce_late_results())
 
     async def _announce_late_results(self) -> None:
-        """Wait until nothing is being said, then let the model answer its late results.
+        """Wait until nothing is being said, then have the model tell the user of late results.
 
         Nothing is being said once the reply in progress has been produced and played to
         the end. Only then is that reply final, so only then may another request be made.
-        If the user speaks first, this is cancelled and their turn carries the results.
+        If the user speaks first, this is cancelled, and it starts again after they have
+        been answered.
+
+        The user is owed the result until they have heard some of the reply about it. If
+        that reply is cut off unheard, it is made again, with a note saying why.
         """
         while True:
             if self._producing is not None and not self._producing.done():
@@ -546,11 +566,15 @@ class VoiceConversation:
                 await asyncio.sleep(_QUIET_CHECK_SECONDS)
             else:
                 break
-        if not self._late:
-            return  # a reply made in the meantime has already been given them
         self._settle()
-        self._add_late_results()
-        self._producing = asyncio.create_task(self._respond())
+        if self._late:
+            self._add_late_results()
+        elif self._results_owed:
+            self._history.append({"role": "developer", "content": _RESULT_REMINDER})
+        else:
+            return  # the user has been told in the meantime
+        self._results_owed = True
+        self._producing = asyncio.create_task(self._respond(brings_results=True))
 
     def _add_late_results(self) -> None:
         """Add each late result to the history as a stub call followed by the result.
@@ -596,8 +620,11 @@ class VoiceConversation:
             # note still being worded is kept for when the user does say something.
             await self._note_the_remainder()
         self._user_speaking = False
-        if not said and not self._turn and not self._cut_a_reply:
-            # Nothing was said and nothing was stopped: only late results may be waiting.
+        # The reply that was to tell the user of a late result, cut off unheard, is not
+        # "picked up where it stopped": it is made again, by the same path as before.
+        retell = self._results_owed and not self._cut_after_hearing
+        if not said and not self._turn and (not self._cut_a_reply or retell):
+            # Nothing was said and nothing heard was stopped: late results may be waiting.
             self._announce_when_quiet()
             return
         if said:
@@ -616,9 +643,10 @@ class VoiceConversation:
         # until this reply has been heard, and is then answered in a reply of its own.
         self._announce_when_quiet()
 
-    async def _respond(self) -> None:
+    async def _respond(self, *, brings_results: bool = False) -> None:
         """Produce one reply: model rounds (with searches in between), spoken as they stream."""
-        reply = _Reply(Speech(self._tts, self._out.put_nowait, self._playback))
+        speech = Speech(self._tts, self._out.put_nowait, self._playback)
+        reply = _Reply(speech, brings_results=brings_results)
         self._reply = reply
         try:
             for round_number in range(_MAX_SEARCHES + 1):
@@ -724,8 +752,6 @@ class VoiceConversation:
             if name == "web_search":
                 query = str(json.loads(arguments)["query"])
                 self._emit("tool.call", query)
-                if (already := self._same_search(query)) is not None:
-                    return await already
                 # The fastest mode: the user is waiting in silence while this runs.
                 found = await self._search.search(objective=query, queries=[query], mode="turbo")
                 return _format_search(found)
@@ -734,25 +760,6 @@ class VoiceConversation:
         except Exception as exc:
             return f"{name} failed: {exc}"
         return f"Unknown tool: {name}"
-
-    def _same_search(self, query: str) -> asyncio.Future[str] | None:
-        """The result of much the same search that was interrupted, if there is one.
-
-        A model told that its search is still running sometimes makes it again anyway,
-        usually reworded. It is given the one already under way (or already back and
-        waiting to be brought up), which is then not brought up a second time.
-        """
-        for index, (call, output) in enumerate(self._late):
-            if _same_query(call.arguments, query):
-                del self._late[index]
-                done: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-                done.set_result(output)
-                return done
-        for call in self._outliving.values():
-            if _same_query(call.arguments, query) and call.running is not None:
-                call.collected = True
-                return asyncio.shield(call.running)
-        return None
 
     def _cancel_call(self, call_id: str) -> str:
         """Stop a call that outlived its reply. Its result will never arrive."""
@@ -810,20 +817,6 @@ _CANCEL_TOOL = OpenAIAdapterClass.Tools.function(
         "additionalProperties": False,
     },
 )
-
-
-def _same_query(arguments: str, query: str) -> bool:
-    """Whether a search call's arguments ask for much the same thing as `query`.
-
-    Reworded queries share most of their words; queries about different things share
-    few. At least half the words of the two together have to be common to both.
-    """
-    try:
-        earlier = str(json.loads(arguments)["query"])
-    except (ValueError, KeyError, TypeError):
-        return False
-    one, other = (set(re.findall(r"\w+", text.lower())) for text in (earlier, query))
-    return bool(one | other) and len(one & other) * 2 >= len(one | other)
 
 
 def _is_stray(fragment: str, sentence_before: str, scripts_spoken: set[str]) -> bool:
