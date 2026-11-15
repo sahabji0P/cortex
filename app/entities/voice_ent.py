@@ -30,9 +30,10 @@ sentence in two, and the second half is not a new request.
 
 A search is not stopped by an interruption. If the user speaks while one is running, its
 call gets a placeholder result so the history stays valid, and the search carries on.
-When it finishes, the real result is added at the next quiet moment as a call written
-by us (a stub that names the original call) followed by that result, and the model
-replies to it without waiting for the user.
+What the user said is answered first. The real result is then added at the next quiet
+moment, even if it came in long before, as a call written by us (a stub that names the
+original call) followed by that result, and the model tells the user about it in a
+reply of its own, without waiting to be asked.
 
 When a cut leaves a lot unheard, the history also gets a short note naming what the
 unheard part was about. It names the subject only, never what was said.
@@ -92,7 +93,8 @@ answer from the results and name the source.
 background. Do not search for the same thing again: say it is still coming, and answer \
 whatever else they asked. The result reaches you by itself, as a web_search call with \
 "deferred_result_for" in its arguments. You did not make that call: it only delivers the \
-late result. Then tell the user what it found, unless they no longer want it.
+late result. When it arrives, tell the user what it found straight away, without being \
+asked, unless they have said they no longer want it.
 """
 
 # Stands in for the result of a call that was still running when the user spoke.
@@ -191,6 +193,9 @@ class _ToolCall:
     placeholder: bool = False
     # Whether the result has been sent back to the model, in a later call of its reply.
     seen: bool = False
+    # Whether the result of this call, left running, was handed over some other way,
+    # so that it must not also be delivered late.
+    collected: bool = False
     # The result item most recently built by `items()`: the one in the history, once
     # this call is there.
     result_item: FunctionCallOutput | None = None
@@ -516,7 +521,7 @@ class VoiceConversation:
 
     def _finished_late(self, call: _ToolCall, finished: asyncio.Task[str]) -> None:
         self._outliving.pop(call.call_id, None)
-        if finished.cancelled() or self._closed:
+        if finished.cancelled() or self._closed or call.collected:
             return
         self._late.append((call, finished.result()))
         self._announce_when_quiet()
@@ -595,26 +600,21 @@ class VoiceConversation:
             # Nothing was said and nothing was stopped: only late results may be waiting.
             self._announce_when_quiet()
             return
-        unanswered = bool(self._turn)
-        # Results that came in while the user was speaking go in before what they said.
-        self._add_late_results()
         if said:
             self._clear_old_results()
             self._turn.append(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
             self._emit("user.final", transcript)
-        elif not unanswered:
+        elif not self._turn:
             # Nothing was said, yet it stopped a reply that was being heard. (If the
-            # user's own turn was still unanswered, it is simply answered again.)
+            # user's own turn is still unanswered, it is simply answered again.)
             self._history.append({"role": "developer", "content": _NOISE_NOTE})
-        if self._announcing is not None:
-            # This reply covers any late results, so nothing needs to wait for quiet.
-            # Forgotten at once: a cancelled task still looks busy until it next runs,
-            # and a result landing before then would find no one waiting for it.
-            self._announcing.cancel()
-            self._announcing = None
         self._producing = asyncio.create_task(self._respond())
+        # A result that came in while the user was speaking is not slipped in with their
+        # turn: the model would answer what they said and never mention it. It waits
+        # until this reply has been heard, and is then answered in a reply of its own.
+        self._announce_when_quiet()
 
     async def _respond(self) -> None:
         """Produce one reply: model rounds (with searches in between), spoken as they stream."""
@@ -724,6 +724,8 @@ class VoiceConversation:
             if name == "web_search":
                 query = str(json.loads(arguments)["query"])
                 self._emit("tool.call", query)
+                if (already := self._same_search(query)) is not None:
+                    return await already
                 # The fastest mode: the user is waiting in silence while this runs.
                 found = await self._search.search(objective=query, queries=[query], mode="turbo")
                 return _format_search(found)
@@ -732,6 +734,25 @@ class VoiceConversation:
         except Exception as exc:
             return f"{name} failed: {exc}"
         return f"Unknown tool: {name}"
+
+    def _same_search(self, query: str) -> asyncio.Future[str] | None:
+        """The result of much the same search that was interrupted, if there is one.
+
+        A model told that its search is still running sometimes makes it again anyway,
+        usually reworded. It is given the one already under way (or already back and
+        waiting to be brought up), which is then not brought up a second time.
+        """
+        for index, (call, output) in enumerate(self._late):
+            if _same_query(call.arguments, query):
+                del self._late[index]
+                done: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+                done.set_result(output)
+                return done
+        for call in self._outliving.values():
+            if _same_query(call.arguments, query) and call.running is not None:
+                call.collected = True
+                return asyncio.shield(call.running)
+        return None
 
     def _cancel_call(self, call_id: str) -> str:
         """Stop a call that outlived its reply. Its result will never arrive."""
@@ -789,6 +810,20 @@ _CANCEL_TOOL = OpenAIAdapterClass.Tools.function(
         "additionalProperties": False,
     },
 )
+
+
+def _same_query(arguments: str, query: str) -> bool:
+    """Whether a search call's arguments ask for much the same thing as `query`.
+
+    Reworded queries share most of their words; queries about different things share
+    few. At least half the words of the two together have to be common to both.
+    """
+    try:
+        earlier = str(json.loads(arguments)["query"])
+    except (ValueError, KeyError, TypeError):
+        return False
+    one, other = (set(re.findall(r"\w+", text.lower())) for text in (earlier, query))
+    return bool(one | other) and len(one & other) * 2 >= len(one | other)
 
 
 def _is_stray(fragment: str, sentence_before: str, scripts_spoken: set[str]) -> bool:
