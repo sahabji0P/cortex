@@ -15,6 +15,8 @@ async def converse(websocket: WebSocket, service: VoiceServiceRegistry.V1) -> No
     """A spoken conversation over one WebSocket.
 
     Send mic audio as binary frames: raw 16-bit mono PCM at 16 kHz, about 100 ms each.
+    Optionally send `{"type": "playback", "delay": seconds}` as a text frame to report how
+    long your sound device delays audio, so interruptions are judged by what was heard.
     Receive speech as binary frames (raw 16-bit mono PCM at 24 kHz) and JSON text frames
     `{"type": ..., "text": ...}` with type `user.partial`, `user.final`,
     `assistant.delta`, `assistant.done`, `tool.call`, `interrupt` or `error`.

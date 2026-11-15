@@ -3,9 +3,11 @@ import contextlib
 from typing import Annotated
 
 from fastapi import Depends, WebSocket
+from pydantic import ValidationError
 
 from app.entities import EntitiesRegistry
 from app.entities.voice_ent import VoiceConversation
+from app.routers.voice.models import VoiceModels
 
 
 class VoiceServiceV1Class:
@@ -15,8 +17,9 @@ class VoiceServiceV1Class:
     async def converse(self, websocket: WebSocket) -> None:
         """Bridge a client WebSocket to one voice conversation.
 
-        Uplink: client binary frames are mic audio. Downlink: binary frames are speech
-        audio, text frames are JSON `VoiceEvent`s. Ends when either side drops.
+        Uplink: client binary frames are mic audio, and a JSON text frame can report the
+        client's playback delay. Downlink: binary frames are speech audio, text frames are
+        JSON `VoiceEvent`s. Ends when either side drops.
         """
         await websocket.accept()
         try:
@@ -56,6 +59,11 @@ class VoiceServiceV1Class:
                 return
             if (audio := message.get("bytes")) is not None:
                 await conversation.send_audio(audio)
+            elif (text := message.get("text")) is not None:
+                # The only text frame a client sends. Anything else is ignored.
+                with contextlib.suppress(ValidationError):
+                    report = VoiceModels.V1.Input.Playback.model_validate_json(text)
+                    conversation.set_output_delay(report.delay)
 
     @staticmethod
     async def _relay_outputs(websocket: WebSocket, conversation: VoiceConversation) -> None:

@@ -365,6 +365,10 @@ class VoiceConversation:
         """Feed mic audio: raw 16-bit mono PCM at 16 kHz."""
         await self._stt.send_audio(pcm)
 
+    def set_output_delay(self, seconds: float) -> None:
+        """Take the client's report of its sound device's delay (see `Playback`)."""
+        self._playback.set_output_delay(seconds)
+
     async def outputs(self) -> AsyncIterator[VoiceEvent | bytes]:
         """Yield events and speech audio (raw 16-bit mono PCM at 24 kHz) in order."""
         while (item := await self._out.get()) is not None:

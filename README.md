@@ -22,7 +22,7 @@ mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ─�
 
 The history is what the model is sent on every call. It lives in memory for the life of the connection, nothing is stored at OpenAI, and it follows three rules.
 
-1. **It holds what the user heard, not what was generated.** A reply joins the history only once it has been heard in full or cut off. A reply that is cut off is stored as the words that were heard, ending in "…", and the rest is never sent back. How much was heard comes from Cartesia's word timings and a server-side copy of the client's playback schedule. In live runs the stored text was within two words of the audio really played, and never past it. When a cut leaves twelve or more words unheard, a short note follows it saying what kind of thing the unheard part was ("the rest of the story", "the answer and its source"), never what it said.
+1. **It holds what the user heard, not what was generated.** A reply joins the history only once it has been heard in full or cut off. A reply that is cut off is stored as the words that were heard, ending in "…", and the rest is never sent back. How much was heard comes from Cartesia's word timings and a server-side copy of the client's playback schedule, shifted by the sound-device delay the client reports (about 40 ms on laptop speakers, a few tenths of a second on Bluetooth). In live runs the stored text was within two words of the audio really played, and never past it. When a cut leaves twelve or more words unheard, a short note follows it saying what kind of thing the unheard part was ("the rest of the story", "the answer and its source"), never what it said.
 2. **Every tool call keeps a valid result.** An interruption does not stop a search. Its call gets a placeholder result and the search carries on. When it finishes, the real result is added as a call written by the server (a stub that names the original call) followed by the result, and the model answers it at the next quiet moment without waiting for the user. A quiet moment is when the reply in progress has finished playing, so a result that lands during a long reply waits for it. The model can stop a running search with `cancel_tool_call`.
 3. **Nothing the model has been sent is changed afterwards**, with two exceptions. Each request starts with the whole of the one before it, and the instructions and tool list are identical every time, so a prompt cache stays valid. One consequence: what the model said before a search is kept in full even if the user cut it off part-way, because the model was already sent it. The exceptions:
    - The user's open turn, always the last item, can gain a line.
@@ -53,6 +53,7 @@ Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow t
 | --- | --- | --- |
 | client → server | binary | mic audio: raw 16-bit mono PCM at 16 kHz, about 100 ms per frame |
 | server → client | binary | speech audio: raw 16-bit mono PCM at 24 kHz |
+| client → server | text | optional `{"type": "playback", "delay": seconds}`: how long the client's sound device delays audio (in a browser, `AudioContext.outputLatency + baseLatency`) |
 | server → client | text | JSON `{"type": ..., "text": ...}` |
 
 | Event type | Meaning |

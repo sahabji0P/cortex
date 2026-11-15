@@ -85,8 +85,19 @@ function play(buffer) {
   playAt = Math.max(playAt, audio.currentTime + 0.05);
   source.start(playAt);
   playAt += chunk.duration;
+  reportDelay();  // the browser only knows the device's real delay once audio is flowing
   playing.add(source);
   source.onended = () => playing.delete(source);
+}
+
+// Tell the server how long this device holds audio before it is heard (speakers a little,
+// Bluetooth a lot), so that it does not count words still on their way to our ears.
+let reportedDelay = -1;
+function reportDelay() {
+  const delay = (audio?.outputLatency || 0) + (audio?.baseLatency || 0);
+  if (socket?.readyState !== WebSocket.OPEN || Math.abs(delay - reportedDelay) < 0.01) return;
+  reportedDelay = delay;
+  socket.send(JSON.stringify({ type: "playback", delay }));
 }
 
 // The whole of "interruption" on this side: silence everything queued, right now.
@@ -138,7 +149,7 @@ async function start() {
 
   socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/voice/converse`);
   socket.binaryType = "arraybuffer";
-  socket.onopen = () => { statusEl.textContent = "listening"; };
+  socket.onopen = () => { statusEl.textContent = "listening"; reportedDelay = -1; reportDelay(); };
   socket.onmessage = (message) => typeof message.data === "string" ? onEvent(JSON.parse(message.data)) : play(message.data);
   socket.onclose = () => stop();
   worklet.port.onmessage = (message) => { if (socket?.readyState === WebSocket.OPEN) socket.send(message.data); };

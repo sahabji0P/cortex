@@ -35,6 +35,9 @@ _BYTES_PER_SECOND = CartesiaTTSAdapterClass.sample_rate * 2
 # say the user heard less than they did, never more: words they did not hear must not
 # end up in the history.
 _CLIENT_DELAY = 0.15
+# The most a client may add to that for its sound device. Bluetooth runs to a few tenths
+# of a second; anything far beyond is taken as a mistake.
+_MAX_OUTPUT_DELAY = 1.0
 
 
 class Playback:
@@ -47,10 +50,19 @@ class Playback:
     def __init__(self, clock: Clock = time.monotonic) -> None:
         self.clock = clock
         self._free_at = 0.0
+        self._delay = _CLIENT_DELAY
+
+    def set_output_delay(self, seconds: float) -> None:
+        """Take the client's word for how long its sound device holds audio before it is heard.
+
+        A speaker adds a few hundredths of a second and Bluetooth a few tenths. Without
+        this the user would be taken to have heard words still on their way to their ears.
+        """
+        self._delay = _CLIENT_DELAY + min(max(seconds, 0.0), _MAX_OUTPUT_DELAY)
 
     def schedule(self, seconds: float) -> float:
         """Record a chunk of this length being sent now. Return when it starts playing."""
-        start = max(self._free_at, self.clock() + _CLIENT_DELAY)
+        start = max(self._free_at, self.clock() + self._delay)
         self._free_at = start + seconds
         return start
 

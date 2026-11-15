@@ -14,6 +14,7 @@ from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.entities import voice_ent
 from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
 from app.entities.voice_speech import Playback, Utterance
+from app.routers.voice.service import VoiceServiceV1Class
 
 # The fake speech is 24 kHz 16-bit mono, like the real one.
 _BYTES_PER_SECOND = 48000
@@ -1743,6 +1744,78 @@ def test_a_word_timing_that_does_not_match_the_text_ends_the_count_there() -> No
     utterance.add_words([CartesiaTTSWord(word, n + 1.0) for n, word in enumerate(spoken)])
 
     assert utterance.heard(4.5) == ("It costs", False)
+
+
+def test_a_slow_sound_device_pushes_back_when_audio_is_heard() -> None:
+    clock = _Clock()
+    playback = Playback(clock)
+
+    playback.set_output_delay(0.25)  # Bluetooth, say
+    assert playback.schedule(1.0) == pytest.approx(clock.now + _DELAY + 0.25)
+
+    # A report that makes no sense is held to sane limits rather than trusted.
+    playback.reset()
+    playback.set_output_delay(30)
+    assert playback.schedule(1.0) == pytest.approx(clock.now + _DELAY + 1.0)
+    playback.reset()
+    playback.set_output_delay(-5)
+    assert playback.schedule(1.0) == pytest.approx(clock.now + _DELAY)
+
+
+async def test_with_a_slow_sound_device_fewer_words_count_as_heard() -> None:
+    never = asyncio.Event()
+    llm = _LLM([_delta("Once upon a time there was a dragon."), never])
+    f = _conversation(llm)
+    f.conversation.set_output_delay(1.0)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 3.5)  # three and a half words sent, but the device is a second behind
+    f.stt.turn_start()
+    outputs = await _read_until(f.conversation, "interrupt")
+
+    assert outputs[-1].text == "Once upon…"
+    await f.conversation.close()
+
+
+class _Socket:
+    """A client WebSocket that plays back a fixed list of frames, then disconnects."""
+
+    def __init__(self, *frames: dict) -> None:
+        self._frames = [*frames, {"type": "websocket.disconnect"}]
+
+    async def receive(self) -> dict:
+        return self._frames.pop(0)
+
+
+class _Listener:
+    def __init__(self) -> None:
+        self.audio: list[bytes] = []
+        self.delays: list[float] = []
+
+    async def send_audio(self, pcm: bytes) -> None:
+        self.audio.append(pcm)
+
+    def set_output_delay(self, seconds: float) -> None:
+        self.delays.append(seconds)
+
+
+async def test_the_service_takes_audio_and_the_playback_report_and_ignores_the_rest() -> None:
+    listener = _Listener()
+    socket = _Socket(
+        {"type": "websocket.receive", "bytes": b"\x01\x02"},
+        {"type": "websocket.receive", "text": json.dumps({"type": "playback", "delay": 0.18})},
+        {"type": "websocket.receive", "text": json.dumps({"type": "playback", "delay": -1})},
+        {"type": "websocket.receive", "text": json.dumps({"type": "something else"})},
+        {"type": "websocket.receive", "text": "not json"},
+        {"type": "websocket.receive", "bytes": b"\x03"},
+    )
+
+    await VoiceServiceV1Class._relay_mic(socket, listener)
+
+    assert listener.audio == [b"\x01\x02", b"\x03"]
+    assert listener.delays == [0.18]
 
 
 def test_playback_runs_chunks_back_to_back_and_starts_over_after_a_reset() -> None:
