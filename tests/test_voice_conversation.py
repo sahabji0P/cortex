@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
-from app.entities.voice_ent import VoiceConversation, VoiceEvent
+from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray
 from app.entities.voice_speech import Playback, Utterance
 
 # The fake speech is 24 kHz 16-bit mono, like the real one.
@@ -396,7 +396,10 @@ async def test_a_reply_cut_before_any_of_it_played_leaves_no_trace() -> None:
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert _event(outputs, "interrupt").text == ""
-    assert _shape(llm.requests[1]["input"]) == ["user", "user"]
+    # None of the reply was heard, so the user's turn is still the same, open turn.
+    assert llm.requests[1]["input"] == [
+        {"role": "user", "content": "tell me a story\nnever mind"},
+    ]
     await f.conversation.close()
 
 
@@ -426,6 +429,126 @@ async def test_closing_mid_reply_releases_both_speech_connections() -> None:
     assert f.stt.closed
     assert f.tts.contexts[0].cancelled
     assert f.tts.sessions[0].closed
+
+
+# ---- putting the user's turn together
+
+
+async def test_words_that_trail_a_sentence_join_the_same_turn_on_a_new_line() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("I am"), never],
+        [_delta("Nothing much."), _completed(_message("Nothing much."))],
+        [_delta("Bye."), _completed(_message("Bye."))],
+    )
+    f = _conversation(llm)
+
+    # Speech recognition split one sentence into two turns.
+    f.stt.say("Hello, what's")
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("happening?")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert _event(outputs, "user.final").text == "happening?"
+    assert llm.requests[1]["input"] == [{"role": "user", "content": "Hello, what's\nhappening?"}]
+
+    # Once the reply has been heard, the turn is closed: the next words are a new turn.
+    f.clock.advance(60)
+    f.stt.say("bye")
+    await _read_until(f.conversation, "assistant.done")
+    assert llm.requests[2]["input"] == [
+        {"role": "user", "content": "Hello, what's\nhappening?"},
+        {"role": "assistant", "content": "Nothing much."},
+        {"role": "user", "content": "bye"},
+    ]
+    await f.conversation.close()
+
+
+async def test_a_stray_word_in_another_script_is_dropped_and_the_reply_starts_again() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("The capital"), never],
+        [_delta("Paris."), _completed(_message("Paris."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("What is the capital of France?")
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("हूँ")  # a noise, heard as one Devanagari word
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    # The noise never reaches the model or the screen, and the question is answered.
+    assert "user.final" not in _types(outputs)
+    assert llm.requests[1]["input"] == [
+        {"role": "user", "content": "What is the capital of France?"},
+    ]
+    assert outputs[-1].text == "Paris."
+    await f.conversation.close()
+
+
+async def test_a_turn_with_no_words_does_not_leave_the_user_unanswered() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("The capital"), never],
+        [_delta("Paris."), _completed(_message("Paris."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("What is the capital of France?")
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("")  # a cough: a turn starts, cutting the reply, and ends with nothing in it
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert outputs[-1].text == "Paris."
+    assert llm.requests[1]["input"] == [
+        {"role": "user", "content": "What is the capital of France?"},
+    ]
+    await f.conversation.close()
+
+
+async def test_a_reply_cut_off_by_a_noise_is_picked_up_again() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("Once upon a time there was a dragon."), never],
+        [_delta("there was a dragon."), _completed(_message("there was a dragon."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 4.5)
+    f.stt.say("")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert _event(outputs, "interrupt").text == "Once upon a time…"
+    sent = llm.requests[1]["input"]
+    assert _shape(sent) == ["user", "assistant", "developer"]
+    assert sent[1]["content"] == "Once upon a time…"
+    assert "background noise" in sent[2]["content"]
+    await f.conversation.close()
+
+
+@pytest.mark.parametrize(
+    ("fragment", "turn_so_far", "stray"),
+    [
+        ("हूँ", "What is the capital of France?", True),
+        ("да нет", "Tell me a story.", True),
+        # Same script, or more than a word or two: taken as speech.
+        ("please", "What is the capital of France?", False),
+        ("मुझे हिंदी में बताओ", "What is the capital of France?", False),
+        # The sentence before it was not finished, so it may be its other half.
+        ("हूँ", "Hello, what's", False),
+        # Nothing came before it: there is nothing to compare with.
+        ("नमस्ते", "", False),
+        # No letters at all is not evidence of anything.
+        ("42", "What is the capital of France?", False),
+    ],
+)
+def test_only_a_short_fragment_in_a_new_script_after_a_whole_sentence_is_stray(
+    fragment: str, turn_so_far: str, stray: bool
+) -> None:
+    assert _is_stray(fragment, turn_so_far) is stray
 
 
 # ---- searching

@@ -18,6 +18,10 @@ not what was generated. Speech is generated much faster than it plays, so a repl
 joins the history once it has been heard in full or cut off. A reply that is cut off is
 stored as the words that were heard, ending in "…". The rest is never sent back.
 
+A user turn stays open until some of the reply to it has been heard. Words that arrive
+before that join the same turn on a new line: speech recognition often splits one
+sentence in two, and the second half is not a new request.
+
 A search is not stopped by an interruption. If the user speaks while one is running, its
 call gets a placeholder result so the history stays valid, and the search carries on.
 When it finishes, the real result is added at the next quiet moment as a call written
@@ -29,6 +33,7 @@ import asyncio
 import contextlib
 import json
 import time
+import unicodedata
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -83,6 +88,17 @@ _PLACEHOLDER = (
     'separate call with "deferred_result_for": "{call_id}". If the user no longer wants '
     "it, stop it with cancel_tool_call and that call_id."
 )
+
+# Added to the history when a turn with no words in it cut a reply off.
+_NOISE_NOTE = (
+    "That interruption was background noise, not the user speaking. Continue your reply "
+    'from the word after the "…". Do not repeat anything that comes before it.'
+)
+
+# A trailing fragment longer than this many words is never treated as noise.
+_STRAY_MAX_WORDS = 2
+# Latin, Devanagari and CJK sentence endings (the last two are the full-width ? and !).
+_SENTENCE_ENDS = (".", "?", "!", "।", "。", "\uff1f", "\uff01")
 
 # How often the wait for a quiet moment looks again. Playback can be cut short or added
 # to while it waits, so it does not sleep through to a time worked out in advance.
@@ -218,6 +234,11 @@ class VoiceConversation:
         # Everything the model sees, oldest first. It only ever grows at the end, and
         # each entry is final when it is added.
         self._history: list[ResponseInputItemParam] = []
+        # The user's turn that has not been answered yet, as the pieces it arrived in.
+        # It joins the history when some of the reply to it has been heard.
+        self._turn: list[str] = []
+        # Whether the turn the user has just opened cut a reply short.
+        self._cut_a_reply = False
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
@@ -295,6 +316,7 @@ class VoiceConversation:
         if self._announcing is not None:
             self._announcing.cancel()
         heard = self._settle()
+        self._cut_a_reply = heard is not None
         if producing is not None:
             producing.cancel()
         self._playback.reset()
@@ -316,6 +338,10 @@ class VoiceConversation:
             if call.output is None:
                 self._outlive(call)
         items, heard = reply.heard(self._clock())
+        if items and self._turn:
+            # Some of the reply got through, so the turn it answers is closed.
+            self._history.append({"role": "user", "content": "\n".join(self._turn)})
+            self._turn = []
         self._history.extend(items)
         return heard
 
@@ -379,17 +405,24 @@ class VoiceConversation:
         self._late.clear()
 
     async def _start_reply(self, transcript: str) -> None:
-        if not transcript:
-            # Nothing was said after all: late results still need their quiet moment.
-            self._announce_when_quiet()
-            return
+        """A turn ended: answer it, or put back what it interrupted if nothing was said."""
         if self._producing is not None or self._reply is not None:
             # A turn ended without the start that normally comes first.
             await self._interrupt()
-        # Results that came in while the user was speaking go in ahead of their turn.
+        said = bool(transcript) and not _is_stray(transcript, "\n".join(self._turn))
+        if not said and not self._turn and not self._cut_a_reply:
+            # Nothing was said and nothing was stopped: only late results may be waiting.
+            self._announce_when_quiet()
+            return
+        # Results that came in while the user was speaking go in ahead of what follows.
         self._add_late_results()
-        self._history.append({"role": "user", "content": transcript})
-        self._emit("user.final", transcript)
+        if said:
+            self._turn.append(transcript)
+            self._emit("user.final", transcript)
+        elif not self._turn:
+            # Nothing was said, yet it stopped a reply that was being heard. (If the
+            # user's own turn is still unanswered, it is simply answered again.)
+            self._history.append({"role": "developer", "content": _NOISE_NOTE})
         self._producing = asyncio.create_task(self._respond())
 
     async def _respond(self) -> None:
@@ -418,7 +451,7 @@ class VoiceConversation:
             model="6 Luna",
             # No thinking before it speaks: in a conversation the wait is worse than the gain.
             reasoning={"effort": "none"},
-            input=[*self._history, *reply.items()],
+            input=[*self._history, *self._open_turn(), *reply.items()],
             instructions=self._instructions,
             tools=self._tools,
             # Forbidding the tool this way leaves the tool list, and so the cache, intact.
@@ -464,6 +497,10 @@ class VoiceConversation:
             if call.running is not None:
                 call.output = await asyncio.shield(call.running)
         return True
+
+    def _open_turn(self) -> list[ResponseInputItemParam]:
+        """The user's unanswered turn as one message, for a model call."""
+        return [{"role": "user", "content": "\n".join(self._turn)}] if self._turn else []
 
     async def _run_tool(self, name: str, arguments: str) -> str:
         """Run one tool call. A failure goes back to the model as text, so it can say so."""
@@ -536,6 +573,27 @@ _CANCEL_TOOL = OpenAIAdapterClass.Tools.function(
         "additionalProperties": False,
     },
 )
+
+
+def _is_stray(fragment: str, turn_so_far: str) -> bool:
+    """Whether a fragment that trails an unanswered turn is more likely noise than speech.
+
+    Speech recognition is not tied to one language. It can turn a cough or a door into a
+    word or two in some other script, which then arrives just after a finished sentence.
+    This is kept narrow, because people do mix languages: only a fragment of a word or
+    two, in a script the sentence before it did not use, counts.
+    """
+    if not turn_so_far.rstrip().endswith(_SENTENCE_ENDS):
+        return False
+    if len(fragment.split()) > _STRAY_MAX_WORDS:
+        return False
+    scripts = _scripts(fragment)
+    return bool(scripts) and scripts.isdisjoint(_scripts(turn_so_far))
+
+
+def _scripts(text: str) -> set[str]:
+    """The writing systems used in a text, by the first word of each letter's Unicode name."""
+    return {unicodedata.name(letter, "?").split()[0] for letter in text if letter.isalpha()}
 
 
 def _format_search(result: SearchResult) -> str:
