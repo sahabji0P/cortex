@@ -125,8 +125,8 @@ class VoiceEvent(BaseModel):
     - `assistant.done`  the reply's audio has all been sent (full text in `text`)
     - `tool.call`       the assistant is searching the web (query in `text`)
     - `interrupt`       the user started speaking: stop playback and drop queued audio.
-                        If that cut a reply short, `text` is the part that was heard
-                        (just "…" if none of it was); otherwise `text` is empty
+                        If that cut a reply short, `text` is what the history keeps of
+                        it (just "…" if nothing); otherwise `text` is empty
     - `error`           something failed (message in `text`)
     """
 
@@ -406,6 +406,8 @@ class VoiceConversation:
                 await asyncio.sleep(_QUIET_CHECK_SECONDS)
             else:
                 break
+        if not self._late:
+            return  # a reply made in the meantime has already been given them
         self._settle()
         self._add_late_results()
         self._producing = asyncio.create_task(self._respond())
@@ -445,15 +447,19 @@ class VoiceConversation:
             # Nothing was said and nothing was stopped: only late results may be waiting.
             self._announce_when_quiet()
             return
+        unanswered = bool(self._turn)
         # Results that came in while the user was speaking go in before what they said.
         self._add_late_results()
         if said:
             self._turn.append(transcript)
             self._emit("user.final", transcript)
-        elif not self._turn:
+        elif not unanswered:
             # Nothing was said, yet it stopped a reply that was being heard. (If the
-            # user's own turn is still unanswered, it is simply answered again.)
+            # user's own turn was still unanswered, it is simply answered again.)
             self._history.append({"role": "developer", "content": _NOISE_NOTE})
+        if self._announcing is not None:
+            # This reply covers any late results, so nothing needs to wait for quiet.
+            self._announcing.cancel()
         self._producing = asyncio.create_task(self._respond())
 
     async def _respond(self) -> None:

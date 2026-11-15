@@ -947,6 +947,63 @@ async def test_a_late_result_follows_a_turn_the_model_has_already_been_shown() -
     await f.conversation.close()
 
 
+async def test_a_wordless_turn_after_an_unanswered_one_is_not_blamed_on_noise() -> None:
+    never = asyncio.Event()
+    llm, finish = _slow_search_then(
+        [_delta("Hmm"), never],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("hello?")
+    await _read_until(f.conversation, "assistant.delta")
+    # The user is heard to start again, the search finishes, and nothing was said.
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()
+    await asyncio.sleep(0.05)
+    f.stt.turn_end("")
+    await _read_until(f.conversation, "assistant.done")
+
+    # "hello?" is answered, with the result. No reply had been heard, so nothing in the
+    # history says one was cut off by noise.
+    assert _shape(llm.requests[2]["input"])[-3:] == [
+        "user",
+        "function_call",
+        "function_call_output",
+    ]
+    await f.conversation.close()
+
+
+async def test_late_results_are_answered_once_even_if_two_turns_end_together() -> None:
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("hello?")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()
+    await asyncio.sleep(0.05)
+    # A turn with no words, then straight away one with words and no start of its own.
+    f.stt.turn_end("")
+    f.stt.turn_end("so?")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+
+    assert len(llm.requests) == 3
+    await f.conversation.close()
+
+
 async def test_a_turn_that_ends_without_starting_cannot_set_off_two_replies() -> None:
     llm, finish = _slow_search_then([_delta("Okay."), _completed(_message("Okay."))])
     f = _conversation(llm, _Search(gate=finish))
