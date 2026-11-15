@@ -1,4 +1,8 @@
-"""The voice cascade with all three services faked: turns in, speech and history out."""
+"""The voice cascade with all three services faked: turns in, speech and history out.
+
+Time is faked too. The fake text-to-speech makes every word last exactly one second, and
+the tests move a clock by hand, so each one can say how much of a reply the user heard.
+"""
 
 import asyncio
 import json
@@ -6,15 +10,29 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.adapters.cartesia_tts_adp import CartesiaTTSSession
+from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.entities.voice_ent import VoiceConversation, VoiceEvent
+from app.entities.voice_speech import Playback, Utterance
+
+# The fake speech is 24 kHz 16-bit mono, like the real one.
+_BYTES_PER_SECOND = 48000
+# Playback starts this long after audio is sent (see voice_speech._CLIENT_DELAY).
+_DELAY = 0.15
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class _Item(SimpleNamespace):
     """A model output item, as the OpenAI SDK returns it."""
-
-    def to_dict(self) -> dict[str, object]:
-        return dict(vars(self))
 
 
 def _message(text: str) -> _Item:
@@ -72,30 +90,32 @@ class _STT:
 
 
 class _TTSContext:
-    """Text-to-speech for one reply: one audio chunk per pushed fragment.
+    """Text-to-speech for one utterance. Every word takes exactly one second to say."""
 
-    The chunk is the fragment's own bytes, or `seconds` of silence when that is given.
-    """
-
-    def __init__(self, seconds: float = 0) -> None:
-        self._seconds = seconds
-        self._chunks: asyncio.Queue[bytes | None] = asyncio.Queue()
+    def __init__(self) -> None:
+        self._events: asyncio.Queue[bytes | list[CartesiaTTSWord] | None] = asyncio.Queue()
+        self._seconds = 0
         self.pushed: list[str] = []
         self.finished = False
         self.cancelled = False
 
     async def push(self, text: str) -> None:
         self.pushed.append(text)
-        silence = b"\x00" * int(48000 * self._seconds)  # 24 kHz, 16-bit
-        self._chunks.put_nowait(silence or text.encode())
+        words = text.split()
+        if not words:
+            return
+        timings = [CartesiaTTSWord(word, self._seconds + n + 1) for n, word in enumerate(words)]
+        self._seconds += len(words)
+        self._events.put_nowait(timings)
+        self._events.put_nowait(b"\x00" * (_BYTES_PER_SECOND * len(words)))
 
     async def finish(self) -> None:
         self.finished = True
-        self._chunks.put_nowait(None)
+        self._events.put_nowait(None)
 
-    async def audio(self):
-        while (chunk := await self._chunks.get()) is not None:
-            yield chunk
+    async def events(self):
+        while (event := await self._events.get()) is not None:
+            yield event
 
     async def cancel(self) -> None:
         self.cancelled = True
@@ -104,13 +124,12 @@ class _TTSContext:
 class _TTSSession(CartesiaTTSSession):
     """One reply's text-to-speech connection."""
 
-    def __init__(self, contexts: list[_TTSContext], seconds: float) -> None:
+    def __init__(self, contexts: list[_TTSContext]) -> None:
         self._contexts = contexts
-        self._seconds = seconds
         self.closed = False
 
     def context(self) -> _TTSContext:
-        self._contexts.append(_TTSContext(self._seconds))
+        self._contexts.append(_TTSContext())
         return self._contexts[-1]
 
     async def close(self) -> None:
@@ -118,13 +137,12 @@ class _TTSSession(CartesiaTTSSession):
 
 
 class _TTS:
-    def __init__(self, seconds_per_fragment: float = 0) -> None:
-        self._seconds = seconds_per_fragment
+    def __init__(self) -> None:
         self.sessions: list[_TTSSession] = []
         self.contexts: list[_TTSContext] = []
 
     async def connect(self) -> _TTSSession:
-        self.sessions.append(_TTSSession(self.contexts, self._seconds))
+        self.sessions.append(_TTSSession(self.contexts))
         return self.sessions[-1]
 
 
@@ -175,10 +193,20 @@ class _Search:
         )
 
 
-def _conversation(llm: _LLM, search: _Search | None = None, tts: _TTS | None = None):
-    stt, tts = _STT(), tts or _TTS()
-    conversation = VoiceConversation(stt=stt, tts=tts, llm=llm, search=search or _Search())
-    return conversation, stt, tts
+class _Fixture(SimpleNamespace):
+    conversation: VoiceConversation
+    stt: _STT
+    tts: _TTS
+    llm: _LLM
+    clock: _Clock
+
+
+def _conversation(llm: _LLM, search: _Search | None = None) -> _Fixture:
+    stt, tts, clock = _STT(), _TTS(), _Clock()
+    conversation = VoiceConversation(
+        stt=stt, tts=tts, llm=llm, search=search or _Search(), clock=clock
+    )
+    return _Fixture(conversation=conversation, stt=stt, tts=tts, llm=llm, clock=clock)
 
 
 async def _read_until(conversation: VoiceConversation, type_: str) -> list[VoiceEvent | bytes]:
@@ -192,55 +220,215 @@ async def _read_until(conversation: VoiceConversation, type_: str) -> list[Voice
     raise AssertionError(f"conversation ended before {type_!r}")
 
 
-async def _let_it_play() -> None:
-    """Wait out the reply's audio. The fakes' chunks are a few bytes: microseconds of sound."""
+async def _let_audio_out() -> None:
+    """Give the tasks that forward speech a chance to run. The fakes never wait."""
     await asyncio.sleep(0.01)
+
+
+def _event(outputs: list[VoiceEvent | bytes], type_: str) -> VoiceEvent:
+    """The first event of the given type among the outputs."""
+    return next(o for o in outputs if isinstance(o, VoiceEvent) and o.type == type_)
 
 
 def _types(outputs: list[VoiceEvent | bytes]) -> list[str]:
     return ["audio" if isinstance(output, bytes) else output.type for output in outputs]
 
 
-def _audio(outputs: list[VoiceEvent | bytes]) -> bytes:
-    return b"".join(output for output in outputs if isinstance(output, bytes))
+def _audio_seconds(outputs: list[VoiceEvent | bytes]) -> float:
+    return sum(len(output) for output in outputs if isinstance(output, bytes)) / _BYTES_PER_SECOND
+
+
+def _shape(items: list[dict]) -> list[str]:
+    """History items as short labels: the role of a message, or the type of anything else."""
+    return [item.get("role") or item["type"] for item in items]
+
+
+# ---- replying
 
 
 async def test_a_finished_turn_is_answered_in_speech() -> None:
     llm = _LLM([_delta("Hi "), _delta("there."), _completed(_message("Hi there."))])
-    conversation, stt, tts = _conversation(llm)
+    f = _conversation(llm)
 
-    stt.say("hello")
-    outputs = await _read_until(conversation, "assistant.done")
+    f.stt.say("hello")
+    outputs = await _read_until(f.conversation, "assistant.done")
 
     assert _types(outputs)[:2] == ["interrupt", "user.final"]
-    assert _audio(outputs) == b"Hi there."
+    assert _audio_seconds(outputs) == 2
     assert outputs[-1] == VoiceEvent(type="assistant.done", text="Hi there.")
-    assert tts.contexts[0].finished
-    assert tts.sessions[0].closed
+    assert f.tts.contexts[0].finished
+    assert f.tts.sessions[0].closed
     assert llm.requests[0]["input"] == [{"role": "user", "content": "hello"}]
     assert llm.requests[0]["store"] is False
     assert llm.requests[0]["model"] == "6 Luna"
     assert llm.requests[0]["reasoning"] == {"effort": "none"}
-    await conversation.close()
+    await f.conversation.close()
 
 
-async def test_the_next_turn_sends_the_whole_conversation_so_far() -> None:
+async def test_a_reply_heard_to_the_end_is_stored_whole() -> None:
     llm = _LLM(
-        [_delta("Hi."), _completed(_message("Hi."))],
+        [_delta("Hi there."), _completed(_message("Hi there."))],
         [_delta("Fine."), _completed(_message("Fine."))],
     )
-    conversation, stt, _tts = _conversation(llm)
+    f = _conversation(llm)
 
-    stt.say("hello")
-    await _read_until(conversation, "assistant.done")
-    await _let_it_play()
-    stt.say("how are you")
-    await _read_until(conversation, "assistant.done")
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    f.stt.say("how are you")
+    outputs = await _read_until(f.conversation, "assistant.done")
 
-    sent = llm.requests[1]["input"]
-    assert [item.get("role") for item in sent] == ["user", "assistant", "user"]
-    assert sent[2] == {"role": "user", "content": "how are you"}
-    await conversation.close()
+    # Nothing was cut, so the interrupt event carries no heard text.
+    assert outputs[0] == VoiceEvent(type="interrupt")
+    assert llm.requests[1]["input"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi there."},
+        {"role": "user", "content": "how are you"},
+    ]
+    await f.conversation.close()
+
+
+async def test_a_model_failure_is_reported_and_the_conversation_goes_on() -> None:
+    failed = SimpleNamespace(
+        type="response.failed",
+        response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
+    )
+    llm = _LLM([failed], [_delta("Hi."), _completed(_message("Hi."))])
+    f = _conversation(llm)
+
+    f.stt.say("hello")
+    outputs = await _read_until(f.conversation, "error")
+    assert outputs[-1].text == "reply failed: overloaded"
+
+    f.stt.say("hello again")
+    outputs = await _read_until(f.conversation, "assistant.done")
+    assert _audio_seconds(outputs) == 1
+    await f.conversation.close()
+
+
+@pytest.mark.parametrize("transcript", ["", "   "])
+async def test_an_empty_transcript_starts_no_reply(transcript: str) -> None:
+    llm = _LLM()
+    f = _conversation(llm)
+
+    f.stt.say(transcript)
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    outputs = await _read_until(f.conversation, "interrupt")
+
+    # Nothing between the two turn starts: no user.final, so no reply was started.
+    assert _types(outputs) == ["interrupt"]
+    assert llm.requests == []
+    await f.conversation.close()
+
+
+# ---- interrupting: the history keeps what was heard
+
+
+async def test_speaking_over_a_reply_keeps_only_the_words_that_were_heard() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("Once upon a time there was a dragon."), never],
+        [_delta("Sure."), _completed(_message("Sure."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 3.5)  # three and a half words in
+    f.stt.turn_start()
+    outputs = await _read_until(f.conversation, "interrupt")
+
+    # The client is told what was heard, straight away.
+    assert outputs[-1] == VoiceEvent(type="interrupt", text="Once upon a…")
+
+    f.stt.turn_end("stop, just say sure")
+    outputs = await _read_until(f.conversation, "assistant.done")
+    # The old reply's speech was cancelled, and the only audio after the interrupt is
+    # the new reply's one word.
+    assert f.tts.contexts[0].cancelled
+    assert f.tts.sessions[0].closed
+    assert _audio_seconds(outputs) == 1
+    assert llm.requests[1]["input"] == [
+        {"role": "user", "content": "tell me a story"},
+        {"role": "assistant", "content": "Once upon a…"},
+        {"role": "user", "content": "stop, just say sure"},
+    ]
+    await f.conversation.close()
+
+
+async def test_a_reply_still_playing_when_the_user_speaks_is_cut_the_same_way() -> None:
+    llm = _LLM(
+        [_delta("A long story indeed."), _completed(_message("A long story indeed."))],
+        [_delta("Sure."), _completed(_message("Sure."))],
+    )
+    f = _conversation(llm)
+
+    # The reply is finished on the server at once, but takes four seconds to play.
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(_DELAY + 2.2)
+    f.stt.say("stop")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert outputs[0] == VoiceEvent(type="interrupt", text="A long…")
+    assert llm.requests[1]["input"] == [
+        {"role": "user", "content": "tell me a story"},
+        {"role": "assistant", "content": "A long…"},
+        {"role": "user", "content": "stop"},
+    ]
+    await f.conversation.close()
+
+
+async def test_a_reply_cut_before_any_of_it_played_leaves_no_trace() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("Once upon a time"), never],
+        [_delta("Okay."), _completed(_message("Okay."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.stt.say("never mind")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert _event(outputs, "interrupt").text == ""
+    assert _shape(llm.requests[1]["input"]) == ["user", "user"]
+    await f.conversation.close()
+
+
+async def test_a_turn_start_always_tells_the_client_to_stop_playing() -> None:
+    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
+    f = _conversation(llm)
+
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    f.stt.turn_start()
+    outputs = await _read_until(f.conversation, "interrupt")
+
+    assert _types(outputs) == ["interrupt"]
+    await f.conversation.close()
+
+
+async def test_closing_mid_reply_releases_both_speech_connections() -> None:
+    never = asyncio.Event()
+    llm = _LLM([_delta("Once"), never])
+    f = _conversation(llm)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await f.conversation.close()
+
+    assert f.stt.closed
+    assert f.tts.contexts[0].cancelled
+    assert f.tts.sessions[0].closed
+
+
+# ---- searching
 
 
 async def test_a_search_runs_between_two_model_calls() -> None:
@@ -250,31 +438,28 @@ async def test_a_search_runs_between_two_model_calls() -> None:
         [_delta("Norris won."), _completed(_message("Norris won."))],
     )
     search = _Search()
-    conversation, stt, tts = _conversation(llm, search)
+    f = _conversation(llm, search)
 
-    stt.say("who won the last race")
-    outputs = await _read_until(conversation, "assistant.done")
+    f.stt.say("who won the last race")
+    outputs = await _read_until(f.conversation, "assistant.done")
 
     assert search.queries == ["who won the last F1 race"]
     assert VoiceEvent(type="tool.call", text="who won the last F1 race") in outputs
     # The model went straight to searching, so we say "Let me check." for it. That is
     # its own utterance, finished before the search runs, and heard before the answer.
-    assert [context.pushed for context in tts.contexts] == [["Let me check."], ["Norris won."]]
-    assert all(context.finished for context in tts.contexts)
-    assert _audio(outputs) == b"Let me check.Norris won."
+    assert [context.pushed for context in f.tts.contexts] == [["Let me check."], ["Norris won."]]
+    assert all(context.finished for context in f.tts.contexts)
+    assert _audio_seconds(outputs) == 5
     assert outputs[-1].text == "Let me check. Norris won."
-    assert len(tts.sessions) == 1
-    # The second call gets the first call's output and the search result.
+    assert len(f.tts.sessions) == 1
+    # The second call gets what was said, the call and its result.
     sent = llm.requests[1]["input"]
-    assert [item.get("type", item.get("role")) for item in sent] == [
-        "user",
-        "function_call",
-        "function_call_output",
-    ]
-    assert sent[2]["call_id"] == "call_1"
-    assert "Norris won in Las Vegas." in sent[2]["output"]
+    assert _shape(sent) == ["user", "assistant", "function_call", "function_call_output"]
+    assert sent[1]["content"] == "Let me check."
+    assert sent[2]["call_id"] == sent[3]["call_id"] == "call_1"
+    assert "Norris won in Las Vegas." in sent[3]["output"]
     assert llm.requests[0]["tools"][0]["name"] == "web_search"
-    await conversation.close()
+    await f.conversation.close()
 
 
 async def test_a_model_that_announces_its_search_is_not_talked_over() -> None:
@@ -283,56 +468,99 @@ async def test_a_model_that_announces_its_search_is_not_talked_over() -> None:
         [_delta("One moment."), _starts(call), _completed(_message("One moment."), call)],
         [_delta("Norris won."), _completed(_message("Norris won."))],
     )
-    conversation, stt, tts = _conversation(llm)
+    f = _conversation(llm)
 
-    stt.say("who won the last race")
-    await _read_until(conversation, "assistant.done")
+    f.stt.say("who won the last race")
+    await _read_until(f.conversation, "assistant.done")
 
-    assert [context.pushed for context in tts.contexts] == [["One moment."], ["Norris won."]]
-    await conversation.close()
+    assert [context.pushed for context in f.tts.contexts] == [["One moment."], ["Norris won."]]
+    await f.conversation.close()
 
 
 async def test_without_a_search_key_the_tool_is_not_offered() -> None:
     llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
-    conversation, stt, _tts = _conversation(llm, _Search(configured=False))
+    f = _conversation(llm, _Search(configured=False))
 
-    stt.say("hello")
-    await _read_until(conversation, "assistant.done")
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
 
     assert llm.requests[0]["tools"] == []
     assert "web_search" not in llm.requests[0]["instructions"]
-    await conversation.close()
+    await f.conversation.close()
 
 
-async def test_speaking_over_a_reply_stops_it() -> None:
+async def test_after_three_searches_the_model_has_to_answer() -> None:
+    searches = [[_completed(_search_call(f"query {n}", f"call_{n}"))] for n in range(3)]
+    llm = _LLM(*searches, [_delta("Here it is."), _completed(_message("Here it is."))])
+    search = _Search()
+    f = _conversation(llm, search)
+
+    f.stt.say("dig into this")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert search.queries == ["query 0", "query 1", "query 2"]
+    assert [request["tool_choice"] for request in llm.requests] == ["auto", "auto", "auto", "none"]
+    # The start of every request is identical, so a prompt cache keeps working.
+    assert len({request["instructions"] for request in llm.requests}) == 1
+    assert all(request["tools"] == llm.requests[0]["tools"] for request in llm.requests)
+    assert _audio_seconds(outputs) == 3
+    await f.conversation.close()
+
+
+async def test_interrupting_the_answer_keeps_the_search_and_the_words_heard() -> None:
+    call = _search_call("who won the last F1 race")
     never = asyncio.Event()
     llm = _LLM(
-        [_delta("Once upon a time"), never, _delta(" there was"), _completed()],
+        [_starts(call), _completed(call)],
+        [_delta("Norris won the race."), never],
         [_delta("Sure."), _completed(_message("Sure."))],
     )
-    conversation, stt, tts = _conversation(llm)
+    f = _conversation(llm)
 
-    stt.say("tell me a story")
-    await _read_until(conversation, "assistant.delta")
-    stt.turn_start()
-    outputs = await _read_until(conversation, "interrupt")
+    f.stt.say("who won the last race")
+    await _read_until(f.conversation, "tool.call")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    # "Let me check." takes three seconds; the answer starts right after it.
+    f.clock.advance(_DELAY + 3 + 1.5)
+    f.stt.say("stop")
+    await _read_until(f.conversation, "assistant.done")
 
-    # The speech stream was cancelled, and nothing after the interrupt belongs to it.
-    assert tts.contexts[0].cancelled
-    assert not tts.contexts[0].finished
-    assert tts.sessions[0].closed
-    assert _types(outputs)[-1] == "interrupt"
+    sent = llm.requests[2]["input"]
+    assert _shape(sent) == [
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+        "assistant",
+        "user",
+    ]
+    assert sent[1]["content"] == "Let me check."
+    assert sent[4]["content"] == "Norris…"
+    await f.conversation.close()
 
-    stt.turn_end("stop, just say sure")
-    outputs = await _read_until(conversation, "assistant.done")
-    assert _audio(outputs) == b"Sure."
 
-    # The model is told what it had said and that it was cut off.
-    sent = llm.requests[1]["input"]
-    assert [item["role"] for item in sent] == ["user", "assistant", "developer", "user"]
-    assert sent[1]["content"] == "Once upon a time"
-    assert "interrupted" in sent[2]["content"]
-    await conversation.close()
+async def test_text_after_the_cut_is_dropped_but_a_finished_search_is_kept() -> None:
+    call = _search_call("who won the last F1 race")
+    llm = _LLM(
+        [_starts(call), _completed(call)],
+        [_delta("Norris won the race."), _completed(_message("Norris won the race."))],
+        [_delta("Sure."), _completed(_message("Sure."))],
+    )
+    f = _conversation(llm)
+
+    # Everything is generated at once; the user speaks one second into "Let me check."
+    f.stt.say("who won the last race")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(_DELAY + 1.2)
+    f.stt.say("stop")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert outputs[0] == VoiceEvent(type="interrupt", text="Let…")
+    sent = llm.requests[2]["input"]
+    assert _shape(sent) == ["user", "assistant", "function_call", "function_call_output", "user"]
+    assert sent[1]["content"] == "Let…"
+    await f.conversation.close()
 
 
 async def test_interrupting_a_search_leaves_no_half_finished_tool_call() -> None:
@@ -341,134 +569,82 @@ async def test_interrupting_a_search_leaves_no_half_finished_tool_call() -> None
         [_completed(_search_call("weather in Pune"))],
         [_delta("Okay."), _completed(_message("Okay."))],
     )
-    search = _Search(gate=never)
-    conversation, stt, _tts = _conversation(llm, search)
+    f = _conversation(llm, _Search(gate=never))
 
-    stt.say("what's the weather")
-    await _read_until(conversation, "tool.call")
-    stt.say("never mind")
-    await _read_until(conversation, "assistant.done")
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("never mind")
+    await _read_until(f.conversation, "assistant.done")
 
     # A function_call without its output would be rejected by the API.
-    sent = llm.requests[1]["input"]
-    assert sent == [
-        {"role": "user", "content": "what's the weather"},
-        {"role": "user", "content": "never mind"},
-    ]
-    await conversation.close()
+    assert _shape(llm.requests[1]["input"]) == ["user", "user"]
+    await f.conversation.close()
 
 
-async def test_a_turn_start_always_tells_the_client_to_stop_playing() -> None:
-    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
-    conversation, stt, _tts = _conversation(llm)
-
-    stt.say("hello")
-    await _read_until(conversation, "assistant.done")
-    # The reply is finished here, but the client may still be playing its audio.
-    stt.turn_start()
-    outputs = await _read_until(conversation, "interrupt")
-
-    assert _types(outputs) == ["interrupt"]
-    await conversation.close()
+# ---- how much was heard
 
 
-async def test_interrupting_a_reply_that_is_still_playing_is_noted_for_the_model() -> None:
-    llm = _LLM(
-        [_delta("A long story."), _completed(_message("A long story."))],
-        [_delta("Sure."), _completed(_message("Sure."))],
-    )
-    # The reply is finished on the server at once, but takes 30 seconds to play.
-    conversation, stt, _tts = _conversation(llm, tts=_TTS(seconds_per_fragment=30))
-
-    stt.say("tell me a story")
-    await _read_until(conversation, "assistant.done")
-    stt.say("stop")
-    await _read_until(conversation, "assistant.done")
-
-    sent = llm.requests[1]["input"]
-    assert [item.get("role") for item in sent] == ["user", "assistant", "developer", "user"]
-    assert "In full it takes about 30 seconds to say." in sent[2]["content"]
-    assert "They did not hear the rest." in sent[2]["content"]
-    await conversation.close()
+def _utterance(text: str, seconds_per_word: float = 1.0, *, complete: bool = True) -> Utterance:
+    """An utterance whose audio starts playing at time 0, sent as one chunk per word."""
+    utterance = Utterance(context=None)
+    utterance.text = text
+    for n, word in enumerate(text.split()):
+        utterance.add_words([CartesiaTTSWord(word, (n + 1) * seconds_per_word)])
+        utterance.add_audio(n * seconds_per_word, seconds_per_word)
+    utterance.complete = complete
+    return utterance
 
 
-async def test_a_reply_that_was_heard_in_full_is_not_noted_as_interrupted() -> None:
-    llm = _LLM(
-        [_delta("Hi."), _completed(_message("Hi."))],
-        [_delta("Fine."), _completed(_message("Fine."))],
-    )
-    conversation, stt, _tts = _conversation(llm)
+@pytest.mark.parametrize(
+    ("at", "heard"),
+    [
+        (0.0, ""),
+        (0.99, ""),
+        (1.0, "Paris"),
+        (2.5, "Paris is"),
+        (3.99, "Paris is the"),
+    ],
+)
+def test_a_word_counts_as_heard_once_its_audio_has_finished(at: float, heard: str) -> None:
+    utterance = _utterance("Paris is the capital.")
 
-    stt.say("hello")
-    await _read_until(conversation, "assistant.done")
-    await _let_it_play()
-    stt.say("how are you")
-    await _read_until(conversation, "assistant.done")
-
-    assert [item.get("role") for item in llm.requests[1]["input"]] == ["user", "assistant", "user"]
-    await conversation.close()
-
-
-async def test_a_model_failure_is_reported_and_the_conversation_goes_on() -> None:
-    failed = SimpleNamespace(
-        type="response.failed",
-        response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
-    )
-    llm = _LLM([failed], [_delta("Hi."), _completed(_message("Hi."))])
-    conversation, stt, _tts = _conversation(llm)
-
-    stt.say("hello")
-    outputs = await _read_until(conversation, "error")
-    assert outputs[-1].text == "reply failed: overloaded"
-
-    stt.say("hello again")
-    outputs = await _read_until(conversation, "assistant.done")
-    assert _audio(outputs) == b"Hi."
-    await conversation.close()
+    assert utterance.heard(at) == (heard, False)
 
 
-async def test_closing_mid_reply_releases_both_speech_connections() -> None:
-    never = asyncio.Event()
-    llm = _LLM([_delta("Once"), never])
-    conversation, stt, tts = _conversation(llm)
+def test_an_utterance_is_whole_only_when_all_its_audio_has_played() -> None:
+    utterance = _utterance("Paris is the capital.")
 
-    stt.say("tell me a story")
-    await _read_until(conversation, "assistant.delta")
-    await conversation.close()
+    assert utterance.heard(4.0) == ("Paris is the capital.", True)
 
-    assert stt.closed
-    assert tts.contexts[0].cancelled
-    assert tts.sessions[0].closed
+    # Still being generated: even with all the audio so far played, more is coming.
+    growing = _utterance("Paris is the", complete=False)
+    assert growing.heard(10.0) == ("Paris is the", False)
 
 
-async def test_after_three_searches_the_model_has_to_answer() -> None:
-    searches = [[_completed(_search_call(f"query {n}", f"call_{n}"))] for n in range(3)]
-    llm = _LLM(*searches, [_delta("Here it is."), _completed(_message("Here it is."))])
-    search = _Search()
-    conversation, stt, _tts = _conversation(llm, search)
+def test_a_word_timing_that_does_not_match_the_text_ends_the_count_there() -> None:
+    utterance = Utterance(context=None)
+    utterance.text = "It costs $5 million."
+    utterance.add_audio(0.0, 5.0)
+    # The speech service spelled the amount out, so its words stop lining up with ours.
+    spoken = ["It", "costs", "five", "dollars", "million."]
+    utterance.add_words([CartesiaTTSWord(word, n + 1.0) for n, word in enumerate(spoken)])
 
-    stt.say("dig into this")
-    outputs = await _read_until(conversation, "assistant.done")
-
-    assert search.queries == ["query 0", "query 1", "query 2"]
-    assert [request["tool_choice"] for request in llm.requests] == ["auto", "auto", "auto", "none"]
-    # The start of every request is identical, so a prompt cache keeps working.
-    assert len({request["instructions"] for request in llm.requests}) == 1
-    assert all(request["tools"] == llm.requests[0]["tools"] for request in llm.requests)
-    assert _audio(outputs) == b"Here it is."
+    assert utterance.heard(4.5) == ("It costs", False)
 
 
-@pytest.mark.parametrize("transcript", ["", "   "])
-async def test_an_empty_transcript_starts_no_reply(transcript: str) -> None:
-    llm = _LLM()
-    conversation, stt, _tts = _conversation(llm)
+def test_playback_runs_chunks_back_to_back_and_starts_over_after_a_reset() -> None:
+    clock = _Clock()
+    playback = Playback(clock)
 
-    stt.say(transcript)
-    stt.turn_start()
-    await _read_until(conversation, "interrupt")
-    outputs = await _read_until(conversation, "interrupt")
+    first = playback.schedule(2.0)
+    second = playback.schedule(1.0)
+    assert first == clock.now + _DELAY
+    assert second == first + 2.0
+    assert playback.ends_at == first + 3.0
 
-    # Nothing between the two turn starts: no user.final, so no reply was started.
-    assert _types(outputs) == ["interrupt"]
-    assert llm.requests == []
-    await conversation.close()
+    # After a gap longer than the queue, the next chunk cannot start in the past.
+    clock.advance(10)
+    assert playback.schedule(1.0) == clock.now + _DELAY
+
+    playback.reset()
+    assert playback.schedule(1.0) == clock.now + _DELAY

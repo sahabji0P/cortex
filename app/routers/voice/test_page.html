@@ -59,6 +59,7 @@ let playAt = 0;             // when the next speech chunk should start
 let playing = new Set();    // speech chunks scheduled or playing
 let leftover = null;        // a stray byte when a chunk splits a 16-bit sample
 let partial = null, reply = null;
+let lastReply = null;     // the latest reply's line, kept so an interrupt can trim it
 
 function line(cls, label) {
   const el = document.createElement("div");
@@ -104,16 +105,21 @@ function onEvent(event) {
     (partial ?? line("you", "You")).textContent = event.text;
     partial = null; reply = null;
   } else if (event.type === "assistant.delta") {
-    reply ??= line("cortex", "Cortex");
+    reply ??= lastReply = line("cortex", "Cortex");
     reply.textContent += event.text;
   } else if (event.type === "assistant.done") {
     reply = null;
   } else if (event.type === "tool.call") {
     line("meta").textContent = `searching the web: ${event.text}`;
   } else if (event.type === "interrupt") {
-    if (playing.size) line("meta").textContent = "interrupted";
+    // `text` is what the server worked out we had played of the reply, which is all
+    // the model will remember of it. Show that instead of everything it generated.
+    if (playing.size && lastReply) {
+      lastReply.textContent = event.text;
+      line("meta").textContent = event.text ? "interrupted: the rest was not heard" : "interrupted before anything was heard";
+    }
     stopSpeaking();
-    reply = null;
+    reply = lastReply = null;
   } else if (event.type === "error") {
     line("meta").textContent = `error: ${event.text}`;
   }

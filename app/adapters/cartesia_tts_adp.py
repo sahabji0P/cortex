@@ -4,14 +4,15 @@ Cartesia adapter responsible for streaming text-to-speech over the contexts WebS
 Responsibilities:
 - Manage the async Cartesia client lifecycle
 - Open one TTS WebSocket per conversation
-- Run one context per spoken reply: text fragments in, raw PCM audio out, cancellable
+- Run one context per utterance: text fragments in, raw PCM audio and word timings
+  out, cancellable
 
 See https://docs.cartesia.ai/use-the-api/tts-websocket/contexts for the wire protocol.
 """
 
 from collections.abc import AsyncIterator
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from cartesia import AsyncCartesia
 from cartesia.resources.tts import AsyncTTSResourceConnection, AsyncWebSocketContext
@@ -23,6 +24,7 @@ __all__ = [
     "CartesiaTTSContext",
     "CartesiaTTSSession",
     "CartesiaTTSVoice",
+    "CartesiaTTSWord",
 ]
 
 # Same API version the STT adapter pins. Re-verify on SDK upgrade.
@@ -31,6 +33,13 @@ _CARTESIA_VERSION = "2026-03-01"
 _CONTEXT_TIMEOUT = 30.0
 
 type CartesiaTTSVoice = Literal["female", "male"]
+
+
+class CartesiaTTSWord(NamedTuple):
+    """One word of an utterance, as Cartesia timed it."""
+
+    text: str
+    end: float  # seconds from the start of the utterance's audio
 
 
 class _Types:
@@ -52,30 +61,40 @@ class _Types:
 
 
 class CartesiaTTSContext:
-    """One spoken reply: push text fragments in order, iterate PCM audio out."""
+    """One utterance: push text fragments in order, iterate audio and word timings out."""
 
     def __init__(self, context: AsyncWebSocketContext) -> None:
         self._context = context
 
     async def push(self, text: str) -> None:
-        """Add the next fragment of the reply. Cartesia joins fragments into one utterance."""
+        """Add the next fragment of text. Cartesia joins fragments into one utterance."""
         await self._context.push(text)
 
     async def finish(self) -> None:
         """Say that no more text is coming; the remaining audio still arrives."""
         await self._context.no_more_inputs()
 
-    async def audio(self) -> AsyncIterator[bytes]:
-        """Yield PCM chunks until Cartesia reports the reply done."""
+    async def events(self) -> AsyncIterator[bytes | list[CartesiaTTSWord]]:
+        """Yield PCM chunks and word timings, as they arrive, until the utterance is done.
+
+        The words are the whitespace-separated words of the pushed text, in order. Each
+        timing arrives about when the audio for that word does.
+        """
         async for event in self._context.receive():
             if event.type == "chunk":
                 if event.audio:
                     yield event.audio
+            elif event.type == "timestamps":
+                if timings := event.word_timestamps:
+                    yield [
+                        CartesiaTTSWord(text, end)
+                        for text, end in zip(timings.words, timings.end, strict=True)
+                    ]
             elif event.type == "error":
                 raise RuntimeError(f"Cartesia speech synthesis failed: {event.error}")
 
     async def cancel(self) -> None:
-        """Stop generating this reply now."""
+        """Stop generating this utterance now."""
         await self._context.cancel()
 
 
@@ -88,12 +107,13 @@ class CartesiaTTSSession:
         self._voice = voice
 
     def context(self) -> CartesiaTTSContext:
-        """Start a new spoken reply on this connection."""
+        """Start a new utterance on this connection."""
         return CartesiaTTSContext(
             self._connection.context(
                 model_id=self._model,
                 voice={"mode": "id", "id": self._voice},
                 output_format=_Types.output_format,
+                add_timestamps=True,
                 timeout=_CONTEXT_TIMEOUT,
             )
         )
