@@ -91,19 +91,22 @@ user hears "Let me check" while it runs, so do not announce the search yourself.
 answer from the results and name the source.
 - If the user interrupts while a search is running, the search carries on in the \
 background. Do not search for the same thing again: say it is still coming, and answer \
-whatever else they asked. The result reaches you by itself, as a web_search call with \
-"deferred_result_for" in its arguments. You did not make that call: it only delivers the \
-late result. When it arrives, tell the user what it found straight away, without being \
-asked, unless they have said they no longer want it. If you have already told them the \
-same thing, do not repeat it: say in a few words that the search confirms it.
+whatever else they asked. Only if they say they no longer want it, call cancel_tool_call: \
+nothing is cancelled unless you make that call. The result reaches you by itself, as a \
+web_search call with "deferred_result_for" in its arguments. You did not make that call: \
+it only delivers the late result. When it arrives, tell the user what it found straight \
+away, without being asked, unless they have said they no longer want it. If you have \
+already told them the same thing, do not repeat it: say in a few words that the search \
+confirms it.
 """
 
 # Stands in for the result of a call that was still running when the user spoke.
 _PLACEHOLDER = (
-    "Still running. The user interrupted before this finished, so it carries on in the "
-    "background. Do not make this call again. Its result will reach you by itself, as a "
-    'separate call with "deferred_result_for": "{call_id}". If the user no longer wants '
-    "it, stop it with cancel_tool_call and that call_id."
+    "Still running in the background, under call_id {call_id}. It has not failed. Only if "
+    "the user says they no longer want this, stop it with cancel_tool_call and that "
+    "call_id. Otherwise leave it alone: its result will reach you by itself, as a separate "
+    'call with "deferred_result_for": "{call_id}". Until then, do not search for this '
+    "again, in any wording."
 )
 
 # Search results are long. Once more than this many are in the history in full, all but
@@ -688,7 +691,15 @@ class VoiceConversation:
         stream = await self._llm.stream_response(
             model="6 Luna",
             # No thinking before it speaks: in a conversation the wait is worse than the gain.
-            reasoning={"effort": "none"},
+            # The exception is while the history ends in a search with no result yet: one
+            # still running in the background, or finished and waiting to be delivered.
+            # Asked without thinking, the model searched for the same thing again in a
+            # third to a half of measured runs where the user only said "hello?". With a
+            # little thinking it was about one in twenty. That costs about half a second,
+            # and one prompt-cache miss: the provider keeps a separate cache per setting,
+            # so the first request after the switch is read in full. Going back to no
+            # thinking finds the earlier cache again.
+            reasoning={"effort": "low" if self._outliving or self._late else "none"},
             input=[*self._history, *self._open_turn(), *reply.send_back()],
             instructions=self._instructions,
             tools=self._tools,
@@ -782,7 +793,13 @@ class VoiceConversation:
     def _cancel_call(self, call_id: str) -> str:
         """Stop a call that outlived its reply. Its result will never arrive."""
         # The model may name the call by a stub that already delivered its result.
-        call = self._outliving.get(self._stubs.get(call_id, call_id))
+        call_id = self._stubs.get(call_id, call_id)
+        waiting = [late for late in self._late if late[0].call_id == call_id]
+        if waiting:
+            # It finished while the user was speaking and has not been delivered yet.
+            self._late.remove(waiting[0])
+            return "Cancelled."
+        call = self._outliving.get(call_id)
         if call is None or call.running is None:
             return "Nothing is running under that call_id."
         call.running.cancel()
@@ -811,7 +828,10 @@ class VoiceEntityClass:
 
 _WEB_SEARCH_TOOL = OpenAIAdapterClass.Tools.function(
     name="web_search",
-    description="Search the web for current or factual information.",
+    description=(
+        "Search the web for current or factual information. Never call this for something "
+        "a search is already running for: that result arrives by itself."
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -825,7 +845,11 @@ _WEB_SEARCH_TOOL = OpenAIAdapterClass.Tools.function(
 
 _CANCEL_TOOL = OpenAIAdapterClass.Tools.function(
     name="cancel_tool_call",
-    description="Stop a tool call that is still running after the user interrupted it.",
+    description=(
+        "Stop a search that is still running in the background. Call this only when the "
+        "user says they no longer want its result, and always call it then: nothing is "
+        "cancelled unless this is called."
+    ),
     parameters={
         "type": "object",
         "properties": {

@@ -1369,6 +1369,9 @@ async def test_a_late_result_is_given_to_the_model_once_nothing_is_being_said() 
     outputs = await _read_until(f.conversation, "assistant.done")
     assert outputs[-1].text == "It is sunny."
     assert "interrupt" not in _types(outputs)
+    # The model thinks before it speaks only while the search was still running: without
+    # that it tends to search for the same thing again when the user just says "hello?".
+    assert [request["reasoning"]["effort"] for request in llm.requests] == ["none", "low", "none"]
 
     sent = llm.requests[2]["input"]
     assert _shape(sent) == [
@@ -1841,6 +1844,65 @@ async def test_the_model_can_cancel_a_search_that_is_still_running() -> None:
     await asyncio.sleep(0.25)
     assert len(llm.requests) == 3
     assert f.conversation._outliving == {}
+    await f.conversation.close()
+
+
+async def test_a_result_that_landed_while_the_user_spoke_still_counts_as_pending() -> None:
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()  # the search finishes while the user is still speaking
+    await asyncio.sleep(0.05)
+    f.stt.turn_end("hello?")
+    await _read_until(f.conversation, "assistant.done")
+
+    # The model is shown the placeholder and not yet the result, exactly as if the search
+    # were still running. So it is asked to think here too.
+    asked = llm.requests[1]
+    assert "Still running" in asked["input"][-2]["output"]
+    assert asked["reasoning"]["effort"] == "low"
+
+    f.clock.advance(60)
+    await _read_until(f.conversation, "assistant.done")
+    assert llm.requests[2]["reasoning"]["effort"] == "none"
+    await f.conversation.close()
+
+
+async def test_the_model_can_cancel_a_result_that_is_waiting_to_be_delivered() -> None:
+    cancel = _Item(
+        type="function_call",
+        call_id="call_2",
+        name="cancel_tool_call",
+        arguments=json.dumps({"call_id": "call_1"}),
+    )
+    llm, finish = _slow_search_then(
+        [_starts(cancel), _completed(cancel)],
+        [_delta("Stopped."), _completed(_message("Stopped."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()  # the search finishes while the user is still speaking
+    await asyncio.sleep(0.05)
+    f.stt.turn_end("never mind, stop that")
+    await _read_until(f.conversation, "assistant.done")
+
+    assert llm.requests[2]["input"][-1]["output"] == "Cancelled."
+    # The result the user called off is never brought up.
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 3
+    assert f.conversation._late == []
     await f.conversation.close()
 
 
