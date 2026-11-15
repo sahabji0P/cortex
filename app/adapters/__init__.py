@@ -5,6 +5,7 @@ from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.adapters.http_adp import HttpAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
+from app.adapters.parallel_adp import ParallelAdapterClass
 from app.adapters.redis_adp import RedisAdapterClass
 
 
@@ -16,6 +17,7 @@ class AdapterRegistry:
         self.OpenAI = OpenAIAdapterClass()
         self.CartesiaSTT = CartesiaSTTAdapterClass()
         self.CartesiaTTS = CartesiaTTSAdapterClass()
+        self.Parallel = ParallelAdapterClass()
         await asyncio.gather(
             self.DocDB.initialize(),
             self.Cache.initialize(),
@@ -23,6 +25,7 @@ class AdapterRegistry:
             self.OpenAI.initialize(),
             self.CartesiaSTT.initialize(),
             self.CartesiaTTS.initialize(),
+            self.Parallel.initialize(),
         )
 
     async def close(self) -> None:
@@ -33,6 +36,7 @@ class AdapterRegistry:
             self.OpenAI.close(),
             self.CartesiaSTT.close(),
             self.CartesiaTTS.close(),
+            self.Parallel.close(),
         )
 
 
