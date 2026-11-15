@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cortex voice test</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: light dark; --line: #8884; --dim: #888; }
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 680px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  p.note { color: var(--dim); margin: 0 0 16px; font-size: .9rem; }
+  button { font: inherit; padding: 10px 20px; border-radius: 8px; border: 1px solid var(--line); cursor: pointer; }
+  #status { margin-left: 12px; color: var(--dim); }
+  #log { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 12px; }
+  #log div { margin: 8px 0; white-space: pre-wrap; }
+  .you b { color: #3b82f6; } .cortex b { color: #10b981; }
+  .meta { color: var(--dim); font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>Cortex voice test</h1>
+<p class="note">A test page, not the product UI. Use headphones if Cortex cuts itself off: that means the mic is hearing the speakers.</p>
+<button id="toggle">Start talking</button><span id="status">idle</span>
+<div id="log"></div>
+
+<script>
+const MIC_RATE = 16000;     // what the server expects from us
+const SPEECH_RATE = 24000;  // what the server sends back
+
+// Runs on the audio thread: resamples the mic to 16 kHz and posts ~100 ms PCM16 frames.
+const MIC_WORKLET = `
+class Mic extends AudioWorkletProcessor {
+  constructor() { super(); this.step = sampleRate / ${MIC_RATE}; this.at = 0; this.frame = []; }
+  process(inputs) {
+    const input = inputs[0][0];
+    if (!input) return true;
+    for (; this.at < input.length; this.at += this.step) {
+      const sample = Math.max(-1, Math.min(1, input[Math.floor(this.at)]));
+      this.frame.push(sample * 32767);
+    }
+    this.at -= input.length;
+    if (this.frame.length >= ${MIC_RATE / 10}) {
+      const pcm = Int16Array.from(this.frame);
+      this.frame = [];
+      this.port.postMessage(pcm.buffer, [pcm.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor("mic", Mic);`;
+
+const toggle = document.getElementById("toggle");
+const statusEl = document.getElementById("status");
+const log = document.getElementById("log");
+
+let socket = null, mic = null, audio = null;
+let playAt = 0;             // when the next speech chunk should start
+let playing = new Set();    // speech chunks scheduled or playing
+let leftover = null;        // a stray byte when a chunk splits a 16-bit sample
+let partial = null, reply = null;
+
+function line(cls, label) {
+  const el = document.createElement("div");
+  el.className = cls;
+  el.innerHTML = label ? `<b>${label}</b> <span></span>` : "<span></span>";
+  log.append(el);
+  el.scrollIntoView({ block: "end" });
+  return el.querySelector("span");
+}
+
+function play(buffer) {
+  let bytes = new Uint8Array(buffer);
+  if (leftover) { const joined = new Uint8Array(bytes.length + 1); joined[0] = leftover[0]; joined.set(bytes, 1); bytes = joined; leftover = null; }
+  if (bytes.length % 2) { leftover = bytes.slice(-1); bytes = bytes.slice(0, -1); }
+  if (!bytes.length) return;
+  const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
+  const chunk = audio.createBuffer(1, pcm.length, SPEECH_RATE);
+  const samples = chunk.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 32768;
+  const source = audio.createBufferSource();
+  source.buffer = chunk;
+  source.connect(audio.destination);
+  playAt = Math.max(playAt, audio.currentTime + 0.05);
+  source.start(playAt);
+  playAt += chunk.duration;
+  playing.add(source);
+  source.onended = () => playing.delete(source);
+}
+
+// The whole of "interruption" on this side: silence everything queued, right now.
+function stopSpeaking() {
+  for (const source of playing) { source.onended = null; source.stop(); }
+  playing.clear();
+  playAt = 0;
+  leftover = null;
+}
+
+function onEvent(event) {
+  if (event.type === "user.partial") {
+    partial ??= line("you", "You");
+    partial.textContent = event.text;
+  } else if (event.type === "user.final") {
+    (partial ?? line("you", "You")).textContent = event.text;
+    partial = null; reply = null;
+  } else if (event.type === "assistant.delta") {
+    reply ??= line("cortex", "Cortex");
+    reply.textContent += event.text;
+  } else if (event.type === "assistant.done") {
+    reply = null;
+  } else if (event.type === "tool.call") {
+    line("meta").textContent = `searching the web: ${event.text}`;
+  } else if (event.type === "interrupt") {
+    if (playing.size) line("meta").textContent = "interrupted";
+    stopSpeaking();
+    reply = null;
+  } else if (event.type === "error") {
+    line("meta").textContent = `error: ${event.text}`;
+  }
+}
+
+async function start() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    // Echo cancellation keeps the speakers from being heard as the user talking.
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+  });
+  audio = new AudioContext();
+  await audio.audioWorklet.addModule(URL.createObjectURL(new Blob([MIC_WORKLET], { type: "text/javascript" })));
+  const worklet = new AudioWorkletNode(audio, "mic", { numberOfInputs: 1, numberOfOutputs: 0 });
+  audio.createMediaStreamSource(stream).connect(worklet);
+  mic = stream;
+
+  socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/voice/converse`);
+  socket.binaryType = "arraybuffer";
+  socket.onopen = () => { statusEl.textContent = "listening"; };
+  socket.onmessage = (message) => typeof message.data === "string" ? onEvent(JSON.parse(message.data)) : play(message.data);
+  socket.onclose = () => stop();
+  worklet.port.onmessage = (message) => { if (socket?.readyState === WebSocket.OPEN) socket.send(message.data); };
+  toggle.textContent = "Stop";
+  statusEl.textContent = "connecting";
+}
+
+function stop() {
+  stopSpeaking();
+  socket?.close(); socket = null;
+  mic?.getTracks().forEach((track) => track.stop()); mic = null;
+  audio?.close(); audio = null;
+  partial = reply = null;
+  toggle.textContent = "Start talking";
+  statusEl.textContent = "idle";
+}
+
+toggle.onclick = () => (socket ? stop() : start().catch((error) => { line("meta").textContent = `error: ${error.message}`; stop(); }));
+</script>
+</body>
+</html>
