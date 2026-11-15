@@ -6,7 +6,6 @@ from app.entities.conversation_ent import (
     SessionTurn,
 )
 from app.entities.pipeline_agent_sdk import AgentSDKPipelineEntityClass
-from app.entities.pipeline_llm import LLMPipelineEntityClass
 from app.entities.stt_ent import STTEntityClass
 from app.entities.user_ent import User, UserEntityClass
 
@@ -32,12 +31,6 @@ class EntitiesRegistry:
             cache=adapter.Cache,
         )
         cls.Conversations = ConversationEntityClass(docdb=adapter.DocDB)
-        cls.LLMPipeline = LLMPipelineEntityClass(
-            openai=adapter.OpenAI,
-            gemini=adapter.Gemini,
-            anthropic=adapter.Anthropic,
-            conversations=cls.Conversations,
-        )
         cls.STT = STTEntityClass(stt=adapter.CartesiaSTT)
         cls.AgentSDKPipeline = AgentSDKPipelineEntityClass()
 

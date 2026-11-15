@@ -8,6 +8,8 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        # A local .env may still carry keys for providers that were removed.
+        extra="ignore",
     )
 
     # MongoDB
@@ -26,22 +28,17 @@ class Settings(BaseSettings):
     environment: Literal["local", "staging", "production"] = "local"
     debug: bool = True
 
-    # Google Cloud / Vertex AI (auth via GCP ADC — `gcloud auth application-default login`)
-    # Anthropic and Gemini generateContent run through Vertex with this project/region.
+    # Google Cloud / Vertex AI, used only by the Claude Agent SDK pipeline.
     gcp_project_id: str = ""
     vertex_region: str = "global"  # "global" (recommended), "us"/"eu", or a specific region
-    # Optional path to a GCP service-account key JSON. When set, it's exported as
-    # GOOGLE_APPLICATION_CREDENTIALS at startup so the Vertex clients authenticate
-    # via this key. Leave empty to fall back to gcloud ADC.
+    # Optional path to a GCP service-account key JSON, handed to the spawned harness.
+    # Leave empty to fall back to gcloud ADC.
     gcp_credentials_path: str = ""
 
-    # Gemini Developer API (used by the Interactions endpoint).
-    gemini_api_key: str = ""
-
-    # OpenAI
+    # OpenAI (the only model provider)
     openai_api_key: str = ""
 
-    # Cartesia
+    # Cartesia (speech-to-text and text-to-speech)
     cartesia_api_key: str = ""
 
 

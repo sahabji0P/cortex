@@ -1,7 +1,6 @@
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, WebSocket
@@ -14,14 +13,7 @@ from app.adapters.cartesia_stt_adp import (
 )
 from app.entities import EntitiesRegistry
 from app.entities.conversation_ent import Project, Session, SessionTurn
-from app.entities.pipeline_llm import StreamChunk
 from app.routers.cortex.models import CortexModels
-
-# Seconds of idle (no chunk) before emitting a keep-alive frame.
-_HEARTBEAT_INTERVAL = 15.0
-# SSE comment frame: a line starting with ":" is ignored by clients but keeps the
-# TCP connection (and any proxy in between) from timing out during quiet stretches.
-_HEARTBEAT_FRAME = ": heartbeat\n\n"
 
 # Parses client text frames on the transcribe WebSocket into typed commands.
 _TRANSCRIBE_COMMAND_ADAPTER: TypeAdapter[
@@ -34,11 +26,6 @@ _TRANSCRIBE_COMMAND_ADAPTER: TypeAdapter[
 )
 
 
-def _format_sse(chunk: StreamChunk) -> str:
-    """Serialize a StreamChunk as one SSE frame: event name = chunk type, data = JSON."""
-    return f"event: {chunk.type}\ndata: {chunk.model_dump_json()}\n\n"
-
-
 def _error_frame(message: str) -> str:
     """Build a client-facing error frame matching Cartesia's `error` event shape."""
     return json.dumps({"type": "error", "message": message})
@@ -46,7 +33,6 @@ def _error_frame(message: str) -> str:
 
 class CortexServiceV1Class:
     def __init__(self) -> None:
-        self.pipeline = EntitiesRegistry.LLMPipeline
         self.conversations = EntitiesRegistry.Conversations
         self.stt = EntitiesRegistry.STT
 
@@ -99,17 +85,6 @@ class CortexServiceV1Class:
     async def get_session(self, session_id: str) -> CortexModels.V1.Output.Session:
         return self._session_out(await self.conversations.get_session(session_id))
 
-    async def resolve_listen_session(
-        self,
-        payload: CortexModels.V1.Input.Listen,
-    ) -> str:
-        """Resolve an existing session or create one for the first submitted turn."""
-        if payload.session_id is not None:
-            session = await self.conversations.get_session(payload.session_id)
-        else:
-            session = await self.conversations.create_session(payload.project_id)
-        return str(session.id)
-
     async def list_project_sessions(
         self,
         project_id: str,
@@ -131,58 +106,6 @@ class CortexServiceV1Class:
     ) -> list[CortexModels.V1.Output.SessionTurn]:
         turns = await self.conversations.get_session_turns(session_id)
         return [self._turn_out(turn) for turn in turns]
-
-    async def stream(
-        self,
-        payload: CortexModels.V1.Input.Listen,
-        *,
-        session_id: str,
-    ) -> AsyncIterator[str]:
-        """Stream pipeline chunks as SSE, injecting heartbeats during idle gaps.
-
-        A producer task drains the pipeline into a queue; this consumer reads with a
-        timeout so it can emit a keep-alive frame whenever no chunk arrives in time.
-        """
-        queue: asyncio.Queue[StreamChunk | None] = asyncio.Queue()
-
-        async def _produce() -> None:
-            try:
-                async for chunk in self.pipeline.run(
-                    payload.prompt,
-                    payload.providers,
-                    gemini_mode=payload.gemini_mode,
-                    gemini_tools=payload.gemini_tools or None,
-                    anthropic_model=payload.anthropic_model,
-                    openai_thinking=payload.openai_thinking,
-                    session_id=session_id,
-                ):
-                    await queue.put(chunk)
-            except Exception as exc:
-                # Failures outside the per-provider streams (e.g. the session was
-                # deleted mid-request) must reach the client as an error frame, not
-                # kill the response after SSE headers have been sent.
-                await queue.put(
-                    StreamChunk(provider=payload.providers[0], type="error", text=str(exc))
-                )
-            finally:
-                await queue.put(None)  # sentinel: stream finished
-
-        task = asyncio.create_task(_produce())
-        try:
-            while True:
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_INTERVAL)
-                except TimeoutError:
-                    yield _HEARTBEAT_FRAME
-                    continue
-                if item is None:
-                    break
-                yield _format_sse(item)
-        finally:
-            # Client disconnected or stream ended — stop the producer cleanly.
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
 
     async def transcribe(
         self,

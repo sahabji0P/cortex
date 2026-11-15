@@ -2,7 +2,7 @@ import json
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -18,19 +18,40 @@ from claude_agent_sdk import (
     UserMessage,
     query,
 )
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
-from app.entities.pipeline_llm import StreamChunk
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import SystemPromptPreset
 
 
+class StreamChunk(BaseModel):
+    """One normalized event of an agent run.
+
+    - `delta` : output text (in `text`)
+    - `info`  : a tool call, tool result, thinking block, or harness lifecycle event
+    - `done`  : the run finished (stats in `info`)
+    - `error` : the run failed (message in `text`)
+    """
+
+    provider: Literal["anthropic"]
+    type: Literal["delta", "info", "done", "error"]
+    text: str = ""
+    info: str | None = None
+    tool_name: str | None = Field(default=None, serialization_alias="toolName")
+    tool_input: str | None = Field(default=None, serialization_alias="toolInput")
+    tool_output: str | None = Field(default=None, serialization_alias="toolOutput")
+    is_error: bool | None = Field(default=None, serialization_alias="isError")
+    provider_response_id: str | None = Field(default=None, exclude=True)
+
+    model_config = ConfigDict(serialize_by_alias=True)
+
+
 class AgentSDKPipelineEntityClass:
     """Runs a prompt through the Claude Agent SDK and yields a unified stream.
 
-    Contrast with LLMPipelineEntityClass, which calls provider APIs directly and only
-    sees *server-side* tools: this pipeline embeds the Claude Code harness — a local
+    This pipeline embeds the Claude Code harness — a local
     agent loop that calls the Messages API, executes file/shell tools on this machine,
     feeds results back to the model, and repeats until the model stops. Every step of
     that loop streams here as normalized chunks: text as `delta`, tool calls/results
@@ -177,7 +198,7 @@ class AgentSDKPipelineEntityClass:
 
     @staticmethod
     def _vertex_env() -> dict[str, str]:
-        """Route the spawned harness at Vertex AI, mirroring the Anthropic adapter.
+        """Route the spawned harness at Vertex AI.
 
         The SDK spawns a Claude Code subprocess; these vars are injected into its
         environment. When no GCP project is configured we inject nothing and the
