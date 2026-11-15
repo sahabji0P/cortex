@@ -233,7 +233,7 @@ class _Heard:
     """A reply as the user heard it."""
 
     items: list[ResponseInputItemParam]  # what joins the history
-    spoke: bool  # whether any of the reply's speech is among them
+    spoke: bool  # whether the user heard any of the reply's speech
     kept: str | None  # the text kept of a reply that was cut short; None if heard in full
     unheard: str  # the text that was dropped
 
@@ -288,6 +288,7 @@ class _Reply:
         spoken: list[str] = []
         unheard: list[str] = []
         cut = False
+        heard_any = False
         for index, part in enumerate(self._parts):
             if isinstance(part, _ToolCall):
                 items.extend(part.items())
@@ -297,6 +298,7 @@ class _Reply:
                 unheard.append(said)  # generated after the user stopped listening
                 continue
             text, whole = part.heard(at)
+            heard_any = heard_any or bool(text)
             if index < self._sent_back:
                 text = said
             elif not whole:
@@ -306,7 +308,7 @@ class _Reply:
             if text:
                 spoken.append(text)
                 items.append({"role": "assistant", "content": text})
-        return _Heard(items, bool(spoken), " ".join(spoken) if cut else None, " ".join(unheard))
+        return _Heard(items, heard_any, " ".join(spoken) if cut else None, " ".join(unheard))
 
 
 class VoiceConversation:
@@ -441,7 +443,7 @@ class VoiceConversation:
         heard = self._settle()
         kept = heard.kept if heard is not None else None
         self._cut_a_reply = kept is not None
-        self._cut_after_hearing = bool(kept)
+        self._cut_after_hearing = heard is not None and heard.spoke
         if producing is not None:
             producing.cancel()
         self._playback.reset()
@@ -469,7 +471,8 @@ class VoiceConversation:
             if call.output is None:
                 self._outlive(call)
         heard = reply.heard(self._playback.hearing())
-        if reply.brings_results and heard.spoke:
+        if reply.brings_results and (heard.spoke or heard.kept is None):
+            # Heard at least in part, or played to its end: the user has been told.
             self._results_owed = False
         if heard.items and self._labelling is not None:
             # Some of this reply was heard, so a note still being worded for the reply
@@ -557,7 +560,7 @@ class VoiceConversation:
         been answered.
 
         The user is owed the result until they have heard some of the reply about it. If
-        that reply is cut off unheard, it is made again, with a note saying why.
+        that reply is cut off unheard, it is made once more, with a note saying why.
         """
         while True:
             if self._producing is not None and not self._producing.done():
@@ -569,12 +572,24 @@ class VoiceConversation:
         self._settle()
         if self._late:
             self._add_late_results()
+            self._results_owed = True
         elif self._results_owed:
+            self._close_turn()
             self._history.append({"role": "developer", "content": _RESULT_REMINDER})
+            # One more try is all a result gets, so reminders cannot pile up.
+            self._results_owed = False
         else:
             return  # the user has been told in the meantime
-        self._results_owed = True
         self._producing = asyncio.create_task(self._respond(brings_results=True))
+
+    def _close_turn(self) -> None:
+        """Move the user's unanswered turn into the history, where it becomes final.
+
+        Whatever is added next follows it, and what the user says next is a new turn.
+        """
+        if self._turn:
+            self._history.append({"role": "user", "content": "\n".join(self._turn)})
+            self._turn = []
 
     def _add_late_results(self) -> None:
         """Add each late result to the history as a stub call followed by the result.
@@ -582,11 +597,9 @@ class VoiceConversation:
         A result has to follow its own call directly, and the real call already has its
         placeholder. So we write a call ourselves that names the real one.
         """
-        if self._late and self._turn:
-            # The unanswered turn has already been sent to the model, so it is closed
-            # here and the results follow it. What the user says next is a new turn.
-            self._history.append({"role": "user", "content": "\n".join(self._turn)})
-            self._turn = []
+        if self._late:
+            # An unanswered turn has already been sent to the model: the results follow it.
+            self._close_turn()
         for call, output in self._late:
             stub = _ToolCall(
                 call_id=f"late_{uuid.uuid4().hex[:16]}",
