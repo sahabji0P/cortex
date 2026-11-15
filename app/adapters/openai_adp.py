@@ -1,11 +1,16 @@
-from collections.abc import Iterable
+import inspect
+import json
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from types import MappingProxyType
 from typing import Literal, cast
 
-from openai import AsyncOpenAI, AsyncStream, Omit, omit
+from openai import AsyncOpenAI, AsyncStream, Omit, omit, pydantic_function_tool
+from openai.types.chat import ChatCompletionFunctionToolParam
 from openai.types.responses import (
     EasyInputMessageParam,
+    ParsedResponse,
     ResponseIncludable,
+    ResponseInputItemParam,
     ResponseInputParam,
     ResponseStreamEvent,
     ResponseTextConfigParam,
@@ -18,11 +23,15 @@ from openai.types.responses import (
 
 # Re-exported (see __all__) so the pipeline can isinstance-narrow web-search citations.
 from openai.types.responses.response_output_text import AnnotationURLCitation
+from openai.types.responses.tool_param import ParseableToolParam
 from openai.types.shared_params import Reasoning as OpenAIThinking
+from pydantic import BaseModel
 
 from app.config import settings
 
 __all__ = ["AnnotationURLCitation", "OpenAIAdapterClass", "OpenAIThinking"]
+
+type ToolHandler = Callable[..., object | Awaitable[object]]
 
 
 class _Types:
@@ -54,6 +63,20 @@ class OpenAIAdapterClass:
 
     class Tools:
         """Server-side tool builders for the Responses API."""
+
+        @staticmethod
+        def pydantic_function(
+            arguments_model: type[BaseModel],
+            *,
+            name: str | None = None,
+            description: str | None = None,
+        ) -> ChatCompletionFunctionToolParam:
+            """Build a strict function tool whose arguments parse into a Pydantic model."""
+            return pydantic_function_tool(
+                arguments_model,
+                name=name,
+                description=description,
+            )
 
         @staticmethod
         def web_search(
@@ -154,6 +177,111 @@ class OpenAIAdapterClass:
             tools=tools,
             reasoning=reasoning,
         )
+
+    async def structured_response[OutputModelT: BaseModel](
+        self,
+        *,
+        model: _Types.AvailableModels,
+        input: str | ResponseInputParam,
+        output_model: type[OutputModelT],
+        tools: Iterable[ParseableToolParam] = (),
+        tool_handlers: Mapping[str, ToolHandler] | None = None,
+        instructions: str | None | Omit = omit,
+        initial_tool_choice: response_create_params.ToolChoice | Omit = omit,
+        parallel_tool_calls: bool | None | Omit = omit,
+        reasoning: OpenAIThinking | None | Omit = omit,
+        max_tool_rounds: int = 8,
+    ) -> ParsedResponse[OutputModelT]:
+        """Run custom tools until the model returns the requested Pydantic output.
+
+        Built-in tools execute on OpenAI's servers. Custom function calls are dispatched
+        through ``tool_handlers`` and their outputs are sent back to the model. The entire
+        exchange is stateless (``store=False``), so every model output item—including any
+        encrypted reasoning item—is preserved in the next request.
+
+        ``initial_tool_choice`` applies only to the first request. This lets an experiment
+        force a tool call once and then return to automatic selection for the final answer.
+        """
+        if max_tool_rounds < 1:
+            raise ValueError("max_tool_rounds must be at least 1")
+
+        input_items: list[ResponseInputItemParam]
+        if isinstance(input, str):
+            input_items = [{"role": "user", "content": input}]
+        else:
+            input_items = list(input)
+
+        selected_tools = tuple(tools)
+        handlers = tool_handlers or {}
+
+        for round_index in range(max_tool_rounds + 1):
+            response = await self.client.responses.parse(
+                model=_Types.model_map[model],
+                input=cast("ResponseInputParam", input_items),
+                instructions=instructions,
+                tools=selected_tools,
+                text_format=output_model,
+                tool_choice=initial_tool_choice if round_index == 0 else omit,
+                parallel_tool_calls=parallel_tool_calls,
+                include=["reasoning.encrypted_content"],
+                reasoning=reasoning,
+                store=False,
+            )
+
+            function_calls = [item for item in response.output if item.type == "function_call"]
+            if not function_calls:
+                if response.output_parsed is not None:
+                    return response
+                raise RuntimeError(
+                    "OpenAI completed without a function call or parsed structured output "
+                    f"(status={response.status})"
+                )
+
+            if round_index == max_tool_rounds:
+                raise RuntimeError(f"OpenAI exceeded {max_tool_rounds} custom tool rounds")
+
+            # Reasoning-model tool loops must replay every output item, not just the call.
+            for item in response.output:
+                input_item = item.to_dict()
+                # responses.parse() adds this SDK-only convenience field. It is not part
+                # of the API input schema and must not be replayed to /v1/responses.
+                input_item.pop("parsed_arguments", None)
+                input_items.append(cast("ResponseInputItemParam", input_item))
+
+            for call in function_calls:
+                handler = handlers.get(call.name)
+                if handler is None:
+                    raise KeyError(f"No tool handler registered for {call.name!r}")
+
+                arguments = call.parsed_arguments
+                if arguments is None:
+                    arguments = json.loads(call.arguments)
+
+                try:
+                    tool_result = handler(arguments)
+                    if inspect.isawaitable(tool_result):
+                        tool_result = await cast("Awaitable[object]", tool_result)
+                except Exception as exc:
+                    raise RuntimeError(f"Tool {call.name!r} failed") from exc
+
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call.call_id,
+                        "output": self._serialize_tool_output(tool_result),
+                    }
+                )
+
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _serialize_tool_output(value: object) -> str:
+        """Serialize local tool results into the Responses function-output contract."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, BaseModel):
+            return value.model_dump_json()
+        return json.dumps(value, default=str)
 
     @property
     def client(self) -> AsyncOpenAI:
