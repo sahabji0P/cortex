@@ -8,6 +8,7 @@ from openai import AsyncOpenAI, AsyncStream, Omit, omit, pydantic_function_tool
 from openai.types.chat import ChatCompletionFunctionToolParam
 from openai.types.responses import (
     EasyInputMessageParam,
+    FunctionToolParam,
     ParsedResponse,
     ResponseIncludable,
     ResponseInputItemParam,
@@ -29,7 +30,12 @@ from pydantic import BaseModel
 
 from app.config import settings
 
-__all__ = ["AnnotationURLCitation", "OpenAIAdapterClass", "OpenAIThinking"]
+__all__ = [
+    "AnnotationURLCitation",
+    "OpenAIAdapterClass",
+    "OpenAIThinking",
+    "ResponseInputItemParam",
+]
 
 type ToolHandler = Callable[..., object | Awaitable[object]]
 
@@ -37,13 +43,14 @@ type ToolHandler = Callable[..., object | Awaitable[object]]
 class _Types:
     """Group private OpenAI adapter model types."""
 
-    type AvailableModels = Literal["5.4", "5.4 Chat", "5.4 Mini", "Luna"]
+    type AvailableModels = Literal["5.4", "5.4 Chat", "5.4 Mini", "Luna", "6 Luna"]
     model_map = MappingProxyType[AvailableModels, str](
         {
             "5.4": "gpt-5.4",
             "5.4 Chat": "gpt-5.4-chat-latest",
             "5.4 Mini": "gpt-5.4-mini",
             "Luna": "gpt-5.6-luna",
+            "6 Luna": "gpt-6-luna",
         }
     )
 
@@ -62,7 +69,27 @@ class OpenAIAdapterClass:
         return cast("ResponseInputParam", result)
 
     class Tools:
-        """Server-side tool builders for the Responses API."""
+        """Tool builders for the Responses API."""
+
+        @staticmethod
+        def function(
+            *,
+            name: str,
+            description: str,
+            parameters: dict[str, object],
+        ) -> FunctionToolParam:
+            """Build a strict function tool the caller runs itself.
+
+            The model's call arrives as a `function_call` output item; send the result
+            back as a `function_call_output` input item with the same `call_id`.
+            """
+            return {
+                "type": "function",
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+                "strict": True,
+            }
 
         @staticmethod
         def pydantic_function(
