@@ -614,6 +614,41 @@ async def test_a_note_survives_the_recognizer_opening_an_empty_turn_first() -> N
     await f.conversation.close()
 
 
+async def test_a_note_is_dropped_once_a_later_reply_has_been_heard_in_full() -> None:
+    call = _search_call("slow one")
+    finish, never = asyncio.Event(), asyncio.Event()
+    llm = _LLM(
+        [_delta(_STORY), _starts(call), _completed(_message(_STORY), call)],
+        [_delta("Go on."), _completed(_message("Go on."))],
+        [_delta("It found"), never],
+        [_delta("Noon."), _completed(_message("Noon."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    # A story is cut (a note is asked for) by a turn with no words, so it is resumed.
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "tool.call")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 4.5)
+    f.stt.say("")
+    await _read_until(f.conversation, "assistant.done")
+    # The resumed reply is heard to the end. Then the search result comes in late and
+    # is answered, and the user speaks over that answer before hearing any of it.
+    f.clock.advance(60)
+    finish.set()
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("what time is it")
+    await _read_until(f.conversation, "assistant.done")
+
+    # The note was about the story, which has since been picked up and heard.
+    notes = [
+        item["content"] for item in llm.requests[-1]["input"] if item.get("role") == "developer"
+    ]
+    assert not [note for note in notes if "did not hear the rest" in note]
+    assert len(llm.labelled) == 1
+    await f.conversation.close()
+
+
 async def test_a_turn_that_ends_without_starting_does_not_wait_for_a_note() -> None:
     never = asyncio.Event()
     llm = _LLM([_delta(_STORY), never], [_delta("Sure."), _completed(_message("Sure."))])

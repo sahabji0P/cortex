@@ -426,15 +426,13 @@ class VoiceConversation:
         # empty only when no reply was cut, so a reply cut before its first word shows
         # as the bare mark.
         self._emit("interrupt", "" if kept is None else kept or _CUT_MARK)
-        if heard is not None and heard.items:
-            # Some of this reply was heard, so it is now the one a note would be about.
-            # (A reply cut before any of it was heard changes nothing: a note still
-            # being worded for the reply before it stays wanted.)
-            if self._labelling is not None:
-                self._labelling.cancel()
-                self._labelling = None
-            if time_for_a_note and len(heard.unheard.split()) >= _REMAINDER_MIN_WORDS:
-                self._labelling = asyncio.create_task(self._label(heard.unheard))
+        if (
+            time_for_a_note
+            and heard is not None
+            and heard.items
+            and len(heard.unheard.split()) >= _REMAINDER_MIN_WORDS
+        ):
+            self._labelling = asyncio.create_task(self._label(heard.unheard))
         if producing is not None:
             await asyncio.gather(producing, return_exceptions=True)
 
@@ -448,6 +446,12 @@ class VoiceConversation:
             if call.output is None:
                 self._outlive(call)
         heard = reply.heard(self._clock())
+        if heard.items and self._labelling is not None:
+            # Some of this reply was heard, so a note still being worded for the reply
+            # before it is out of date. (A reply cut before any of it was heard changes
+            # nothing, and that note stays wanted.)
+            self._labelling.cancel()
+            self._labelling = None
         if heard.items and self._turn:
             # Some of the reply got through, so the turn it answers is closed.
             self._history.append({"role": "user", "content": "\n".join(self._turn)})
