@@ -18,6 +18,10 @@ not what was generated. Speech is generated much faster than it plays, so a repl
 joins the history once it has been heard in full or cut off. A reply that is cut off is
 stored as the words that were heard, ending in "…". The rest is never sent back.
 
+Nothing the model has been sent is changed afterwards, so each request starts with the
+whole of the one before it. The one exception is the user's open turn, always the last
+item, which can gain a line (see below).
+
 A user turn stays open until some of the reply to it has been heard. Words that arrive
 before that join the same turn on a new line: speech recognition often splits one
 sentence in two, and the second half is not a new request.
@@ -167,6 +171,9 @@ class _Reply:
     def __init__(self, speech: Speech) -> None:
         self.speech = speech
         self._parts: list[Utterance | _ToolCall] = []
+        # How many of the parts have been sent back to the model, in a later call of
+        # this same reply. Those are final: the model has seen them as they are.
+        self._sent_back = 0
 
     async def say(self, text: str) -> None:
         utterance = await self.speech.say(text)
@@ -179,8 +186,9 @@ class _Reply:
     def calls(self) -> list[_ToolCall]:
         return [part for part in self._parts if isinstance(part, _ToolCall)]
 
-    def items(self) -> list[ResponseInputItemParam]:
+    def send_back(self) -> list[ResponseInputItemParam]:
         """Everything produced so far, for this reply's own next model call."""
+        self._sent_back = len(self._parts)
         items: list[ResponseInputItemParam] = []
         for part in self._parts:
             if isinstance(part, _ToolCall):
@@ -193,23 +201,32 @@ class _Reply:
         """The reply as the user had heard it by time `at`, for the history.
 
         Also returns the heard text if the reply was cut short, or None if it was heard
-        in full. Tool calls are kept either way: they happened, and the history has to
-        stay a valid chain of calls and results.
+        in full. Two things are kept whatever was heard:
+
+        - Tool calls: they happened, and the history has to stay a valid chain of calls
+          and results.
+        - Text already sent back to the model, which is what it said before a search.
+          Shortening it now would change something the model has been shown, and with
+          it everything a prompt cache holds from there on.
         """
         items: list[ResponseInputItemParam] = []
         spoken: list[str] = []
         cut = False
-        for part in self._parts:
+        for index, part in enumerate(self._parts):
             if isinstance(part, _ToolCall):
                 items.extend(part.items())
-            elif not cut:
-                text, whole = part.heard(at)
-                if not whole:
-                    cut = True
-                    text = f"{text}{_CUT_MARK}" if text else ""
-                if text:
-                    spoken.append(text)
-                    items.append({"role": "assistant", "content": text})
+                continue
+            if cut and index >= self._sent_back:
+                continue  # generated after the point where the user stopped listening
+            text, whole = part.heard(at)
+            if index < self._sent_back:
+                text = part.text.strip()
+            elif not whole and text:
+                text += _CUT_MARK
+            cut = cut or not whole
+            if text:
+                spoken.append(text)
+                items.append({"role": "assistant", "content": text})
         return items, " ".join(spoken) if cut else None
 
 
@@ -393,6 +410,11 @@ class VoiceConversation:
         A result has to follow its own call directly, and the real call already has its
         placeholder. So we write a call ourselves that names the real one.
         """
+        if self._late and self._turn:
+            # The unanswered turn has already been sent to the model, so it is closed
+            # here and the results follow it. What the user says next is a new turn.
+            self._history.append({"role": "user", "content": "\n".join(self._turn)})
+            self._turn = []
         for call, output in self._late:
             stub = _ToolCall(
                 call_id=f"late_{uuid.uuid4().hex[:16]}",
@@ -414,7 +436,7 @@ class VoiceConversation:
             # Nothing was said and nothing was stopped: only late results may be waiting.
             self._announce_when_quiet()
             return
-        # Results that came in while the user was speaking go in ahead of what follows.
+        # Results that came in while the user was speaking go in before what they said.
         self._add_late_results()
         if said:
             self._turn.append(transcript)
@@ -451,7 +473,7 @@ class VoiceConversation:
             model="6 Luna",
             # No thinking before it speaks: in a conversation the wait is worse than the gain.
             reasoning={"effort": "none"},
-            input=[*self._history, *self._open_turn(), *reply.items()],
+            input=[*self._history, *self._open_turn(), *reply.send_back()],
             instructions=self._instructions,
             tools=self._tools,
             # Forbidding the tool this way leaves the tool list, and so the cache, intact.

@@ -157,7 +157,10 @@ class _LLM:
         self.requests: list[dict] = []
 
     async def stream_response(self, **request):
-        self.requests.append({**request, "input": list(request["input"])})
+        sent = [dict(item) for item in request["input"]]
+        if self.requests:
+            _assert_only_grew(self.requests[-1]["input"], sent)
+        self.requests.append({**request, "input": sent})
         script = self._rounds.pop(0)
 
         async def stream():
@@ -170,16 +173,40 @@ class _LLM:
         return stream()
 
 
+def _assert_only_grew(before: list[dict], after: list[dict]) -> None:
+    """Each request has to start with the whole of the one before it.
+
+    Changing anything the model has already been sent would break a prompt cache from
+    that point on. The one allowed change is the user's open turn, which is always the
+    last item and can gain a line.
+    """
+    *settled, last = before
+    assert after[: len(settled)] == settled, "an earlier item was changed or removed"
+    same_slot = after[len(settled)]
+    if same_slot != last:
+        assert last.get("role") == "user" == same_slot.get("role")
+        assert same_slot["content"].startswith(last["content"] + "\n")
+
+
 class _Search:
-    def __init__(self, *, configured: bool = True, gate: asyncio.Event | None = None) -> None:
+    """Web search. With a gate, searches wait for it; `only` limits that to matching queries."""
+
+    def __init__(
+        self,
+        *,
+        configured: bool = True,
+        gate: asyncio.Event | None = None,
+        only: str = "",
+    ) -> None:
         self.configured = configured
         self.queries: list[str] = []
         self._gate = gate
+        self._only = only
 
     async def search(self, *, objective: str, queries: list[str], mode: str):
         assert mode == "turbo"
         self.queries.append(objective)
-        if self._gate is not None:
+        if self._gate is not None and self._only in objective:
             await self._gate.wait()
         return SimpleNamespace(
             results=[
@@ -663,7 +690,7 @@ async def test_interrupting_the_answer_keeps_the_search_and_the_words_heard() ->
     await f.conversation.close()
 
 
-async def test_text_after_the_cut_is_dropped_but_a_finished_search_is_kept() -> None:
+async def test_what_was_said_before_a_search_is_kept_whole_once_the_model_has_seen_it() -> None:
     call = _search_call("who won the last F1 race")
     llm = _LLM(
         [_starts(call), _completed(call)],
@@ -679,10 +706,40 @@ async def test_text_after_the_cut_is_dropped_but_a_finished_search_is_kept() -> 
     f.stt.say("stop")
     outputs = await _read_until(f.conversation, "assistant.done")
 
-    assert outputs[0] == VoiceEvent(type="interrupt", text="Let…")
+    # "Let me check." had already gone back to the model with the search result, so it
+    # stays as it was. The answer was never heard and is dropped.
+    assert outputs[0] == VoiceEvent(type="interrupt", text="Let me check.")
     sent = llm.requests[2]["input"]
     assert _shape(sent) == ["user", "assistant", "function_call", "function_call_output", "user"]
-    assert sent[1]["content"] == "Let…"
+    assert sent[1]["content"] == "Let me check."
+    await f.conversation.close()
+
+
+async def test_two_searches_in_one_round_are_each_given_their_own_kind_of_result() -> None:
+    quick, slow = _search_call("quick one", "call_q"), _search_call("slow one", "call_s")
+    finish = asyncio.Event()
+    llm = _LLM(
+        [_starts(quick), _completed(quick, slow)],
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+    )
+    search = _Search(gate=finish, only="slow")
+    f = _conversation(llm, search)
+
+    f.stt.say("look up two things")
+    await _read_until(f.conversation, "tool.call")
+    await _let_audio_out()
+    f.stt.say("hello?")
+    await _read_until(f.conversation, "assistant.done")
+
+    sent = llm.requests[1]["input"]
+    outputs = {
+        item["call_id"]: item["output"]
+        for item in sent
+        if item.get("type") == "function_call_output"
+    }
+    assert "Norris won in Las Vegas." in outputs["call_q"]
+    assert "Still running" in outputs["call_s"]
+    assert list(f.conversation._outliving) == ["call_s"]
     await f.conversation.close()
 
 
@@ -852,6 +909,40 @@ async def test_a_late_result_is_still_answered_if_the_user_said_nothing_after_al
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert outputs[-1].text == "It is sunny."
+    # The result went in once, and nothing claims a reply was cut by noise.
+    assert _shape(llm.requests[2]["input"])[-3:] == [
+        "assistant",
+        "function_call",
+        "function_call_output",
+    ]
+    await f.conversation.close()
+
+
+async def test_a_late_result_follows_a_turn_the_model_has_already_been_shown() -> None:
+    never = asyncio.Event()
+    llm, finish = _slow_search_then(
+        [_delta("Hmm"), never],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    # A new turn is sent to the model, but the user speaks again before hearing a reply.
+    f.stt.say("hello?")
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()
+    await asyncio.sleep(0.05)
+    f.stt.turn_end("are you there?")
+    await _read_until(f.conversation, "assistant.done")
+
+    # "hello?" stays where the model saw it. The result comes after it, not before.
+    sent = llm.requests[2]["input"]
+    assert _shape(sent)[-4:] == ["user", "function_call", "function_call_output", "user"]
+    assert sent[-4]["content"] == "hello?"
+    assert sent[-1]["content"] == "are you there?"
     await f.conversation.close()
 
 
