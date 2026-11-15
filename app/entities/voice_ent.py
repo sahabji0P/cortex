@@ -47,7 +47,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -186,8 +186,20 @@ class _ToolCall:
     arguments: str
     output: str | None = None  # None while the tool is still running
     running: asyncio.Task[str] | None = None
+    # Whether `output` is a placeholder standing in for a result that comes later.
+    placeholder: bool = False
+    # Whether the result has been sent back to the model, in a later call of its reply.
+    seen: bool = False
+    # The result item most recently built by `items()`: the one in the history, once
+    # this call is there.
+    result_item: FunctionCallOutput | None = None
 
     def items(self) -> list[ResponseInputItemParam]:
+        self.result_item = {
+            "type": "function_call_output",
+            "call_id": self.call_id,
+            "output": self.output or "",
+        }
         return [
             {
                 "type": "function_call",
@@ -195,12 +207,14 @@ class _ToolCall:
                 "name": self.name,
                 "arguments": self.arguments,
             },
-            {
-                "type": "function_call_output",
-                "call_id": self.call_id,
-                "output": self.output or "",
-            },
+            self.result_item,
         ]
+
+    @property
+    def search_result(self) -> FunctionCallOutput | None:
+        """The item holding this call's search result, if it has a real one."""
+        real = self.name == "web_search" and not self.placeholder
+        return self.result_item if real else None
 
 
 @dataclass(slots=True)
@@ -239,6 +253,7 @@ class _Reply:
         items: list[ResponseInputItemParam] = []
         for part in self._parts:
             if isinstance(part, _ToolCall):
+                part.seen = True
                 items.extend(part.items())
             elif text := part.text.strip():
                 items.append({"role": "assistant", "content": text})
@@ -335,6 +350,10 @@ class VoiceConversation:
         # The calls in the history that we wrote to carry a late result: stub call id to
         # the id of the call the model really made.
         self._stubs: dict[str, str] = {}
+        # Every real search result in the history, oldest first, and how many of them
+        # the model has been sent. Only those may be cleared.
+        self._results: list[FunctionCallOutput] = []
+        self._results_sent = 0
         # Working out what the unheard part of a cut reply was about, while the user
         # who cut it is still speaking.
         self._labelling: asyncio.Task[str] | None = None
@@ -358,14 +377,14 @@ class VoiceConversation:
             for task in (self._listening, self._producing, self._announcing)
             if task is not None
         ]
-        if self._labelling is not None:
-            self._labelling.cancel()
         calls = [*self._outliving.values(), *(self._reply.calls() if self._reply else [])]
-        searches = [call.running for call in calls if call.running is not None]
-        for task in (*tasks, *searches):
+        others = [call.running for call in calls if call.running is not None]
+        if self._labelling is not None:
+            others.append(self._labelling)
+        for task in (*tasks, *others):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.gather(*searches, return_exceptions=True)
+        await asyncio.gather(*others, return_exceptions=True)
         with contextlib.suppress(Exception):
             await self._stt.close()
 
@@ -391,7 +410,7 @@ class VoiceConversation:
         finally:
             self._out.put_nowait(None)
 
-    async def _interrupt(self) -> None:
+    async def _interrupt(self, *, time_for_a_note: bool = True) -> None:
         """The user is speaking: stop the reply, and record how much of it they heard."""
         producing, self._producing = self._producing, None
         if self._announcing is not None:
@@ -407,11 +426,15 @@ class VoiceConversation:
         # empty only when no reply was cut, so a reply cut before its first word shows
         # as the bare mark.
         self._emit("interrupt", "" if kept is None else kept or _CUT_MARK)
-        if self._labelling is not None:
-            self._labelling.cancel()
-            self._labelling = None
-        if heard is not None and heard.items and len(heard.unheard.split()) >= _REMAINDER_MIN_WORDS:
-            self._labelling = asyncio.create_task(self._label(heard.unheard))
+        if heard is not None and heard.items:
+            # Some of this reply was heard, so it is now the one a note would be about.
+            # (A reply cut before any of it was heard changes nothing: a note still
+            # being worded for the reply before it stays wanted.)
+            if self._labelling is not None:
+                self._labelling.cancel()
+                self._labelling = None
+            if time_for_a_note and len(heard.unheard.split()) >= _REMAINDER_MIN_WORDS:
+                self._labelling = asyncio.create_task(self._label(heard.unheard))
         if producing is not None:
             await asyncio.gather(producing, return_exceptions=True)
 
@@ -430,6 +453,11 @@ class VoiceConversation:
             self._history.append({"role": "user", "content": "\n".join(self._turn)})
             self._turn = []
         self._history.extend(heard.items)
+        for call in reply.calls():
+            if (result := call.search_result) is not None:
+                self._results.append(result)
+                if call.seen:
+                    self._results_sent = len(self._results)
         return heard
 
     async def _label(self, unheard: str) -> str:
@@ -446,22 +474,24 @@ class VoiceConversation:
             return ""
         return " ".join(label.split()).rstrip(".")
 
-    async def _note_the_remainder(self, *, wanted: bool) -> None:
+    async def _note_the_remainder(self) -> None:
         """Add the note about a cut reply's unheard part, if its wording is ready in time.
 
         The note has to be in the history before the next request, like everything else,
         so the wait is short and a late label is thrown away.
         """
-        labelling, self._labelling = self._labelling, None
+        labelling = self._labelling
         if labelling is None:
             return
-        if wanted:
+        try:
             await asyncio.wait({labelling}, timeout=_LABEL_WAIT_SECONDS)
             if labelling.done() and not labelling.cancelled() and (topic := labelling.result()):
                 self._history.append(
                     {"role": "developer", "content": _REMAINDER_NOTE.format(topic=topic)}
                 )
-        labelling.cancel()
+        finally:
+            labelling.cancel()
+            self._labelling = None
 
     def _outlive(self, call: _ToolCall) -> None:
         """Let a call that is still running carry on without the reply that made it."""
@@ -471,6 +501,7 @@ class VoiceConversation:
             call.output = running.result() if running and not running.cancelled() else ""
             return
         call.output = _PLACEHOLDER.format(call_id=call.call_id)
+        call.placeholder = True
         self._outliving[call.call_id] = call
         running.add_done_callback(lambda finished: self._finished_late(call, finished))
 
@@ -527,19 +558,28 @@ class VoiceConversation:
             )
             self._stubs[stub.call_id] = call.call_id
             self._history.extend(stub.items())
+            if (result := stub.search_result) is not None:
+                self._results.append(result)
         self._late.clear()
 
     async def _start_reply(self, transcript: str) -> None:
         """A turn ended: answer it, or put back what it interrupted if nothing was said."""
+        if not self._user_speaking:
+            # The turn ended without the start that normally comes first, so this is the
+            # first that is known of it.
+            self._turn_began_at = self._clock()
+            if self._producing is not None or self._reply is not None:
+                self._user_speaking = True
+                # A note asked for only now could not be worded before it is needed.
+                await self._interrupt(time_for_a_note=False)
         # The user holds the floor until it is settled what follows their turn, so that a
         # late result cannot start a reply of its own in the middle of this.
         self._user_speaking = True
-        if self._producing is not None or self._reply is not None:
-            # A turn ended without the start that normally comes first.
-            await self._interrupt()
         said = bool(transcript) and not self._is_noise(transcript)
-        # Not after a turn with no words: there the reply is picked up again instead.
-        await self._note_the_remainder(wanted=said)
+        if said:
+            # Not after a turn with no words: there the reply is picked up again, and a
+            # note still being worded is kept for when the user does say something.
+            await self._note_the_remainder()
         self._user_speaking = False
         if not said and not self._turn and not self._cut_a_reply:
             # Nothing was said and nothing was stopped: only late results may be waiting.
@@ -588,6 +628,7 @@ class VoiceConversation:
 
     async def _model_round(self, reply: _Reply, *, must_answer: bool) -> bool:
         """Run one model call, speaking its text. Return True if it searched (so: call again)."""
+        self._results_sent = len(self._results)
         stream = await self._llm.stream_response(
             model="6 Luna",
             # No thinking before it speaks: in a conversation the wait is worse than the gain.
@@ -652,14 +693,12 @@ class VoiceConversation:
         This rewrites items the model has already been sent, which breaks a prompt cache
         from the first one onward. So it is done only between turns, never while a reply
         is being made, and for a whole batch at a time.
+
+        Only real search results count, and only ones the model has been sent: not a
+        placeholder, not the answer to a cancel, and not a result it has yet to see.
         """
         full = [
-            result
-            for item in self._history
-            if item.get("type") == "function_call_output"
-            and (result := cast("FunctionCallOutput", item))["output"] != _CLEARED
-            # A placeholder is the only result its call has until the real one arrives.
-            and result["call_id"] not in self._outliving
+            result for result in self._results[: self._results_sent] if result["output"] != _CLEARED
         ]
         if len(full) > _FULL_RESULTS_ALLOWED:
             for result in full[:-_FULL_RESULTS_KEPT]:

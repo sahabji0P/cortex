@@ -543,6 +543,122 @@ async def test_a_note_that_is_not_ready_when_the_turn_ends_is_left_out(monkeypat
     assert _shape(sent) == ["user", "assistant", "user"]
     assert len(llm.labelled) == 1
     assert f.conversation._labelling is None
+    assert not [task for task in asyncio.all_tasks() if "_label" in repr(task.get_coro())]
+    await f.conversation.close()
+
+
+async def test_closing_while_a_turn_end_waits_for_the_note_stops_the_labelling(monkeypatch) -> None:
+    monkeypatch.setattr(voice_ent, "_LABEL_WAIT_SECONDS", 5)
+    never = asyncio.Event()
+    llm = _LLM([_delta(_STORY), never])
+    llm.label_gate = asyncio.Event()
+    f = _conversation(llm)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 4.5)
+    f.stt.say("stop")
+    await _read_until(f.conversation, "interrupt")
+    await asyncio.sleep(0.05)  # the turn's end is now waiting for the label
+    labelling = f.conversation._labelling
+    await f.conversation.close()
+
+    assert labelling is not None
+    assert labelling.cancelled()
+
+
+async def test_closing_while_the_user_is_still_speaking_stops_the_labelling() -> None:
+    never = asyncio.Event()
+    llm = _LLM([_delta(_STORY), never])
+    llm.label_gate = asyncio.Event()
+    f = _conversation(llm)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 4.5)
+    f.stt.turn_start()  # the label is asked for, and the user has not finished speaking
+    await _read_until(f.conversation, "interrupt")
+    await asyncio.sleep(0.05)
+    labelling = f.conversation._labelling
+    await f.conversation.close()
+
+    assert labelling is not None
+    assert labelling.cancelled()
+
+
+async def test_a_note_survives_the_recognizer_opening_an_empty_turn_first() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta(_STORY), never],
+        [_delta("there was a dragon"), never],
+        [_delta("Sure."), _completed(_message("Sure."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 4.5)
+    # Some recognizer settings report the start of speech as an empty turn of its own.
+    f.stt.say("")
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("stop")
+    await _read_until(f.conversation, "assistant.done")
+
+    sent = llm.requests[2]["input"]
+    assert _shape(sent) == ["user", "assistant", "developer", "developer", "user"]
+    assert sent[1]["content"] == "Once upon a time…"
+    assert "about: the rest of the story" in sent[3]["content"]
+    await f.conversation.close()
+
+
+async def test_a_turn_that_ends_without_starting_does_not_wait_for_a_note() -> None:
+    never = asyncio.Event()
+    llm = _LLM([_delta(_STORY), never], [_delta("Sure."), _completed(_message("Sure."))])
+    llm.label_gate = asyncio.Event()  # a label would never come
+    f = _conversation(llm)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 4.5)
+    f.stt.turn_end("stop")
+    async with asyncio.timeout(voice_ent._LABEL_WAIT_SECONDS / 2):
+        await _read_until(f.conversation, "assistant.done")
+
+    assert _shape(llm.requests[1]["input"]) == ["user", "assistant", "user"]
+    assert llm.labelled == []
+    await f.conversation.close()
+
+
+async def test_only_the_unheard_words_of_the_answer_go_to_the_labeller() -> None:
+    call = _search_call("who won the last F1 race")
+    answer = (
+        "Norris won the race in Brazil ahead of two other drivers and it was very close indeed."
+    )
+    never = asyncio.Event()
+    llm = _LLM(
+        [_starts(call), _completed(call)],
+        [_delta(answer), never],
+        [_delta("Sure."), _completed(_message("Sure."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("who won the last race")
+    await _read_until(f.conversation, "tool.call")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 3 + 2.5)  # all of "Let me check." and two words of the answer
+    f.stt.say("stop")
+    await _read_until(f.conversation, "assistant.done")
+
+    # Not "Let me check.", which stays in the history, and not the two words heard.
+    assert llm.labelled == [
+        "the race in Brazil ahead of two other drivers and it was very close indeed."
+    ]
+    assert _shape(llm.requests[2]["input"])[-3:] == ["assistant", "developer", "user"]
     await f.conversation.close()
 
 
@@ -709,6 +825,23 @@ async def test_the_same_word_well_into_the_reply_is_taken_as_the_user_speaking()
 
     assert _event(outputs, "user.final").text == "रुको"
     assert llm.requests[1]["input"][-1] == {"role": "user", "content": "रुको"}
+    await f.conversation.close()
+
+
+async def test_a_word_from_a_turn_with_no_start_is_not_judged_by_the_turn_before() -> None:
+    llm = _LLM(
+        [_delta("Once."), _completed(_message("Once."))],
+        [_delta("ठीक है."), _completed(_message("ठीक है."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("Tell me a story.")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    f.stt.turn_end("रुको")  # no turn start came first, a minute after the user's sentence
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert _event(outputs, "user.final").text == "रुको"
     await f.conversation.close()
 
 
@@ -976,6 +1109,77 @@ async def test_old_search_results_are_cleared_in_one_batch_between_turns() -> No
     assert [item["call_id"] for item in sent if item.get("type") == "function_call"] == [
         item["call_id"] for item in sent if item.get("type") == "function_call_output"
     ]
+    await f.conversation.close()
+
+
+async def test_a_late_result_the_model_has_not_seen_is_never_cleared() -> None:
+    three = [_search_call(f"slow {n}", f"call_s{n}") for n in range(3)]
+    finish = asyncio.Event()
+    llm = _LLM(
+        *_searching_turns(5),
+        [_starts(three[0]), _completed(*three)],
+        [_delta("Here."), _completed(_message("Here."))],
+    )
+    f = _conversation(llm, _Search(gate=finish, only="slow"))
+
+    for n in range(5):
+        await _ask(f, f"question {n}")
+    f.stt.say("look up three things")
+    await _read_until(f.conversation, "tool.call")
+    await _let_audio_out()
+    # The user speaks, and all three results land before they have finished.
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()
+    await asyncio.sleep(0.05)
+    f.stt.turn_end("so?")
+    await _read_until(f.conversation, "assistant.done")
+
+    # Five results and three late ones make eight, over the limit. But the model has only
+    # been sent five of them, so nothing is cleared: least of all a result it is about
+    # to be shown for the first time.
+    sent = llm.requests[-1]["input"]
+    assert "cleared" not in _results(llm.requests[-1])
+    late = [
+        item["output"]
+        for item in sent
+        if str(item.get("call_id", "")).startswith("late_") and "output" in item
+    ]
+    assert len(late) == 3
+    assert all("Norris won in Las Vegas." in output for output in late)
+    await f.conversation.close()
+
+
+async def test_placeholders_and_cancellations_do_not_push_real_results_out() -> None:
+    slow = _search_call("slow one", "call_slow")
+    cancel = _Item(
+        type="function_call",
+        call_id="call_c",
+        name="cancel_tool_call",
+        arguments=json.dumps({"call_id": "call_slow"}),
+    )
+    llm = _LLM(
+        *_searching_turns(5),
+        [_starts(slow), _completed(slow)],
+        [_completed(cancel)],
+        [_delta("Stopped."), _completed(_message("Stopped."))],
+        [_delta("Bye."), _completed(_message("Bye."))],
+    )
+    f = _conversation(llm, _Search(gate=asyncio.Event(), only="slow"))
+
+    for n in range(5):
+        await _ask(f, f"question {n}")
+    f.stt.say("look this up")
+    await _read_until(f.conversation, "tool.call")
+    await _ask(f, "never mind, stop that")
+    await _ask(f, "bye")
+
+    # Seven outputs are in the history, but only five are search results.
+    outputs = [
+        item for item in llm.requests[-1]["input"] if item.get("type") == "function_call_output"
+    ]
+    assert len(outputs) == 7
+    assert "cleared" not in _results(llm.requests[-1])
     await f.conversation.close()
 
 
