@@ -212,6 +212,13 @@ class VoiceConversation:
         # a tool call without its result would make the next request invalid.
         self._history: list[ResponseInputItemParam] = []
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
+        # The instructions and the tool list are the start of every request, so they are
+        # fixed for the whole conversation: a prompt cache only helps while that start
+        # stays the same.
+        self._instructions = _INSTRUCTIONS.format(today=datetime.now(UTC).strftime("%A, %d %B %Y"))
+        self._tools = [_WEB_SEARCH_TOOL] if search.configured else []
+        if search.configured:
+            self._instructions += _SEARCH_INSTRUCTIONS
         self._reply: asyncio.Task[None] | None = None
         # The last reply that finished here. The client may still be playing it.
         self._spoken: _Speech | None = None
@@ -284,9 +291,9 @@ class VoiceConversation:
         items: list[ResponseInputItemParam] = []
         try:
             for round_number in range(_MAX_SEARCHES + 1):
-                # The last round gets no tool, so the model has to answer.
-                may_search = self._search.configured and round_number < _MAX_SEARCHES
-                searching = await self._model_round(items, speech, may_search=may_search)
+                # In the last round the model may not search again: it has to answer.
+                must_answer = round_number == _MAX_SEARCHES
+                searching = await self._model_round(items, speech, must_answer=must_answer)
                 if not searching:
                     break
             await speech.finish()
@@ -310,17 +317,18 @@ class VoiceConversation:
         items: list[ResponseInputItemParam],
         speech: _Speech,
         *,
-        may_search: bool,
+        must_answer: bool,
     ) -> bool:
         """Run one model call, speaking its text. Return True if it searched (so: call again)."""
-        instructions = _INSTRUCTIONS.format(today=datetime.now(UTC).strftime("%A, %d %B %Y"))
         stream = await self._llm.stream_response(
             model="6 Luna",
             # No thinking before it speaks: in a conversation the wait is worse than the gain.
             reasoning={"effort": "none"},
             input=[*self._history, *items],
-            instructions=instructions + (_SEARCH_INSTRUCTIONS if may_search else ""),
-            tools=[_WEB_SEARCH_TOOL] if may_search else [],
+            instructions=self._instructions,
+            tools=self._tools,
+            # Forbidding the tool this way leaves the tool list, and so the cache, intact.
+            tool_choice="none" if must_answer else "auto",
             # Stateless: nothing is stored at OpenAI, so reasoning has to be sent back.
             include=["reasoning.encrypted_content"],
             store=False,

@@ -451,8 +451,10 @@ async def test_after_three_searches_the_model_has_to_answer() -> None:
     outputs = await _read_until(conversation, "assistant.done")
 
     assert search.queries == ["query 0", "query 1", "query 2"]
-    assert [len(request["tools"]) for request in llm.requests] == [1, 1, 1, 0]
-    assert "web_search" not in llm.requests[3]["instructions"]
+    assert [request["tool_choice"] for request in llm.requests] == ["auto", "auto", "auto", "none"]
+    # The start of every request is identical, so a prompt cache keeps working.
+    assert len({request["instructions"] for request in llm.requests}) == 1
+    assert all(request["tools"] == llm.requests[0]["tools"] for request in llm.requests)
     assert _audio(outputs) == b"Here it is."
 
 
