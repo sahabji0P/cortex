@@ -12,7 +12,7 @@ import pytest
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.entities import voice_ent
-from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray
+from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
 from app.entities.voice_speech import Playback, Utterance
 
 # The fake speech is 24 kHz 16-bit mono, like the real one.
@@ -921,6 +921,47 @@ def test_only_a_short_fragment_in_a_new_script_after_a_whole_sentence_is_stray(
     fragment: str, sentence_before: str, stray: bool
 ) -> None:
     assert _is_stray(fragment, sentence_before, {"LATIN"}) is stray
+
+
+@pytest.mark.parametrize(
+    ("transcript", "kept"),
+    [
+        ("What is the capital of France? हूँ", "What is the capital of France?"),
+        ("Tell me a story. Then stop. да нет", "Tell me a story. Then stop."),
+        # Same script, too long, or no finished sentence before it: left alone.
+        (
+            "What is the capital of France? Paris maybe",
+            "What is the capital of France? Paris maybe",
+        ),
+        ("Say it. मुझे हिंदी में बताओ", "Say it. मुझे हिंदी में बताओ"),
+        ("Hello what's हूँ", "Hello what's हूँ"),
+        ("हूँ", "हूँ"),
+        ("", ""),
+    ],
+)
+def test_a_stray_word_run_on_to_the_end_of_a_sentence_is_cut_off(
+    transcript: str, kept: str
+) -> None:
+    assert _without_stray_tail(transcript, set()) == kept
+
+
+def test_a_tail_in_a_script_the_user_has_spoken_is_left_on_the_sentence() -> None:
+    transcript = "What is the capital of France? रुको"
+    assert _without_stray_tail(transcript, {"DEVANAGARI"}) == transcript
+
+
+async def test_a_noise_word_inside_the_users_sentence_never_reaches_the_model() -> None:
+    llm = _LLM([_delta("Paris."), _completed(_message("Paris."))])
+    f = _conversation(llm)
+
+    f.stt.say("What is the capital of France? हूँ")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert _event(outputs, "user.final").text == "What is the capital of France?"
+    assert llm.requests[0]["input"] == [
+        {"role": "user", "content": "What is the capital of France?"},
+    ]
+    await f.conversation.close()
 
 
 def test_a_script_spoken_at_any_point_in_the_conversation_is_not_stray() -> None:

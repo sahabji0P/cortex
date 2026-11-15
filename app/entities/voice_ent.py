@@ -41,6 +41,7 @@ unheard part was about. It names the subject only, never what was said.
 import asyncio
 import contextlib
 import json
+import re
 import time
 import unicodedata
 import uuid
@@ -579,6 +580,7 @@ class VoiceConversation:
         # The user holds the floor until it is settled what follows their turn, so that a
         # late result cannot start a reply of its own in the middle of this.
         self._user_speaking = True
+        transcript = _without_stray_tail(transcript, self._user_scripts)
         said = bool(transcript) and not self._is_noise(transcript)
         if said:
             # Not after a turn with no words: there the reply is picked up again, and a
@@ -802,6 +804,22 @@ def _is_stray(fragment: str, sentence_before: str, scripts_spoken: set[str]) -> 
         return False
     scripts = _scripts(fragment)
     return bool(scripts) and scripts.isdisjoint(scripts_spoken)
+
+
+def _without_stray_tail(transcript: str, scripts_spoken: set[str]) -> str:
+    """Drop a stray fragment that the recognizer has run on to the end of a sentence.
+
+    A noise that comes too soon after a sentence to be a turn of its own arrives inside
+    the same transcript, as in "What is the capital of France? हूँ". The same narrow rule
+    applies as for a fragment that arrives separately.
+    """
+    ends = re.escape("".join(_SENTENCE_ENDS))
+    split = re.match(rf"(?s)(.*[{ends}])\s+(\S+(?:\s+\S+)?)\s*$", transcript)
+    if split is None:
+        return transcript
+    sentence, tail = split.groups()
+    stray = _is_stray(tail, sentence, scripts_spoken | _scripts(sentence))
+    return sentence if stray else transcript
 
 
 def _scripts(text: str) -> set[str]:
