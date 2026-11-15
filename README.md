@@ -15,11 +15,20 @@ mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ─�
 ```
 
 - **Replying.** When a turn ends, its transcript goes to the model. The model's text is pushed to text-to-speech as it streams, and the audio is forwarded to the client as it is produced.
-- **Interrupting.** When the user starts speaking, the server cancels the model call and the speech stream, then sends an `interrupt` event. The client must stop playback and drop audio it has not played yet: speech is generated faster than it plays, so the client always holds some.
-- **History.** The conversation lives in memory for the life of the connection and is sent in full on every model call. Nothing is stored at OpenAI. After an interruption the model is told roughly how many seconds of its reply the user heard. That is estimated from the clock, not reported by the client.
+- **Interrupting.** When the user starts speaking, the server cancels the model call and the speech stream, then sends an `interrupt` event. The client must stop playback and drop audio it has not played yet: speech is generated several times faster than it plays, so the client always holds some.
 - **Searching.** With `PARALLEL_API_KEY` set, the model gets a `web_search` tool. Without it the tool is not offered and everything else works.
 
-All of this is in [`app/entities/voice_ent.py`](app/entities/voice_ent.py).
+### What the model remembers
+
+The history is what the model is sent on every call. It lives in memory for the life of the connection, nothing is stored at OpenAI, and it follows three rules.
+
+1. **It holds what the user heard, not what was generated.** A reply joins the history only once it has been heard in full or cut off. A reply that is cut off is stored as the words that were heard, ending in "…", and the rest is never sent back. How much was heard comes from Cartesia's word timings and a server-side copy of the client's playback schedule. In live runs the stored text was within two words of the audio really played, and never past it.
+2. **Every tool call keeps a valid result.** An interruption does not stop a search. Its call gets a placeholder result and the search carries on. When it finishes, the real result is added as a call written by the server (a stub that names the original call) followed by the result, and the model answers it at the next quiet moment without waiting for the user. The model can stop a running search with `cancel_tool_call`.
+3. **It only grows at the end.** Each entry is final when it is added, and the instructions and tool list are identical on every request, so a prompt cache stays valid.
+
+The user's turn is put together before it reaches the model. A turn stays open until some of the reply to it has been heard, and words that arrive before then join it on a new line, because speech recognition sometimes splits one sentence in two. A one or two word fragment in a different script, right after a finished sentence, is dropped as noise. A turn with no usable words puts back whatever it interrupted.
+
+The conversation is in [`app/entities/voice_ent.py`](app/entities/voice_ent.py). Speaking, and working out what was heard, is in [`app/entities/voice_speech.py`](app/entities/voice_speech.py).
 
 ## Try it
 
@@ -49,7 +58,7 @@ Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow t
 | `assistant.delta` | the next piece of the reply's text |
 | `assistant.done` | all of the reply's audio has been sent; `text` holds the full reply |
 | `tool.call` | the assistant is searching the web; `text` holds the query |
-| `interrupt` | the user started speaking: stop playback and drop queued audio |
+| `interrupt` | the user started speaking: stop playback and drop queued audio. If that cut a reply short, `text` holds the part that was heard |
 | `error` | something failed; `text` holds the message |
 
 ## Layout
@@ -60,7 +69,7 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 app/
   adapters/    one file per outside service; the only place an SDK is called
                openai_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
-  entities/    the logic: voice_ent (the cascade), stt_ent, conversation_ent, user_ent
+  entities/    the logic: voice_ent and voice_speech (the cascade), stt_ent, conversation_ent, user_ent
   routers/     HTTP and WebSocket endpoints: voice, cortex, user
 ```
 
