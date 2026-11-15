@@ -58,7 +58,7 @@ Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow t
 | `assistant.delta` | the next piece of the reply's text |
 | `assistant.done` | all of the reply's audio has been sent; `text` holds the full reply |
 | `tool.call` | the assistant is searching the web; `text` holds the query |
-| `interrupt` | the user started speaking: stop playback and drop queued audio. If that cut a reply short, `text` holds the part that was heard |
+| `interrupt` | the user started speaking: stop playback and drop queued audio. If that cut a reply short, `text` holds the part that was heard (just "…" if none of it was); otherwise it is empty |
 | `error` | something failed; `text` holds the message |
 
 ## Layout

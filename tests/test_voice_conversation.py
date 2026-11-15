@@ -422,7 +422,8 @@ async def test_a_reply_cut_before_any_of_it_played_leaves_no_trace() -> None:
     f.stt.say("never mind")
     outputs = await _read_until(f.conversation, "assistant.done")
 
-    assert _event(outputs, "interrupt").text == ""
+    # Cut before its first word: the client is told so with the bare mark.
+    assert _event(outputs, "interrupt").text == "…"
     # None of the reply was heard, so the user's turn is still the same, open turn.
     assert llm.requests[1]["input"] == [
         {"role": "user", "content": "tell me a story\nnever mind"},
@@ -946,6 +947,31 @@ async def test_a_late_result_follows_a_turn_the_model_has_already_been_shown() -
     await f.conversation.close()
 
 
+async def test_a_turn_that_ends_without_starting_cannot_set_off_two_replies() -> None:
+    llm, finish = _slow_search_then([_delta("Okay."), _completed(_message("Okay."))])
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    # No turn start this time, and the search finishes while the reply is being stopped.
+    f.stt.turn_end("never mind")
+    finish.set()
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+
+    assert len(llm.requests) == 2
+    assert _shape(llm.requests[1]["input"]) == [
+        "user",
+        "function_call",
+        "function_call_output",
+        "function_call",
+        "function_call_output",
+        "user",
+    ]
+    await f.conversation.close()
+
+
 async def test_the_model_can_cancel_a_search_that_is_still_running() -> None:
     cancel = _Item(
         type="function_call",
@@ -995,6 +1021,41 @@ async def test_cancelling_a_call_that_is_not_running_says_so() -> None:
 
     assert llm.requests[1]["input"][-1]["output"] == "Nothing is running under that call_id."
     await f.conversation.close()
+
+
+async def test_closing_stops_a_search_its_reply_is_still_waiting_for() -> None:
+    llm, finish = _slow_search_then()
+    search = _Search(gate=finish)
+    f = _conversation(llm, search)
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    search_task = f.conversation._reply.calls()[0].running
+    await f.conversation.close()
+
+    assert search_task.cancelled()
+
+
+async def test_a_search_that_finishes_as_the_conversation_closes_starts_nothing() -> None:
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))]
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("hello?")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+
+    # The search has finished, but nothing has acted on that yet when the close begins.
+    finish.set()
+    await asyncio.sleep(0)
+    await f.conversation.close()
+    await asyncio.sleep(0.25)
+
+    assert len(llm.requests) == 2
+    assert len(f.tts.sessions) == 2
 
 
 async def test_closing_stops_a_search_that_outlived_its_reply() -> None:
@@ -1051,6 +1112,15 @@ def test_an_utterance_is_whole_only_when_all_its_audio_has_played() -> None:
     # Still being generated: even with all the audio so far played, more is coming.
     growing = _utterance("Paris is the", complete=False)
     assert growing.heard(10.0) == ("Paris is the", False)
+
+
+def test_silence_after_the_last_word_does_not_make_a_reply_look_cut() -> None:
+    utterance = _utterance("Paris is the capital.")
+    utterance.add_audio(4.0, 0.3)  # the speech service's audio runs on after the last word
+
+    # The user speaks 0.1 s after the last word, with 0.2 s of that silence still to play.
+    assert utterance.heard(4.1) == ("Paris is the capital.", True)
+    assert utterance.heard(3.9) == ("Paris is the", False)
 
 
 def test_a_word_timing_that_does_not_match_the_text_ends_the_count_there() -> None:

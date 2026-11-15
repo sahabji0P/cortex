@@ -85,14 +85,20 @@ class Utterance:
         played = sum(min(seconds, max(0.0, at - start)) for start, seconds in self._chunks)
         if self.complete and played >= sum(seconds for _, seconds in self._chunks):
             return self.text.strip(), True
-        end = 0
-        for token, word in zip(re.finditer(r"\S+", self.text), self._words, strict=False):
+        tokens = list(re.finditer(r"\S+", self.text))
+        heard = 0
+        for token, word in zip(tokens, self._words, strict=False):
             # A timing that does not line up with the text ends the count there. That can
             # only make the answer shorter.
             if word.end > played or word.text != token.group():
                 break
-            end = token.end()
-        return self.text[:end].strip(), False
+            heard += 1
+        if heard == 0:
+            return "", False
+        # Audio usually runs on a little after the last word. Once that word has played,
+        # the utterance has been heard, whatever silence is still to come.
+        whole = self.complete and heard == len(tokens)
+        return self.text[: tokens[heard - 1].end()].strip(), whole
 
 
 class Speech:

@@ -114,9 +114,9 @@ function onEvent(event) {
   } else if (event.type === "interrupt") {
     // `text` is what the server worked out we had played of the reply, which is all
     // the model will remember of it. Show that instead of everything it generated.
-    if (playing.size && lastReply) {
+    if (event.text && lastReply) {
       lastReply.textContent = event.text;
-      line("meta").textContent = event.text ? "interrupted: the rest was not heard" : "interrupted before anything was heard";
+      line("meta").textContent = "interrupted: the rest was not heard";
     }
     stopSpeaking();
     reply = lastReply = null;

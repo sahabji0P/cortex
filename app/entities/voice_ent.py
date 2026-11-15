@@ -96,7 +96,7 @@ _PLACEHOLDER = (
 # Added to the history when a turn with no words in it cut a reply off.
 _NOISE_NOTE = (
     "That interruption was background noise, not the user speaking. Continue your reply "
-    'from the word after the "…". Do not repeat anything that comes before it.'
+    "from exactly where it stopped. Do not repeat anything you had already said."
 )
 
 # A trailing fragment longer than this many words is never treated as noise.
@@ -126,6 +126,7 @@ class VoiceEvent(BaseModel):
     - `tool.call`       the assistant is searching the web (query in `text`)
     - `interrupt`       the user started speaking: stop playback and drop queued audio.
                         If that cut a reply short, `text` is the part that was heard
+                        (just "…" if none of it was); otherwise `text` is empty
     - `error`           something failed (message in `text`)
     """
 
@@ -279,6 +280,7 @@ class VoiceConversation:
         # The calls in the history that we wrote to carry a late result: stub call id to
         # the id of the call the model really made.
         self._stubs: dict[str, str] = {}
+        self._closed = False
         self._listening = asyncio.create_task(self._listen())
 
     async def send_audio(self, pcm: bytes) -> None:
@@ -292,12 +294,14 @@ class VoiceConversation:
 
     async def close(self) -> None:
         """End the conversation: stop any reply and release the speech connections."""
+        self._closed = True
         tasks = [
             task
             for task in (self._listening, self._producing, self._announcing)
             if task is not None
         ]
-        searches = [call.running for call in self._outliving.values() if call.running is not None]
+        calls = [*self._outliving.values(), *(self._reply.calls() if self._reply else [])]
+        searches = [call.running for call in calls if call.running is not None]
         for task in (*tasks, *searches):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -337,8 +341,10 @@ class VoiceConversation:
         if producing is not None:
             producing.cancel()
         self._playback.reset()
-        # Sent every time: the server cannot see the client's playback queue.
-        self._emit("interrupt", heard or "")
+        # Sent every time: the server cannot see the client's playback queue. Its text is
+        # empty only when no reply was cut, so a reply cut before its first word shows
+        # as the bare mark.
+        self._emit("interrupt", "" if heard is None else heard or _CUT_MARK)
         if producing is not None:
             await asyncio.gather(producing, return_exceptions=True)
 
@@ -375,7 +381,7 @@ class VoiceConversation:
 
     def _finished_late(self, call: _ToolCall, finished: asyncio.Task[str]) -> None:
         self._outliving.pop(call.call_id, None)
-        if finished.cancelled():
+        if finished.cancelled() or self._closed:
             return
         self._late.append((call, finished.result()))
         self._announce_when_quiet()
@@ -429,8 +435,11 @@ class VoiceConversation:
     async def _start_reply(self, transcript: str) -> None:
         """A turn ended: answer it, or put back what it interrupted if nothing was said."""
         if self._producing is not None or self._reply is not None:
-            # A turn ended without the start that normally comes first.
+            # A turn ended without the start that normally comes first. The user has the
+            # floor while this is dealt with, so a late result cannot start its own reply.
+            self._user_speaking = True
             await self._interrupt()
+            self._user_speaking = False
         said = bool(transcript) and not _is_stray(transcript, "\n".join(self._turn))
         if not said and not self._turn and not self._cut_a_reply:
             # Nothing was said and nothing was stopped: only late results may be waiting.
