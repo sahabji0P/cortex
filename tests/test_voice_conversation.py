@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
+from app.entities import voice_ent
 from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray
 from app.entities.voice_speech import Playback, Utterance
 
@@ -155,6 +156,18 @@ class _LLM:
     def __init__(self, *rounds: list) -> None:
         self._rounds = list(rounds)
         self.requests: list[dict] = []
+        # Labelling the unheard part of a cut reply is a separate, one-shot call.
+        self.label: str | Exception = "the rest of the story"
+        self.label_gate: asyncio.Event | None = None
+        self.labelled: list[str] = []
+
+    async def text_response(self, **request) -> str:
+        self.labelled.append(request["input"])
+        if self.label_gate is not None:
+            await self.label_gate.wait()
+        if isinstance(self.label, Exception):
+            raise self.label
+        return self.label
 
     async def stream_response(self, **request):
         sent = [dict(item) for item in request["input"]]
@@ -457,6 +470,100 @@ async def test_closing_mid_reply_releases_both_speech_connections() -> None:
     assert f.stt.closed
     assert f.tts.contexts[0].cancelled
     assert f.tts.sessions[0].closed
+
+
+# ---- interrupting: a note on what went unheard
+
+_STORY = "Once upon a time there was a dragon who lived in a cave and guarded a great pile of gold."
+
+
+async def _cut_the_story(f: _Fixture, then: str) -> list[dict]:
+    """Start the story, cut it four words in, end the turn with `then`. Return the next request."""
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.delta")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 4.5)
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    await _let_audio_out()
+    f.stt.turn_end(then)
+    await _read_until(f.conversation, "assistant.done")
+    return f.llm.requests[1]["input"]
+
+
+async def test_a_long_unheard_remainder_is_named_by_subject_but_not_repeated() -> None:
+    never = asyncio.Event()
+    llm = _LLM([_delta(_STORY), never], [_delta("Sure."), _completed(_message("Sure."))])
+    f = _conversation(llm)
+
+    sent = await _cut_the_story(f, "stop")
+
+    assert _shape(sent) == ["user", "assistant", "developer", "user"]
+    assert sent[1]["content"] == "Once upon a time…"
+    assert "did not hear the rest" in sent[2]["content"]
+    assert "about: the rest of the story" in sent[2]["content"]
+    # Only the unheard words were given to the labeller, and none of them are in the note.
+    assert llm.labelled == [
+        "there was a dragon who lived in a cave and guarded a great pile of gold."
+    ]
+    assert "dragon" not in sent[2]["content"]
+    await f.conversation.close()
+
+
+async def test_a_short_unheard_remainder_gets_no_note() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("Once upon a time there was a dragon."), never],
+        [_delta("Sure."), _completed(_message("Sure."))],
+    )
+    f = _conversation(llm)
+
+    sent = await _cut_the_story(f, "stop")
+
+    assert _shape(sent) == ["user", "assistant", "user"]
+    assert llm.labelled == []
+    await f.conversation.close()
+
+
+async def test_a_note_that_is_not_ready_when_the_turn_ends_is_left_out(monkeypatch) -> None:
+    monkeypatch.setattr(voice_ent, "_LABEL_WAIT_SECONDS", 0.01)
+    never = asyncio.Event()
+    llm = _LLM([_delta(_STORY), never], [_delta("Sure."), _completed(_message("Sure."))])
+    llm.label_gate = asyncio.Event()  # the labeller never answers
+    f = _conversation(llm)
+
+    sent = await _cut_the_story(f, "stop")
+
+    # The reply to the user is not held up, and the history is just the plain cut.
+    assert _shape(sent) == ["user", "assistant", "user"]
+    assert len(llm.labelled) == 1
+    assert f.conversation._labelling is None
+    await f.conversation.close()
+
+
+async def test_a_failed_label_leaves_the_plain_cut() -> None:
+    never = asyncio.Event()
+    llm = _LLM([_delta(_STORY), never], [_delta("Sure."), _completed(_message("Sure."))])
+    llm.label = RuntimeError("overloaded")
+    f = _conversation(llm)
+
+    sent = await _cut_the_story(f, "stop")
+
+    assert _shape(sent) == ["user", "assistant", "user"]
+    await f.conversation.close()
+
+
+async def test_a_reply_cut_by_noise_is_resumed_without_a_note_on_the_remainder() -> None:
+    never = asyncio.Event()
+    llm = _LLM([_delta(_STORY), never], [_delta("there was"), _completed(_message("there was"))])
+    f = _conversation(llm)
+
+    sent = await _cut_the_story(f, "")
+
+    # The model is about to say the rest itself, so naming it would only be clutter.
+    assert _shape(sent) == ["user", "assistant", "developer"]
+    assert "background noise" in sent[2]["content"]
+    await f.conversation.close()
 
 
 # ---- putting the user's turn together

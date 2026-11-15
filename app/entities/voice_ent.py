@@ -31,6 +31,9 @@ call gets a placeholder result so the history stays valid, and the search carrie
 When it finishes, the real result is added at the next quiet moment as a call written
 by us (a stub that names the original call) followed by that result, and the model
 replies to it without waiting for the user.
+
+When a cut leaves a lot unheard, the history also gets a short note naming what the
+unheard part was about. It names the subject only, never what was said.
 """
 
 import asyncio
@@ -99,6 +102,25 @@ _NOISE_NOTE = (
     "from exactly where it stopped. Do not repeat anything you had already said."
 )
 
+# Added after a reply that was cut with a lot left unheard.
+_REMAINDER_NOTE = (
+    "You were interrupted there. The user did not hear the rest of that reply, which "
+    "was about: {topic}. They do not know any of it yet."
+)
+# A cut that leaves fewer unheard words than this gets no such note.
+_REMAINDER_MIN_WORDS = 12
+# How long the end of the user's turn may wait for the note's wording. It is asked for
+# when the user starts speaking, so it is normally ready before they finish.
+_LABEL_WAIT_SECONDS = 0.4
+_LABEL_INSTRUCTIONS = """\
+You are given the part of a spoken reply that the listener did not hear. Say what kind \
+of thing it was, as a generic heading of two to six words that gives nothing away: for \
+example "the rest of the story", "the remaining steps and the recommendation", "the \
+answer and its source", "the rest of the explanation". The heading must fit any text of \
+that kind. Do not mention anyone or anything from the text: no names, characters, \
+places, events, facts, numbers, choices or outcomes. No full stop.
+"""
+
 # A trailing fragment longer than this many words is never treated as noise.
 _STRAY_MAX_WORDS = 2
 # Latin, Devanagari and CJK sentence endings (the last two are the full-width ? and !).
@@ -166,6 +188,15 @@ class _ToolCall:
         ]
 
 
+@dataclass(slots=True)
+class _Heard:
+    """A reply as the user heard it."""
+
+    items: list[ResponseInputItemParam]  # what joins the history
+    kept: str | None  # the text kept of a reply that was cut short; None if heard in full
+    unheard: str  # the text that was dropped
+
+
 class _Reply:
     """One reply while it is produced and played: what was said and what was looked up."""
 
@@ -198,11 +229,10 @@ class _Reply:
                 items.append({"role": "assistant", "content": text})
         return items
 
-    def heard(self, at: float) -> tuple[list[ResponseInputItemParam], str | None]:
-        """The reply as the user had heard it by time `at`, for the history.
+    def heard(self, at: float) -> _Heard:
+        """The reply as the user had heard it by time `at`.
 
-        Also returns the heard text if the reply was cut short, or None if it was heard
-        in full. Two things are kept whatever was heard:
+        Two things are kept whatever was heard:
 
         - Tool calls: they happened, and the history has to stay a valid chain of calls
           and results.
@@ -212,23 +242,27 @@ class _Reply:
         """
         items: list[ResponseInputItemParam] = []
         spoken: list[str] = []
+        unheard: list[str] = []
         cut = False
         for index, part in enumerate(self._parts):
             if isinstance(part, _ToolCall):
                 items.extend(part.items())
                 continue
+            said = part.text.strip()
             if cut and index >= self._sent_back:
-                continue  # generated after the point where the user stopped listening
+                unheard.append(said)  # generated after the user stopped listening
+                continue
             text, whole = part.heard(at)
             if index < self._sent_back:
-                text = part.text.strip()
-            elif not whole and text:
-                text += _CUT_MARK
+                text = said
+            elif not whole:
+                unheard.append(said[len(text) :].strip())
+                text = f"{text}{_CUT_MARK}" if text else ""
             cut = cut or not whole
             if text:
                 spoken.append(text)
                 items.append({"role": "assistant", "content": text})
-        return items, " ".join(spoken) if cut else None
+        return _Heard(items, " ".join(spoken) if cut else None, " ".join(unheard))
 
 
 class VoiceConversation:
@@ -280,6 +314,9 @@ class VoiceConversation:
         # The calls in the history that we wrote to carry a late result: stub call id to
         # the id of the call the model really made.
         self._stubs: dict[str, str] = {}
+        # Working out what the unheard part of a cut reply was about, while the user
+        # who cut it is still speaking.
+        self._labelling: asyncio.Task[str] | None = None
         self._closed = False
         self._listening = asyncio.create_task(self._listen())
 
@@ -300,6 +337,8 @@ class VoiceConversation:
             for task in (self._listening, self._producing, self._announcing)
             if task is not None
         ]
+        if self._labelling is not None:
+            self._labelling.cancel()
         calls = [*self._outliving.values(), *(self._reply.calls() if self._reply else [])]
         searches = [call.running for call in calls if call.running is not None]
         for task in (*tasks, *searches):
@@ -322,7 +361,6 @@ class VoiceConversation:
                 elif event.type == "turn.update":
                     self._emit("user.partial", event.transcript)
                 elif event.type == "turn.end":
-                    self._user_speaking = False
                     await self._start_reply(event.transcript.strip())
                 elif event.type == "error":
                     self._emit("error", event.message or "speech recognition failed")
@@ -338,22 +376,25 @@ class VoiceConversation:
             self._announcing.cancel()
             self._announcing = None
         heard = self._settle()
-        self._cut_a_reply = heard is not None
+        kept = heard.kept if heard is not None else None
+        self._cut_a_reply = kept is not None
         if producing is not None:
             producing.cancel()
         self._playback.reset()
         # Sent every time: the server cannot see the client's playback queue. Its text is
         # empty only when no reply was cut, so a reply cut before its first word shows
         # as the bare mark.
-        self._emit("interrupt", "" if heard is None else heard or _CUT_MARK)
+        self._emit("interrupt", "" if kept is None else kept or _CUT_MARK)
+        if self._labelling is not None:
+            self._labelling.cancel()
+            self._labelling = None
+        if heard is not None and heard.items and len(heard.unheard.split()) >= _REMAINDER_MIN_WORDS:
+            self._labelling = asyncio.create_task(self._label(heard.unheard))
         if producing is not None:
             await asyncio.gather(producing, return_exceptions=True)
 
-    def _settle(self) -> str | None:
-        """Move the latest reply into the history as the user heard it.
-
-        Return the heard text if that cut the reply short, else None.
-        """
+    def _settle(self) -> _Heard | None:
+        """Move the latest reply into the history as the user heard it, if there is one."""
         reply, self._reply = self._reply, None
         if reply is None:
             return None
@@ -361,13 +402,44 @@ class VoiceConversation:
         for call in reply.calls():
             if call.output is None:
                 self._outlive(call)
-        items, heard = reply.heard(self._clock())
-        if items and self._turn:
+        heard = reply.heard(self._clock())
+        if heard.items and self._turn:
             # Some of the reply got through, so the turn it answers is closed.
             self._history.append({"role": "user", "content": "\n".join(self._turn)})
             self._turn = []
-        self._history.extend(items)
+        self._history.extend(heard.items)
         return heard
+
+    async def _label(self, unheard: str) -> str:
+        """Name what an unheard stretch of a reply was about, without saying what it said."""
+        try:
+            label = await self._llm.text_response(
+                model="6 Luna",
+                reasoning={"effort": "none"},
+                input=unheard,
+                instructions=_LABEL_INSTRUCTIONS,
+                max_output_tokens=30,
+            )
+        except Exception:
+            return ""
+        return " ".join(label.split()).rstrip(".")
+
+    async def _note_the_remainder(self, *, wanted: bool) -> None:
+        """Add the note about a cut reply's unheard part, if its wording is ready in time.
+
+        The note has to be in the history before the next request, like everything else,
+        so the wait is short and a late label is thrown away.
+        """
+        labelling, self._labelling = self._labelling, None
+        if labelling is None:
+            return
+        if wanted:
+            await asyncio.wait({labelling}, timeout=_LABEL_WAIT_SECONDS)
+            if labelling.done() and not labelling.cancelled() and (topic := labelling.result()):
+                self._history.append(
+                    {"role": "developer", "content": _REMAINDER_NOTE.format(topic=topic)}
+                )
+        labelling.cancel()
 
     def _outlive(self, call: _ToolCall) -> None:
         """Let a call that is still running carry on without the reply that made it."""
@@ -437,13 +509,16 @@ class VoiceConversation:
 
     async def _start_reply(self, transcript: str) -> None:
         """A turn ended: answer it, or put back what it interrupted if nothing was said."""
+        # The user holds the floor until it is settled what follows their turn, so that a
+        # late result cannot start a reply of its own in the middle of this.
+        self._user_speaking = True
         if self._producing is not None or self._reply is not None:
-            # A turn ended without the start that normally comes first. The user has the
-            # floor while this is dealt with, so a late result cannot start its own reply.
-            self._user_speaking = True
+            # A turn ended without the start that normally comes first.
             await self._interrupt()
-            self._user_speaking = False
         said = bool(transcript) and not _is_stray(transcript, "\n".join(self._turn))
+        # Not after a turn with no words: there the reply is picked up again instead.
+        await self._note_the_remainder(wanted=said)
+        self._user_speaking = False
         if not said and not self._turn and not self._cut_a_reply:
             # Nothing was said and nothing was stopped: only late results may be waiting.
             self._announce_when_quiet()

@@ -205,6 +205,26 @@ class OpenAIAdapterClass:
             reasoning=reasoning,
         )
 
+    async def text_response(
+        self,
+        *,
+        model: _Types.AvailableModels,
+        input: str | ResponseInputParam,
+        instructions: str | None | Omit = omit,
+        max_output_tokens: int | None | Omit = omit,
+        reasoning: OpenAIThinking | None | Omit = omit,
+    ) -> str:
+        """Create one stateless, non-streamed Responses API request and return its text."""
+        response = await self.client.responses.create(
+            model=_Types.model_map[model],
+            input=input,
+            instructions=instructions,
+            max_output_tokens=max_output_tokens,
+            reasoning=reasoning,
+            store=False,
+        )
+        return response.output_text
+
     async def structured_response[OutputModelT: BaseModel](
         self,
         *,
