@@ -88,4 +88,12 @@ uv run ruff check app tests
 uv run pyright
 ```
 
+To check the model and the pipeline together without any audio, with the real model and the real web search:
+
+```bash
+uv run python -m scripts.voice_pipeline_check
+```
+
+It fakes speech so each scenario can say how much of a reply was heard, and prints PASS or CHECK for 22 behaviours: context, search, cut replies, late search results, cancelling, noise, merged turns, clearing, another language, service failure and spoken style.
+
 Configuration is read from the environment by `app/config.py`. `.env.example` lists every setting. Never commit credentials.
