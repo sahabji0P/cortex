@@ -17,12 +17,19 @@ The history is what the model is sent on every call, and it holds what the user 
 not what was generated. Speech is generated much faster than it plays, so a reply only
 joins the history once it has been heard in full or cut off. A reply that is cut off is
 stored as the words that were heard, ending in "…". The rest is never sent back.
+
+A search is not stopped by an interruption. If the user speaks while one is running, its
+call gets a placeholder result so the history stays valid, and the search carries on.
+When it finishes, the real result is added at the next quiet moment as a call written
+by us (a stub that names the original call) followed by that result, and the model
+replies to it without waiting for the user.
 """
 
 import asyncio
 import contextlib
 import json
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -62,7 +69,24 @@ _SEARCH_INSTRUCTIONS = """\
 - For anything recent, or that you are not sure of, call web_search straight away. The \
 user hears "Let me check" while it runs, so do not announce the search yourself. Then \
 answer from the results and name the source.
+- If the user interrupts while a search is running, the search carries on in the \
+background. Do not search for the same thing again: say it is still coming, and answer \
+whatever else they asked. The result reaches you by itself, as a web_search call with \
+"deferred_result_for" in its arguments. You did not make that call: it only delivers the \
+late result. Then tell the user what it found, unless they no longer want it.
 """
+
+# Stands in for the result of a call that was still running when the user spoke.
+_PLACEHOLDER = (
+    "Still running. The user interrupted before this finished, so it carries on in the "
+    "background. Do not make this call again. Its result will reach you by itself, as a "
+    'separate call with "deferred_result_for": "{call_id}". If the user no longer wants '
+    "it, stop it with cancel_tool_call and that call_id."
+)
+
+# How often the wait for a quiet moment looks again. Playback can be cut short or added
+# to while it waits, so it does not sleep through to a time worked out in advance.
+_QUIET_CHECK_SECONDS = 0.1
 
 # Spoken by us the moment the model starts a search without having said anything, so the
 # user is not left in silence. Models do this themselves only some of the time.
@@ -103,6 +127,7 @@ class _ToolCall:
     name: str
     arguments: str
     output: str | None = None  # None while the tool is still running
+    running: asyncio.Task[str] | None = None
 
     def items(self) -> list[ResponseInputItemParam]:
         return [
@@ -135,6 +160,9 @@ class _Reply:
     def add_call(self, call: _ToolCall) -> None:
         self._parts.append(call)
 
+    def calls(self) -> list[_ToolCall]:
+        return [part for part in self._parts if isinstance(part, _ToolCall)]
+
     def items(self) -> list[ResponseInputItemParam]:
         """Everything produced so far, for this reply's own next model call."""
         items: list[ResponseInputItemParam] = []
@@ -149,16 +177,15 @@ class _Reply:
         """The reply as the user had heard it by time `at`, for the history.
 
         Also returns the heard text if the reply was cut short, or None if it was heard
-        in full. Finished tool calls are kept either way: they happened, and the history
-        has to stay a valid chain of calls and results.
+        in full. Tool calls are kept either way: they happened, and the history has to
+        stay a valid chain of calls and results.
         """
         items: list[ResponseInputItemParam] = []
         spoken: list[str] = []
         cut = False
         for part in self._parts:
             if isinstance(part, _ToolCall):
-                if part.output is not None:
-                    items.extend(part.items())
+                items.extend(part.items())
             elif not cut:
                 text, whole = part.heard(at)
                 if not whole:
@@ -196,14 +223,24 @@ class VoiceConversation:
         # fixed for the whole conversation: a prompt cache only helps while that start
         # stays the same.
         self._instructions = _INSTRUCTIONS.format(today=datetime.now(UTC).strftime("%A, %d %B %Y"))
-        self._tools = [_WEB_SEARCH_TOOL] if search.configured else []
+        self._tools = [_WEB_SEARCH_TOOL, _CANCEL_TOOL] if search.configured else []
         if search.configured:
             self._instructions += _SEARCH_INSTRUCTIONS
         # The task producing a reply, while one is being produced.
         self._producing: asyncio.Task[None] | None = None
         # The latest reply, until it joins the history. That happens when the user next
-        # speaks: by then it has either been heard in full or is being cut off.
+        # speaks, or when a late tool result is about to be answered: by then it has
+        # either been heard in full or is being cut off.
         self._reply: _Reply | None = None
+        self._user_speaking = False
+        # Calls still running after their reply was cut off, by call id.
+        self._outliving: dict[str, _ToolCall] = {}
+        # Results of such calls, waiting for a quiet moment to be given to the model.
+        self._late: list[tuple[_ToolCall, str]] = []
+        self._announcing: asyncio.Task[None] | None = None
+        # The calls in the history that we wrote to carry a late result: stub call id to
+        # the id of the call the model really made.
+        self._stubs: dict[str, str] = {}
         self._listening = asyncio.create_task(self._listen())
 
     async def send_audio(self, pcm: bytes) -> None:
@@ -217,10 +254,16 @@ class VoiceConversation:
 
     async def close(self) -> None:
         """End the conversation: stop any reply and release the speech connections."""
-        tasks = [task for task in (self._listening, self._producing) if task is not None]
-        for task in tasks:
+        tasks = [
+            task
+            for task in (self._listening, self._producing, self._announcing)
+            if task is not None
+        ]
+        searches = [call.running for call in self._outliving.values() if call.running is not None]
+        for task in (*tasks, *searches):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*searches, return_exceptions=True)
         with contextlib.suppress(Exception):
             await self._stt.close()
 
@@ -232,10 +275,12 @@ class VoiceConversation:
         try:
             async for event in self._stt.events():
                 if event.type == "turn.start":
+                    self._user_speaking = True
                     await self._interrupt()
                 elif event.type == "turn.update":
                     self._emit("user.partial", event.transcript)
                 elif event.type == "turn.end":
+                    self._user_speaking = False
                     await self._start_reply(event.transcript.strip())
                 elif event.type == "error":
                     self._emit("error", event.message or "speech recognition failed")
@@ -247,6 +292,8 @@ class VoiceConversation:
     async def _interrupt(self) -> None:
         """The user is speaking: stop the reply, and record how much of it they heard."""
         producing, self._producing = self._producing, None
+        if self._announcing is not None:
+            self._announcing.cancel()
         heard = self._settle()
         if producing is not None:
             producing.cancel()
@@ -265,16 +312,82 @@ class VoiceConversation:
         if reply is None:
             return None
         reply.speech.silence()
+        for call in reply.calls():
+            if call.output is None:
+                self._outlive(call)
         items, heard = reply.heard(self._clock())
         self._history.extend(items)
         return heard
 
+    def _outlive(self, call: _ToolCall) -> None:
+        """Let a call that is still running carry on without the reply that made it."""
+        running = call.running
+        if running is None or running.done():
+            # It finished in the instant before the reply was cut: nothing is late.
+            call.output = running.result() if running and not running.cancelled() else ""
+            return
+        call.output = _PLACEHOLDER.format(call_id=call.call_id)
+        self._outliving[call.call_id] = call
+        running.add_done_callback(lambda finished: self._finished_late(call, finished))
+
+    def _finished_late(self, call: _ToolCall, finished: asyncio.Task[str]) -> None:
+        self._outliving.pop(call.call_id, None)
+        if finished.cancelled():
+            return
+        self._late.append((call, finished.result()))
+        self._announce_when_quiet()
+
+    def _announce_when_quiet(self) -> None:
+        """Make sure something is waiting to give the model its late results."""
+        waiting = self._announcing is not None and not self._announcing.done()
+        if self._late and not self._user_speaking and not waiting:
+            self._announcing = asyncio.create_task(self._announce_late_results())
+
+    async def _announce_late_results(self) -> None:
+        """Wait until nothing is being said, then let the model answer its late results.
+
+        Nothing is being said once the reply in progress has been produced and played to
+        the end. Only then is that reply final, so only then may another request be made.
+        If the user speaks first, this is cancelled and their turn carries the results.
+        """
+        while True:
+            if self._producing is not None and not self._producing.done():
+                await asyncio.wait({self._producing})
+            elif self._playback.ends_at > self._clock():
+                await asyncio.sleep(_QUIET_CHECK_SECONDS)
+            else:
+                break
+        self._settle()
+        self._add_late_results()
+        self._producing = asyncio.create_task(self._respond())
+
+    def _add_late_results(self) -> None:
+        """Add each late result to the history as a stub call followed by the result.
+
+        A result has to follow its own call directly, and the real call already has its
+        placeholder. So we write a call ourselves that names the real one.
+        """
+        for call, output in self._late:
+            stub = _ToolCall(
+                call_id=f"late_{uuid.uuid4().hex[:16]}",
+                name=call.name,
+                arguments=json.dumps({"deferred_result_for": call.call_id}),
+                output=output,
+            )
+            self._stubs[stub.call_id] = call.call_id
+            self._history.extend(stub.items())
+        self._late.clear()
+
     async def _start_reply(self, transcript: str) -> None:
         if not transcript:
+            # Nothing was said after all: late results still need their quiet moment.
+            self._announce_when_quiet()
             return
         if self._producing is not None or self._reply is not None:
             # A turn ended without the start that normally comes first.
             await self._interrupt()
+        # Results that came in while the user was speaking go in ahead of their turn.
+        self._add_late_results()
         self._history.append({"role": "user", "content": transcript})
         self._emit("user.final", transcript)
         self._producing = asyncio.create_task(self._respond())
@@ -318,7 +431,8 @@ class VoiceConversation:
                 await reply.say(event.delta)
                 self._emit("assistant.delta", event.delta)
             elif event.type == "response.output_item.added":
-                if event.item.type == "function_call" and not reply.speech.text:
+                searching = event.item.type == "function_call" and event.item.name == "web_search"
+                if searching and not reply.speech.text:
                     await reply.say(_SEARCHING_LINE)
                     self._emit("assistant.delta", _SEARCHING_LINE)
             elif event.type == "response.completed":
@@ -342,23 +456,38 @@ class VoiceConversation:
             return False
         # Whatever was said before searching ("Let me check") is complete as it stands.
         await reply.speech.end_utterance()
+        # Each call runs as its own task, so that interrupting the reply does not stop it.
         for call in calls:
             reply.add_call(call)
-            call.output = await self._run_tool(call.name, call.arguments)
+            call.running = asyncio.create_task(self._run_tool(call.name, call.arguments))
+        for call in calls:
+            if call.running is not None:
+                call.output = await asyncio.shield(call.running)
         return True
 
     async def _run_tool(self, name: str, arguments: str) -> str:
         """Run one tool call. A failure goes back to the model as text, so it can say so."""
-        if name != "web_search":
-            return f"Unknown tool: {name}"
         try:
-            query = str(json.loads(arguments)["query"])
-            self._emit("tool.call", query)
-            # The fastest mode: the user is waiting in silence while this runs.
-            result = await self._search.search(objective=query, queries=[query], mode="turbo")
+            if name == "web_search":
+                query = str(json.loads(arguments)["query"])
+                self._emit("tool.call", query)
+                # The fastest mode: the user is waiting in silence while this runs.
+                found = await self._search.search(objective=query, queries=[query], mode="turbo")
+                return _format_search(found)
+            if name == "cancel_tool_call":
+                return self._cancel_call(str(json.loads(arguments)["call_id"]))
         except Exception as exc:
-            return f"The search failed: {exc}"
-        return _format_search(result)
+            return f"{name} failed: {exc}"
+        return f"Unknown tool: {name}"
+
+    def _cancel_call(self, call_id: str) -> str:
+        """Stop a call that outlived its reply. Its result will never arrive."""
+        # The model may name the call by a stub that already delivered its result.
+        call = self._outliving.get(self._stubs.get(call_id, call_id))
+        if call is None or call.running is None:
+            return "Nothing is running under that call_id."
+        call.running.cancel()
+        return "Cancelled."
 
 
 class VoiceEntityClass:
@@ -390,6 +519,20 @@ _WEB_SEARCH_TOOL = OpenAIAdapterClass.Tools.function(
             "query": {"type": "string", "description": "What to look up, as a full question."}
         },
         "required": ["query"],
+        "additionalProperties": False,
+    },
+)
+
+
+_CANCEL_TOOL = OpenAIAdapterClass.Tools.function(
+    name="cancel_tool_call",
+    description="Stop a tool call that is still running after the user interrupted it.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "call_id": {"type": "string", "description": "The call_id of the running call."}
+        },
+        "required": ["call_id"],
         "additionalProperties": False,
     },
 )

@@ -563,22 +563,240 @@ async def test_text_after_the_cut_is_dropped_but_a_finished_search_is_kept() -> 
     await f.conversation.close()
 
 
-async def test_interrupting_a_search_leaves_no_half_finished_tool_call() -> None:
-    never = asyncio.Event()
-    llm = _LLM(
-        [_completed(_search_call("weather in Pune"))],
-        [_delta("Okay."), _completed(_message("Okay."))],
+# ---- a search that is still running when the user speaks
+
+
+def _slow_search_then(*rounds: list) -> tuple[_LLM, asyncio.Event]:
+    """A model that searches first, and a search that hangs until the returned event is set."""
+    call = _search_call("weather in Pune")
+    return _LLM([_starts(call), _completed(call)], *rounds), asyncio.Event()
+
+
+async def test_speaking_during_a_search_leaves_a_placeholder_and_the_search_running() -> None:
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))]
     )
-    f = _conversation(llm, _Search(gate=never))
+    search = _Search(gate=finish)
+    f = _conversation(llm, search)
 
     f.stt.say("what's the weather")
     await _read_until(f.conversation, "tool.call")
-    f.stt.say("never mind")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 3)  # "Let me check." was heard in full
+    f.stt.say("hello, what's happening?")
     await _read_until(f.conversation, "assistant.done")
 
-    # A function_call without its output would be rejected by the API.
-    assert _shape(llm.requests[1]["input"]) == ["user", "user"]
+    sent = llm.requests[1]["input"]
+    assert _shape(sent) == ["user", "assistant", "function_call", "function_call_output", "user"]
+    assert sent[1]["content"] == "Let me check."
+    assert sent[2]["call_id"] == sent[3]["call_id"] == "call_1"
+    # The placeholder says the result comes later, names the call, and how to stop it.
+    assert "Still running" in sent[3]["output"]
+    assert '"deferred_result_for": "call_1"' in sent[3]["output"]
+    assert "cancel_tool_call" in sent[3]["output"]
+    # The search was not stopped: it is still waiting.
+    assert search.queries == ["weather in Pune"]
+    assert f.conversation._outliving["call_1"].running.done() is False
     await f.conversation.close()
+
+
+async def test_a_late_result_is_given_to_the_model_once_nothing_is_being_said() -> None:
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("hello, what's happening?")
+    await _read_until(f.conversation, "assistant.done")
+
+    # The search finishes while "Still looking." is still playing: nothing happens yet.
+    finish.set()
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 2
+
+    # Once that reply has played out, the model answers the result with no user turn.
+    f.clock.advance(60)
+    outputs = await _read_until(f.conversation, "assistant.done")
+    assert outputs[-1].text == "It is sunny."
+    assert "interrupt" not in _types(outputs)
+
+    sent = llm.requests[2]["input"]
+    assert _shape(sent) == [
+        "user",
+        "function_call",
+        "function_call_output",
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+    ]
+    assert sent[4]["content"] == "Still looking."
+    # The stub is a call we wrote: a new id, the same tool, and the call it stands for.
+    stub, result = sent[5], sent[6]
+    assert stub["name"] == "web_search"
+    assert json.loads(stub["arguments"]) == {"deferred_result_for": "call_1"}
+    assert stub["call_id"] == result["call_id"] != "call_1"
+    assert "Norris won in Las Vegas." in result["output"]
+    assert f.conversation._stubs == {stub["call_id"]: "call_1"}
+    await f.conversation.close()
+
+
+async def test_a_late_result_that_lands_while_the_user_speaks_goes_ahead_of_their_turn() -> None:
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("hello, what's happening?")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 2  # no reply of its own while the user has the floor
+
+    f.stt.turn_end("so is it sunny?")
+    await _read_until(f.conversation, "assistant.done")
+    assert _shape(llm.requests[2]["input"])[-4:] == [
+        "assistant",
+        "function_call",
+        "function_call_output",
+        "user",
+    ]
+    assert len(llm.requests) == 3
+    await f.conversation.close()
+
+
+async def test_the_user_speaking_takes_over_from_a_late_result_waiting_its_turn() -> None:
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("hello, what's happening?")
+    await _read_until(f.conversation, "assistant.done")
+
+    # The result lands while "Still looking." is playing, so it waits. Then the user
+    # speaks over that reply: the wait is off, and their turn carries the result.
+    finish.set()
+    await asyncio.sleep(0.05)
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 2
+
+    f.stt.turn_end("so is it sunny?")
+    await _read_until(f.conversation, "assistant.done")
+    assert _shape(llm.requests[2]["input"])[-3:] == [
+        "function_call",
+        "function_call_output",
+        "user",
+    ]
+    assert len(llm.requests) == 3
+    await f.conversation.close()
+
+
+async def test_a_late_result_is_still_answered_if_the_user_said_nothing_after_all() -> None:
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))],
+        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("hello, what's happening?")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+
+    # A noise opens a turn, the result lands, and the turn closes with no words in it.
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()
+    await asyncio.sleep(0.05)
+    f.stt.turn_end("")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert outputs[-1].text == "It is sunny."
+    await f.conversation.close()
+
+
+async def test_the_model_can_cancel_a_search_that_is_still_running() -> None:
+    cancel = _Item(
+        type="function_call",
+        call_id="call_2",
+        name="cancel_tool_call",
+        arguments=json.dumps({"call_id": "call_1"}),
+    )
+    llm, finish = _slow_search_then(
+        [_starts(cancel), _completed(cancel)],
+        [_delta("Stopped."), _completed(_message("Stopped."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("never mind, stop that")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    # Cancelling is not a search, so nobody says "Let me check." for it.
+    assert outputs[-1].text == "Stopped."
+    assert llm.requests[2]["input"][-1] == {
+        "type": "function_call_output",
+        "call_id": "call_2",
+        "output": "Cancelled.",
+    }
+    # The cancelled search never reports back.
+    finish.set()
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 3
+    assert f.conversation._outliving == {}
+    await f.conversation.close()
+
+
+async def test_cancelling_a_call_that_is_not_running_says_so() -> None:
+    cancel = _Item(
+        type="function_call",
+        call_id="call_9",
+        name="cancel_tool_call",
+        arguments=json.dumps({"call_id": "call_unknown"}),
+    )
+    llm = _LLM([_completed(cancel)], [_delta("Okay."), _completed(_message("Okay."))])
+    f = _conversation(llm)
+
+    f.stt.say("stop the search")
+    await _read_until(f.conversation, "assistant.done")
+
+    assert llm.requests[1]["input"][-1]["output"] == "Nothing is running under that call_id."
+    await f.conversation.close()
+
+
+async def test_closing_stops_a_search_that_outlived_its_reply() -> None:
+    llm, finish = _slow_search_then(
+        [_delta("Still looking."), _completed(_message("Still looking."))]
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("hello?")
+    await _read_until(f.conversation, "assistant.done")
+    search_task = f.conversation._outliving["call_1"].running
+    await f.conversation.close()
+
+    assert search_task.cancelled()
 
 
 # ---- how much was heard
