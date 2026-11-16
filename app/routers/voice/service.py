@@ -14,6 +14,20 @@ class VoiceServiceV1Class:
     def __init__(self) -> None:
         self.voice = EntitiesRegistry.Voice
 
+    def models(self) -> list[VoiceModels.V1.Output.Model]:
+        """Every model a conversation can be held with, in the order to show them."""
+        return [
+            VoiceModels.V1.Output.Model(
+                name=info.name,
+                provider=info.provider,
+                label=info.label,
+                available=available,
+                default=default,
+                listed=info.listed,
+            )
+            for info, available, default in self.voice.models()
+        ]
+
     async def converse(self, websocket: WebSocket) -> None:
         """Bridge a client WebSocket to one voice conversation.
 
@@ -37,6 +51,10 @@ class VoiceServiceV1Class:
             conversation = await self.voice.open_conversation(
                 asked.model, speaks_first=asked.first == "assistant"
             )
+        except LookupError as exc:
+            # 1008 again: the model is offered, but its provider has no key here.
+            await websocket.close(code=1008, reason=str(exc))
+            return
         except Exception:
             # 1011: internal error — a speech service is unreachable or not configured.
             with contextlib.suppress(Exception):

@@ -36,8 +36,11 @@ class Settings(BaseSettings):
     gcp_credentials_path: str = ""
 
     # The model a voice conversation is held with unless the client asks for another:
-    # "6 Luna" (OpenAI), "Haiku 5.5" or "Sonnet 5.5" (Anthropic). Its provider needs a key.
-    voice_model: Literal["6 Luna", "Haiku 5.5", "Sonnet 5.5"] = "6 Luna"
+    # "6 Luna", "6.1 Terra" or "6.1 Sol" (OpenAI); "Haiku 5.5", "Sonnet 5.5" or "Opus 5.5"
+    # (Anthropic). Its provider needs a key.
+    voice_model: Literal[
+        "6 Luna", "6.1 Terra", "6.1 Sol", "Haiku 5.5", "Sonnet 5.5", "Opus 5.5"
+    ] = "6 Luna"
 
     # OpenAI
     openai_api_key: str = ""

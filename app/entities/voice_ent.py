@@ -63,14 +63,17 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass, SearchResult
 from app.config import settings
 from app.entities.voice_model import (
+    VOICE_MODELS,
     CallResult,
     CallStarted,
     Item,
+    ModelInfo,
     RoundDone,
     TextDelta,
     ToolSpec,
     VoiceLLM,
     VoiceModelName,
+    is_openai,
     voice_model,
 )
 from app.entities.voice_speech import Clock, Playback, Speech, Standby, Utterance
@@ -832,6 +835,13 @@ class VoiceEntityClass:
         self._anthropic = anthropic
         self._search = search
 
+    def models(self) -> list[tuple[ModelInfo, bool, bool]]:
+        """Every model, with whether its provider has a key and whether it is the default."""
+        ready = {"OpenAI": self._openai.configured, "Anthropic": self._anthropic.configured}
+        return [
+            (info, ready[info.provider], info.name == settings.voice_model) for info in VOICE_MODELS
+        ]
+
     async def open_conversation(
         self, model: VoiceModelName | None = None, *, speaks_first: bool = False
     ) -> VoiceConversation:
@@ -839,10 +849,15 @@ class VoiceEntityClass:
 
         `model` is the model to hold it with; left out, it is the configured one. With
         `speaks_first` the assistant greets the user as soon as the conversation opens;
-        without it, it waits for them to speak.
+        without it, it waits for them to speak. Raises `LookupError` if the model's
+        provider has no key.
         """
         model = model or settings.voice_model
-        llm: VoiceLLM = self._openai if model == "6 Luna" else self._anthropic
+        llm: VoiceLLM = self._openai if is_openai(model) else self._anthropic
+        if not llm.configured:
+            # Said now, not as a failed reply after the user has spoken.
+            provider = "OpenAI" if is_openai(model) else "Anthropic"
+            raise LookupError(f"no {provider} key is set, so {model} cannot be used")
         stt = await self._stt.connect_auto_turns()
         return VoiceConversation(
             stt=stt,

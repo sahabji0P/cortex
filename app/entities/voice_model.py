@@ -20,17 +20,21 @@ import contextlib
 import json
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypedDict, cast
+from typing import Literal, NamedTuple, Protocol, TypedDict, TypeIs, cast
 
 from app.adapters.anthropic_adp import (
     AnthropicAdapterClass,
     MessageParam,
+    Omit,
+    OutputConfigParam,
     ThinkingConfigParam,
     ToolUnionParam,
+    omit,
 )
 from app.adapters.openai_adp import OpenAIAdapterClass, ResponseInputItemParam
 
 __all__ = [
+    "VOICE_MODELS",
     "Call",
     "CallResult",
     "CallStarted",
@@ -38,21 +42,52 @@ __all__ = [
     "Message",
     "ModelCall",
     "ModelEvent",
+    "ModelInfo",
     "RoundDone",
     "TextDelta",
     "ToolSpec",
     "VoiceLLM",
     "VoiceModel",
     "VoiceModelName",
+    "VoiceProvider",
+    "is_openai",
     "to_messages",
     "voice_model",
 ]
 
-# The models a conversation can be held with. Opus 5.5 and Fable 5.2 are left out on
-# purpose: their thinking cannot be turned off, which is a wait before every reply.
-type VoiceModelName = Literal["6 Luna", "Haiku 5.5", "Sonnet 5.5"]
-type _AnthropicModelName = Literal["Haiku 5.5", "Sonnet 5.5"]
+# The models a conversation can be held with. These names are what a client sends.
+type _OpenAIModelName = Literal["6 Luna", "6.1 Terra", "6.1 Sol"]
+type _AnthropicModelName = Literal["Haiku 5.5", "Sonnet 5.5", "Opus 5.5"]
+type VoiceModelName = _OpenAIModelName | _AnthropicModelName
+type VoiceProvider = Literal["OpenAI", "Anthropic"]
 type VoiceLLM = OpenAIAdapterClass | AnthropicAdapterClass
+
+
+class ModelInfo(NamedTuple):
+    """One model as a client is told of it."""
+
+    name: VoiceModelName
+    provider: VoiceProvider
+    label: str  # how to show it to a person
+    listed: bool  # whether a model picker should offer it
+
+
+# Every model, in the order a picker shows them. One that is not listed still works
+# when a client asks for it by name.
+VOICE_MODELS: tuple[ModelInfo, ...] = (
+    ModelInfo("6.1 Terra", "OpenAI", "GPT-6.1 Terra", listed=True),
+    ModelInfo("6 Luna", "OpenAI", "GPT-6 Luna", listed=True),
+    ModelInfo("6.1 Sol", "OpenAI", "GPT-6.1 Sol", listed=True),
+    ModelInfo("Opus 5.5", "Anthropic", "Claude Opus 5.5", listed=True),
+    ModelInfo("Haiku 5.5", "Anthropic", "Claude Haiku 5.5", listed=True),
+    ModelInfo("Sonnet 5.5", "Anthropic", "Claude Sonnet 5.5", listed=False),
+)
+_OPENAI_MODELS: tuple[_OpenAIModelName, ...] = ("6 Luna", "6.1 Terra", "6.1 Sol")
+
+
+def is_openai(name: VoiceModelName) -> TypeIs[_OpenAIModelName]:
+    """Whether the model is OpenAI's. Any other is Anthropic's."""
+    return name in _OPENAI_MODELS
 
 
 class Message(TypedDict):
@@ -141,18 +176,31 @@ class VoiceModel(Protocol):
 
 def voice_model(llm: VoiceLLM, name: VoiceModelName, tools: Sequence[ToolSpec]) -> VoiceModel:
     """The model called `name`, reached through `llm`, which must be its provider's adapter."""
-    if name == "6 Luna":
+    if is_openai(name):
         if isinstance(llm, AnthropicAdapterClass):
             raise TypeError(f"{name!r} is an OpenAI model: it needs the OpenAI adapter")
-        return _OpenAIVoiceModel(llm, tools)
+        return _OpenAIVoiceModel(llm, name, tools)
     if isinstance(llm, OpenAIAdapterClass):
         raise TypeError(f"{name!r} is an Anthropic model: it needs the Anthropic adapter")
     return _AnthropicVoiceModel(llm, name, tools)
 
 
+# How much each model thinks before it speaks: normally, and when asked to think a
+# little (`think`). Normally that is not at all: in a conversation the wait is worse
+# than the gain. 6.1 Sol cannot run without thinking, so for it the two are the same.
+_OPENAI_EFFORT: dict[_OpenAIModelName, tuple[Literal["none", "low"], Literal["low"]]] = {
+    "6 Luna": ("none", "low"),
+    "6.1 Terra": ("none", "low"),
+    "6.1 Sol": ("low", "low"),
+}
+
+
 class _OpenAIVoiceModel:
-    def __init__(self, llm: OpenAIAdapterClass, tools: Sequence[ToolSpec]) -> None:
+    def __init__(
+        self, llm: OpenAIAdapterClass, name: _OpenAIModelName, tools: Sequence[ToolSpec]
+    ) -> None:
         self._llm = llm
+        self._name: _OpenAIModelName = name
         self._tools = [
             OpenAIAdapterClass.Tools.function(
                 name=tool.name, description=tool.description, parameters=tool.parameters
@@ -163,12 +211,13 @@ class _OpenAIVoiceModel:
     async def round(
         self, items: list[Item], *, instructions: str, think: bool, must_answer: bool
     ) -> AsyncGenerator[ModelEvent]:
+        quiet, thinking = _OPENAI_EFFORT[self._name]
         stream = await self._llm.stream_response(
-            model="6 Luna",
+            model=self._name,
             # Switching this costs one prompt-cache miss: the provider keeps a cache per
             # setting, so the first request after the switch is read in full. Going back
             # finds the earlier cache again.
-            reasoning={"effort": "low" if think else "none"},
+            reasoning={"effort": thinking if think else quiet},
             input=cast("list[ResponseInputItemParam]", items),
             instructions=instructions,
             tools=self._tools,
@@ -206,6 +255,7 @@ class _OpenAIVoiceModel:
         )
 
     async def label(self, text: str, *, instructions: str) -> str:
+        # Always the small model: this is a few words, wanted quickly.
         return await self._llm.text_response(
             model="6 Luna",
             reasoning={"effort": "none"},
@@ -216,14 +266,25 @@ class _OpenAIVoiceModel:
 
 
 # A spoken reply is a sentence or two. This is a ceiling against a runaway reply, far
-# above anything the instructions ask for.
-_MAX_REPLY_TOKENS = 4096
+# above anything the instructions ask for. On a model that thinks, the thinking counts
+# against it too.
+_MAX_REPLY_TOKENS = 8192
 
-# The nearest each model has to "no thinking": in a conversation the wait is worse than
-# the gain. Sonnet 5.5 rejects `disabled`.
-_THINKING: dict[_AnthropicModelName, ThinkingConfigParam] = {
-    "Haiku 5.5": {"type": "disabled"},
-    "Sonnet 5.5": {"type": "between_tools"},
+
+class _AnthropicSettings(NamedTuple):
+    """What a model is sent so that it thinks as little as it can before it speaks."""
+
+    thinking: ThinkingConfigParam | Omit
+    output_config: OutputConfigParam | Omit
+
+
+_ANTHROPIC_SETTINGS: dict[_AnthropicModelName, _AnthropicSettings] = {
+    "Haiku 5.5": _AnthropicSettings({"type": "disabled"}, omit),
+    # Sonnet 5.5 rejects `disabled`.
+    "Sonnet 5.5": _AnthropicSettings({"type": "between_tools"}, omit),
+    # Opus 5.5 always thinks: nothing turns it off, so it is asked to think as little as
+    # it can. Expect a longer wait for its first word than from the others.
+    "Opus 5.5": _AnthropicSettings(omit, {"effort": "low"}),
 }
 
 # The Messages API has no place for a note from us in the middle of a conversation that
@@ -265,12 +326,17 @@ class _AnthropicVoiceModel:
         # provider read the whole conversation again once, and the gain it was measured
         # to bring was measured on the other provider's model. So on this provider
         # nothing is done about a model that searches again while a search is pending.
+        settings = _ANTHROPIC_SETTINGS[self._name]
+        # What a model writes as thinking is never sent back to it. The history is cut
+        # down to what the user heard, and thinking sent back after such a change is
+        # refused.
         request = self._llm.stream_message(
             model=self._name,
             messages=to_messages(items),
             system=instructions + _NOTE_INSTRUCTIONS,
             max_tokens=_MAX_REPLY_TOKENS,
-            thinking=_THINKING[self._name],
+            thinking=settings.thinking,
+            output_config=settings.output_config,
             tools=self._tools,
             # Forbidding the tools this way leaves the tool list as it is. On this
             # provider the conversation is still read again in full for that request.

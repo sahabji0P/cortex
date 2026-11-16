@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, WebSocket
 from fastapi.responses import FileResponse
 
+from app.routers.voice.models import VoiceModels
 from app.routers.voice.service import VoiceServiceRegistry
 
 router = APIRouter(prefix="/v1/voice", tags=["voice"])
@@ -14,8 +15,8 @@ _TEST_PAGE = Path(__file__).parent / "test_page.html"
 async def converse(websocket: WebSocket, service: VoiceServiceRegistry.V1) -> None:
     """A spoken conversation over one WebSocket.
 
-    Add `?model=6 Luna`, `?model=Haiku 5.5` or `?model=Sonnet 5.5` to choose the model;
-    without it the configured one is used. Add `?first=assistant` to have the assistant
+    Add `?model=` with a name from `GET /v1/voice/models` to choose the model; without
+    it the configured one is used. Add `?first=assistant` to have the assistant
     greet the user as soon as the socket opens; without it, it waits for the user to speak.
     Send mic audio as binary frames: raw 16-bit mono PCM at 16 kHz, about 100 ms each.
     Optionally send `{"type": "playback", "delay": seconds}` as a text frame to report how
@@ -26,6 +27,12 @@ async def converse(websocket: WebSocket, service: VoiceServiceRegistry.V1) -> No
     On `interrupt`, stop playback and drop any audio not yet played.
     """
     await service.converse(websocket)
+
+
+@router.get("/models")
+async def models(service: VoiceServiceRegistry.V1) -> list[VoiceModels.V1.Output.Model]:
+    """The models a conversation can be held with, and which of them have a key set."""
+    return service.models()
 
 
 @router.get("/test", include_in_schema=False)

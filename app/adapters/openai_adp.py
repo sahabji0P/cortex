@@ -45,7 +45,9 @@ type ToolHandler = Callable[..., object | Awaitable[object]]
 class _Types:
     """Group private OpenAI adapter model types."""
 
-    type AvailableModels = Literal["5.4", "5.4 Chat", "5.4 Mini", "Luna", "6 Luna"]
+    type AvailableModels = Literal[
+        "5.4", "5.4 Chat", "5.4 Mini", "Luna", "6 Luna", "6.1 Terra", "6.1 Sol"
+    ]
     model_map = MappingProxyType[AvailableModels, str](
         {
             "5.4": "gpt-5.4",
@@ -53,6 +55,8 @@ class _Types:
             "5.4 Mini": "gpt-5.4-mini",
             "Luna": "gpt-5.6-luna",
             "6 Luna": "gpt-6-luna",
+            "6.1 Terra": "gpt-6.1-terra",
+            "6.1 Sol": "gpt-6.1-sol",
         }
     )
 
@@ -345,6 +349,11 @@ class OpenAIAdapterClass:
         if isinstance(value, BaseModel):
             return value.model_dump_json()
         return json.dumps(value, default=str)
+
+    @property
+    def configured(self) -> bool:
+        """Whether an API key was provided."""
+        return self._client is not None
 
     @property
     def client(self) -> AsyncOpenAI:

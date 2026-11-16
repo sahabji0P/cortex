@@ -35,9 +35,12 @@ __all__ = [
     "AnthropicAdapterClass",
     "AnthropicRefusalError",
     "MessageParam",
+    "Omit",
+    "OutputConfigParam",
     "ThinkingConfigParam",
     "ToolResultBlockParam",
     "ToolUnionParam",
+    "omit",
 ]
 
 type ToolHandler = Callable[..., object | Awaitable[object]]
@@ -457,6 +460,11 @@ class AnthropicAdapterClass:
         if isinstance(value, BaseModel):
             return value.model_dump_json()
         return json.dumps(value, default=str)
+
+    @property
+    def configured(self) -> bool:
+        """Whether an API key was provided."""
+        return self._client is not None
 
     @property
     def client(self) -> AsyncAnthropic:

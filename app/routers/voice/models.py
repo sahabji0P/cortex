@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.entities.voice_model import VoiceModelName
+from app.entities.voice_model import VoiceModelName, VoiceProvider
 
 
 class VoiceModels:
@@ -24,3 +24,17 @@ class VoiceModels:
 
                 type: Literal["playback"]
                 delay: float = Field(ge=0)
+
+        class Output:
+            class Model(BaseModel):
+                """One model a conversation can be held with."""
+
+                name: VoiceModelName  # what to send as `?model=`
+                provider: VoiceProvider
+                label: str
+                # Whether the provider's key is set. Without it a conversation cannot open.
+                available: bool
+                # Whether this is the model used when a client names none.
+                default: bool
+                # Whether a model picker should offer it. Others still work by name.
+                listed: bool

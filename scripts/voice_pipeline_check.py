@@ -2,7 +2,8 @@
 
 Run from the repository root (needs OPENAI_API_KEY and PARALLEL_API_KEY in .env):
 
-    uv run python -m scripts.voice_pipeline_check
+    uv run python -m scripts.voice_pipeline_check              # the default model, 6 Luna
+    uv run python -m scripts.voice_pipeline_check "6.1 Terra"  # or another OpenAI model
 
 The model and the web search are real. Speech is faked with the test suite's stand-ins:
 every word takes exactly one second to say and the clock is moved by hand, so each
@@ -18,6 +19,7 @@ import asyncio
 import contextlib
 import json
 import re
+import sys
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.adapters.openai_adp import OpenAIAdapterClass
@@ -27,6 +29,7 @@ from app.entities.voice_ent import VoiceConversation, VoiceEvent
 from tests import test_voice_conversation as T
 
 DELAY = T._DELAY
+MODEL = sys.argv[1] if len(sys.argv) > 1 else "6 Luna"  # an OpenAI model's name
 RESULTS = []  # (scenario, verdict, detail)
 OPEN = []  # conversations not yet closed, so that a scenario that fails can be cleaned up
 
@@ -161,6 +164,7 @@ class Talk:
             tts=self.tts,
             llm=self.llm,
             search=self.search,
+            model=MODEL,
             speaks_first=speaks_first,
             clock=self.clock,
         )
@@ -598,7 +602,7 @@ async def main():
             for talk in list(OPEN):
                 await talk.close()
     style(replies)
-    print(f"\n{sum(1 for _, v, _ in RESULTS if v == 'PASS')} of {len(RESULTS)} passed")
+    print(f"\n{MODEL}: {sum(1 for _, v, _ in RESULTS if v == 'PASS')} of {len(RESULTS)} passed")
     await asyncio.gather(llm.close(), par.close())
 
 

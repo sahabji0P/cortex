@@ -12,6 +12,7 @@ from typing import cast
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic, omit
 from openai import AsyncOpenAI
 
 from app.adapters.anthropic_adp import AnthropicAdapterClass
@@ -288,6 +289,76 @@ async def test_the_label_is_asked_of_the_small_model_without_thinking() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("name", "thinking", "output_config"),
+    [
+        ("Haiku 5.5", {"type": "disabled"}, omit),
+        ("Sonnet 5.5", {"type": "between_tools"}, omit),
+        # Opus 5.5 cannot have its thinking turned off: it is asked for as little as it can do.
+        ("Opus 5.5", omit, {"effort": "low"}),
+    ],
+)
+async def test_each_anthropic_model_is_asked_to_think_as_little_as_it_can(
+    name: str, thinking: object, output_config: object
+) -> None:
+    llm = _Claude([_text("Paris."), _final()])
+    model = voice_model(cast("AnthropicAdapterClass", llm), name, [_SEARCH])
+
+    async for _ in model.round(
+        [{"role": "user", "content": "hi"}], instructions="", think=True, must_answer=False
+    ):
+        pass
+
+    (request,) = llm.requests
+    assert request["model"] == name
+    assert request["thinking"] == thinking
+    assert request["output_config"] == output_config
+
+
+class _OpenAI:
+    """The OpenAI adapter: every call says one word and is written down."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+
+    async def stream_response(self, **request):
+        self.requests.append(request)
+
+        async def stream():
+            yield SimpleNamespace(type="response.output_text.delta", delta="Hi.")
+            yield SimpleNamespace(type="response.completed", response=SimpleNamespace(output=[]))
+
+        return stream()
+
+
+@pytest.mark.parametrize(
+    ("name", "normally", "asked_to_think"),
+    [
+        ("6 Luna", "none", "low"),
+        ("6.1 Terra", "none", "low"),
+        # 6.1 Sol cannot run without thinking.
+        ("6.1 Sol", "low", "low"),
+    ],
+)
+async def test_each_openai_model_is_called_by_name_and_thinks_only_as_much_as_it_must(
+    name: str, normally: str, asked_to_think: str
+) -> None:
+    llm = _OpenAI()
+    model = voice_model(cast("OpenAIAdapterClass", llm), name, [_SEARCH])
+
+    for think in (False, True):
+        async for _ in model.round(
+            [{"role": "user", "content": "hi"}], instructions="", think=think, must_answer=False
+        ):
+            pass
+
+    assert [request["model"] for request in llm.requests] == [name, name]
+    assert [request["reasoning"]["effort"] for request in llm.requests] == [
+        normally,
+        asked_to_think,
+    ]
+
+
 # ---- choosing the provider
 
 
@@ -305,6 +376,9 @@ def test_a_model_needs_the_adapter_of_its_own_provider() -> None:
         (None, "Sonnet 5.5", "Sonnet 5.5", "anthropic"),
         ("Haiku 5.5", "6 Luna", "Haiku 5.5", "anthropic"),
         ("6 Luna", "Haiku 5.5", "6 Luna", "openai"),
+        ("6.1 Terra", "Haiku 5.5", "6.1 Terra", "openai"),
+        ("6.1 Sol", "6 Luna", "6.1 Sol", "openai"),
+        ("Opus 5.5", "6 Luna", "Opus 5.5", "anthropic"),
     ],
 )
 async def test_a_conversation_is_opened_on_the_model_asked_for_or_the_configured_one(
@@ -323,15 +397,8 @@ async def test_a_conversation_is_opened_on_the_model_asked_for_or_the_configured
 
     monkeypatch.setattr(voice_ent, "voice_model", spy)
     monkeypatch.setattr(voice_ent.settings, "voice_model", configured)
-    adapters = {"openai": OpenAIAdapterClass(), "anthropic": AnthropicAdapterClass()}
-    stt = _STT()
-    entity = VoiceEntityClass(
-        stt=SimpleNamespace(connect_auto_turns=lambda: _connected(stt)),
-        tts=_TTS(),
-        openai=adapters["openai"],
-        anthropic=adapters["anthropic"],
-        search=_Search(),
-    )
+    adapters = _adapters(openai_key=True, anthropic_key=True)
+    entity = _entity(adapters)
 
     conversation = await entity.open_conversation(asked)
     await conversation.close()
@@ -339,16 +406,71 @@ async def test_a_conversation_is_opened_on_the_model_asked_for_or_the_configured
     assert built == [(adapters[provider], used)]
 
 
+def _adapters(*, openai_key: bool, anthropic_key: bool) -> dict[str, object]:
+    """Both adapters, each with a client (as if its key were set) or without one."""
+    openai, anthropic = OpenAIAdapterClass(), AnthropicAdapterClass()
+    if openai_key:
+        openai._client = AsyncOpenAI(api_key="test")
+    if anthropic_key:
+        anthropic._client = AsyncAnthropic(api_key="test")
+    return {"openai": openai, "anthropic": anthropic}
+
+
+def _entity(adapters: dict[str, object]) -> VoiceEntityClass:
+    stt = _STT()
+    return VoiceEntityClass(
+        stt=SimpleNamespace(connect_auto_turns=lambda: _connected(stt)),
+        tts=_TTS(),
+        openai=adapters["openai"],
+        anthropic=adapters["anthropic"],
+        search=_Search(),
+    )
+
+
 async def _connected(stt: _STT) -> _STT:
     return stt
+
+
+async def test_a_model_whose_provider_has_no_key_is_refused_when_the_conversation_opens() -> None:
+    entity = _entity(_adapters(openai_key=True, anthropic_key=False))
+
+    with pytest.raises(LookupError, match="no Anthropic key is set"):
+        await entity.open_conversation("Opus 5.5")
+
+    conversation = await entity.open_conversation("6.1 Terra")
+    await conversation.close()
+
+
+def test_the_models_are_listed_in_order_with_whether_each_can_be_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(voice_ent.settings, "voice_model", "6 Luna")
+    entity = _entity(_adapters(openai_key=True, anthropic_key=False))
+
+    listed = [
+        (info.provider, info.name, available, default)
+        for info, available, default in entity.models()
+        if info.listed
+    ]
+
+    assert listed == [
+        ("OpenAI", "6.1 Terra", True, False),
+        ("OpenAI", "6 Luna", True, True),
+        ("OpenAI", "6.1 Sol", True, False),
+        ("Anthropic", "Opus 5.5", False, False),
+        ("Anthropic", "Haiku 5.5", False, False),
+    ]
+    # One that a picker does not offer still works by name.
+    assert [info.name for info, _, _ in entity.models() if not info.listed] == ["Sonnet 5.5"]
 
 
 def test_the_websocket_query_names_a_model_or_none() -> None:
     query = VoiceModels.V1.Input.Query
     assert query.model_validate({}).model is None
     assert query.model_validate({"model": "Haiku 5.5", "other": "x"}).model == "Haiku 5.5"
+    assert query.model_validate({"model": "6.1 Sol"}).model == "6.1 Sol"
     with pytest.raises(ValueError, match="model"):
-        query.model_validate({"model": "Opus 5.5"})
+        query.model_validate({"model": "Fable 5.2"})
 
 
 def test_the_websocket_query_says_who_speaks_first_and_defaults_to_the_user() -> None:
