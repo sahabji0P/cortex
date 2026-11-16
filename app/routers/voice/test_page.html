@@ -12,7 +12,8 @@
   p.note { color: var(--dim); margin: 0 0 16px; font-size: .9rem; }
   button { font: inherit; padding: 10px 20px; border-radius: 8px; border: 1px solid var(--line); cursor: pointer; }
   #status { margin-left: 12px; color: var(--dim); }
-  label.option { display: block; margin-top: 12px; color: var(--dim); font-size: .9rem; }
+  .option { display: block; margin-top: 12px; color: var(--dim); font-size: .9rem; }
+  .option select { font: inherit; padding: 4px 8px; margin: 0 16px 0 6px; border-radius: 6px; border: 1px solid var(--line); }
   #log { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 12px; }
   #log div { margin: 8px 0; white-space: pre-wrap; }
   .you b { color: #3b82f6; } .cortex b { color: #10b981; }
@@ -23,6 +24,10 @@
 <h1>Cortex voice test</h1>
 <p class="note">A test page, not the product UI. Use headphones if Cortex cuts itself off: that means the mic is hearing the speakers.</p>
 <button id="toggle">Start talking</button><span id="status">idle</span>
+<div class="option">
+  <label>Provider <select id="provider"></select></label>
+  <label>Model <select id="model"></select></label>
+</div>
 <label class="option"><input type="checkbox" id="first"> Cortex speaks first</label>
 <div id="log"></div>
 
@@ -57,6 +62,35 @@ const statusEl = document.getElementById("status");
 const log = document.getElementById("log");
 const first = document.getElementById("first");
 first.checked = new URLSearchParams(location.search).get("first") === "assistant";
+
+// The models come from the server, so this page never lists one it cannot open.
+const providerEl = document.getElementById("provider");
+const modelEl = document.getElementById("model");
+let models = [];
+
+function showModels(chosen) {
+  modelEl.replaceChildren(...models.filter((m) => m.provider === providerEl.value).map((m) => {
+    const option = new Option(m.available ? m.label : `${m.label} (no key set)`, m.name);
+    option.disabled = !m.available;
+    return option;
+  }));
+  const pick = models.find((m) => m.name === chosen && m.provider === providerEl.value && m.available)
+    ?? models.find((m) => m.provider === providerEl.value && m.available);
+  if (pick) modelEl.value = pick.name; else modelEl.selectedIndex = -1;
+}
+
+async function loadModels() {
+  const all = await (await fetch("/v1/voice/models")).json();
+  // A model named in the page's address is offered even if it is not normally listed.
+  const asked = new URLSearchParams(location.search).get("model");
+  models = all.filter((m) => m.listed || m.name === asked);
+  const start = models.find((m) => m.name === asked) ?? models.find((m) => m.default) ?? models[0];
+  providerEl.replaceChildren(...[...new Set(models.map((m) => m.provider))].map((p) => new Option(p, p)));
+  providerEl.value = start.provider;
+  showModels(start.name);
+}
+providerEl.onchange = () => showModels();
+loadModels().catch((error) => { statusEl.textContent = `could not load the models: ${error.message}`; });
 
 let socket = null, mic = null, audio = null;
 let playAt = 0;             // when the next speech chunk should start
@@ -155,15 +189,19 @@ async function start() {
   const query = new URLSearchParams(location.search);
   query.delete("first");
   if (first.checked) query.set("first", "assistant");
+  if (modelEl.value) query.set("model", modelEl.value);
   const asked = query.size ? `?${query}` : "";
   socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/voice/converse${asked}`);
   socket.binaryType = "arraybuffer";
   socket.onopen = () => { statusEl.textContent = "listening"; reportedDelay = -1; reportDelay(); };
   socket.onmessage = (message) => typeof message.data === "string" ? onEvent(JSON.parse(message.data)) : play(message.data);
-  socket.onclose = () => stop();
+  // A refused model or setting closes the socket with the reason in words.
+  socket.onclose = (event) => { if (event.reason) line("meta").textContent = `closed: ${event.reason}`; stop(); };
   worklet.port.onmessage = (message) => { if (socket?.readyState === WebSocket.OPEN) socket.send(message.data); };
   toggle.textContent = "Stop";
   statusEl.textContent = "connecting";
+  providerEl.disabled = modelEl.disabled = first.disabled = true;
+  if (modelEl.value) line("meta").textContent = `talking to ${modelEl.selectedOptions[0].text}`;
 }
 
 function stop() {
@@ -174,6 +212,7 @@ function stop() {
   partial = reply = null;
   toggle.textContent = "Start talking";
   statusEl.textContent = "idle";
+  providerEl.disabled = modelEl.disabled = first.disabled = false;
 }
 
 toggle.onclick = () => (socket ? stop() : start().catch((error) => { line("meta").textContent = `error: ${error.message}`; stop(); }));

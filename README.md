@@ -25,22 +25,25 @@ mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ─�
 
 A conversation is held with one model from start to end, chosen when it opens:
 
-| Model | Provider | Needs |
-| --- | --- | --- |
-| `6 Luna` (the default) | OpenAI | `OPENAI_API_KEY` |
-| `Haiku 5.5` | Anthropic | `ANTHROPIC_API_KEY` |
-| `Sonnet 5.5` | Anthropic | `ANTHROPIC_API_KEY` |
+| Model | Provider | Thinks before it speaks | Needs |
+| --- | --- | --- | --- |
+| `6 Luna` (the default) | OpenAI | no | `OPENAI_API_KEY` |
+| `6.1 Terra` | OpenAI | no | `OPENAI_API_KEY` |
+| `6.1 Sol` | OpenAI | a little: it cannot be turned off | `OPENAI_API_KEY` |
+| `Haiku 5.5` | Anthropic | no | `ANTHROPIC_API_KEY` |
+| `Opus 5.5` | Anthropic | a little: it cannot be turned off | `ANTHROPIC_API_KEY` |
+| `Sonnet 5.5` | Anthropic | no | `ANTHROPIC_API_KEY` |
 
-`VOICE_MODEL` sets the model for every conversation, and a client can ask for another with `?model=` on the WebSocket URL. The test page passes its own query string on, so <http://127.0.0.1:8000/v1/voice/test?model=Haiku%205.5> talks to Haiku.
+`VOICE_MODEL` sets the model for every conversation, and a client can ask for another with `?model=` on the WebSocket URL. `GET /v1/voice/models` lists them, with whether each one's key is set. The test page has a provider and a model picker built from that list; a model whose key is missing is shown but cannot be chosen. Sonnet 5.5 is not in the picker and still works by name, as in <http://127.0.0.1:8000/v1/voice/test?model=Sonnet%205.5>. Asking for a model whose provider has no key closes the socket with code 1008 and the reason in words.
 
 Everything below is the same for either provider. The conversation keeps one history, and only the last step differs: OpenAI is sent it as it stands, and for Anthropic it is translated into alternating user and assistant messages on every request. These things differ on an Anthropic model:
 
-- **Thinking is fixed for the conversation.** It is off on Haiku 5.5, and on Sonnet 5.5 it is set to the nearest that model allows. The switch to a little thinking while a search is pending (rule 2 below) is not made: on this provider each switch makes the whole conversation be read again once, and the gain was measured on the OpenAI model only. So nothing stops an Anthropic model from repeating a search that is still running; how often it does is not known.
+- **Thinking is fixed for the conversation.** It is off on Haiku 5.5, on Sonnet 5.5 it is set to the nearest that model allows, and Opus 5.5 is asked for as little as it will do. What a model writes as thinking is never sent back to it, because the history is cut down to what the user heard. The switch to a little thinking while a search is pending (rule 2 below) is not made: on this provider each switch makes the whole conversation be read again once, and the gain was measured on the OpenAI model only. So nothing stops an Anthropic model from repeating a search that is still running; how often it does is not known.
 - **Notes from the server travel in a user message**, wrapped in `<note>` tags that the instructions explain. The Messages API has no place for them where they fall, which is after a reply of the model's own.
 - **Caching is asked for on every request.** Conversations shorter than the provider's minimum are not cached at all.
 - **Forbidding a search in the last round costs a full read** of the conversation for that one request.
 
-Opus 5.5 and Fable 5.2 are not offered: their thinking cannot be turned off, which is a wait before every reply.
+Fable 5.2 is not offered: its thinking cannot be turned off, which is a wait before every reply. Opus 5.5 has the same limit and is offered anyway, for comparing.
 
 Two smaller differences: the short note on an unheard remainder is always worded by Haiku 5.5, and two searches made in one round are sent back to an Anthropic model as two rounds, one after the other.
 
@@ -71,7 +74,7 @@ cp .env.example .env                      # then set CARTESIA_API_KEY and the mo
 uv run uvicorn app.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow the mic. Tick **Cortex speaks first** to be greeted. This is a one-file test page, not a product UI. Use headphones if Cortex cuts itself off, which means the mic is picking up the speakers.
+Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow the mic. Pick a provider and a model first if you want one other than the default, and tick **Cortex speaks first** to be greeted. This is a one-file test page, not a product UI. Use headphones if Cortex cuts itself off, which means the mic is picking up the speakers.
 
 ## The WebSocket contract
 
@@ -79,10 +82,12 @@ Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow t
 
 | Query parameter | Meaning |
 | --- | --- |
-| `model` | the model to talk to: `6 Luna`, `Haiku 5.5` or `Sonnet 5.5`. Left out, the configured one |
+| `model` | the model to talk to: a `name` from `GET /v1/voice/models`. Left out, the configured one |
 | `first` | who says the first words: `user` (the default) or `assistant`, which makes the assistant greet the user when the socket opens |
 
-A value that is not offered closes the socket with code 1008.
+A value that is not offered, or a model whose provider has no key, closes the socket with code 1008 and the reason.
+
+`GET /v1/voice/models` returns one object per model: `name` (what to send), `provider`, `label` (what to show), `available` (its key is set), `default` (used when none is named) and `listed` (whether a picker should offer it).
 
 | Direction | Frame | Content |
 | --- | --- | --- |
