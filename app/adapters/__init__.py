@@ -1,5 +1,6 @@
 import asyncio
 
+from app.adapters.anthropic_adp import AnthropicAdapterClass
 from app.adapters.cartesia_stt_adp import CartesiaSTTAdapterClass
 from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
 from app.adapters.docdb_adp import DocDBAdapterClass
@@ -15,6 +16,7 @@ class AdapterRegistry:
         self.Cache = RedisAdapterClass()
         self.HTTP = HttpAdapterClass()
         self.OpenAI = OpenAIAdapterClass()
+        self.Anthropic = AnthropicAdapterClass()
         self.CartesiaSTT = CartesiaSTTAdapterClass()
         self.CartesiaTTS = CartesiaTTSAdapterClass()
         self.Parallel = ParallelAdapterClass()
@@ -23,6 +25,7 @@ class AdapterRegistry:
             self.Cache.initialize(),
             self.HTTP.initialize(),
             self.OpenAI.initialize(),
+            self.Anthropic.initialize(),
             self.CartesiaSTT.initialize(),
             self.CartesiaTTS.initialize(),
             self.Parallel.initialize(),
@@ -34,6 +37,7 @@ class AdapterRegistry:
             self.Cache.close(),
             self.HTTP.close(),
             self.OpenAI.close(),
+            self.Anthropic.close(),
             self.CartesiaSTT.close(),
             self.CartesiaTTS.close(),
             self.Parallel.close(),

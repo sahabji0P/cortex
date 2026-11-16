@@ -73,7 +73,7 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 ```text
 app/
   adapters/    one file per outside service; the only place an SDK is called
-               openai_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
+               openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
   entities/    the logic: voice_ent and voice_speech (the cascade), stt_ent, conversation_ent, user_ent
   routers/     HTTP and WebSocket endpoints: voice, cortex, user
 ```
