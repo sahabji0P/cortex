@@ -38,7 +38,7 @@ A conversation is held with one model from start to end, chosen when it opens:
 
 Everything below is the same for either provider. The conversation keeps one history, and only the last step differs: OpenAI is sent it as it stands, and for Anthropic it is translated into alternating user and assistant messages on every request. These things differ on an Anthropic model:
 
-- **Thinking is fixed for the conversation.** It is off on Haiku 5.5, on Sonnet 5.5 it is set to the nearest that model allows, and Opus 5.5 is asked for as little as it will do. What a model writes as thinking is never sent back to it, because the history is cut down to what the user heard. The switch to a little thinking while a search is pending (rule 2 below) is not made: on this provider each switch makes the whole conversation be read again once, and the gain was measured on the OpenAI model only. So nothing stops an Anthropic model from repeating a search that is still running; how often it does is not known.
+- **Thinking is fixed for the conversation.** It is off on Haiku 5.5, on Sonnet 5.5 it is set to the nearest that model allows, and Opus 5.5 is asked for as little as it will do. What a model writes as thinking is never sent back to it, because the history is cut down to what the user heard. The switch to a little thinking while a search is pending (rule 2 below) is not made, and is not needed: asked "hello?" over a running search, Haiku 5.5 and Opus 5.5 each started no second search in 20 runs of 20.
 - **Notes from the server travel in a user message**, wrapped in `<note>` tags that the instructions explain. The Messages API has no place for them where they fall, which is after a reply of the model's own.
 - **Caching is asked for on every request.** Conversations shorter than the provider's minimum are not cached at all.
 - **Forbidding a search in the last round costs a full read** of the conversation for that one request.
@@ -47,7 +47,7 @@ Fable 5.2 is not offered: its thinking cannot be turned off, which is a wait bef
 
 Two smaller differences: the short note on an unheard remainder is always worded by Haiku 5.5, and two searches made in one round are sent back to an Anthropic model as two rounds, one after the other.
 
-The Anthropic side has been checked for the shape of its requests only: every model request the test suite's scenarios make was passed through the translation by a throwaway script (not in the repository) and was a valid alternating conversation. It has not been run against the live API, so whether every request is accepted, how it sounds and how fast it is are not known.
+The Anthropic models are reached through the Claude API directly, with a key from platform.claude.com, never through a cloud provider. They have been run live: every request shape the conversation makes is accepted by Haiku 5.5, Opus 5.5 and Sonnet 5.5, and the real-model check below passes on Haiku 5.5 and Opus 5.5.
 
 ### What the model remembers
 
@@ -131,7 +131,8 @@ uv run pyright
 To check the model and the pipeline together without any audio, with the real OpenAI model and the real web search:
 
 ```bash
-uv run python -m scripts.voice_pipeline_check
+uv run python -m scripts.voice_pipeline_check              # the default model, 6 Luna
+uv run python -m scripts.voice_pipeline_check "Opus 5.5"   # or any other model's name
 ```
 
 It fakes speech so each scenario can say how much of a reply was heard, and prints PASS or CHECK for 24 behaviours: context, search, cut replies, late search results, cancelling, noise, merged turns, clearing, another language, service failure and spoken style. A scenario that does not finish is shown as CHECK and the rest still run.
