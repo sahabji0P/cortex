@@ -65,7 +65,6 @@ from app.config import settings
 from app.entities.voice_model import (
     VOICE_MODELS,
     CallResult,
-    CallStarted,
     Item,
     ModelInfo,
     RoundDone,
@@ -101,9 +100,10 @@ nothing after that point, so do not assume they know the rest. Never end a reply
 """
 
 _SEARCH_INSTRUCTIONS = """\
-- For anything recent, or that you are not sure of, call web_search straight away. The \
-user hears "Let me check" while it runs, so do not announce the search yourself. Then \
-answer from the results and name the source.
+- For anything recent, or that you are not sure of, call web_search. First say a few \
+words so the user knows you are looking it up, such as "Let me check", and make the call \
+in that same turn: the user hears nothing else while the search runs. Then answer from \
+the results and name the source.
 - If the user interrupts while a search is running, the search carries on in the \
 background. Do not search for the same thing again: say it is still coming, and answer \
 whatever else they asked. Only if they say they no longer want it, call cancel_tool_call: \
@@ -183,10 +183,6 @@ _SENTENCE_ENDS = (".", "?", "!", "।", "。", "\uff1f", "\uff01")
 # How often the wait for a quiet moment looks again. Playback can be cut short or added
 # to while it waits, so it does not sleep through to a time worked out in advance.
 _QUIET_CHECK_SECONDS = 0.1
-
-# Spoken by us the moment the model starts a search without having said anything, so the
-# user is not left in silence. Models do this themselves only some of the time.
-_SEARCHING_LINE = "Let me check."
 
 # Ends the stored text of a reply that the user cut off.
 _CUT_MARK = "…"
@@ -741,12 +737,7 @@ class VoiceConversation:
                 if isinstance(event, TextDelta):
                     await reply.say(event.text)
                     self._emit("assistant.delta", event.text)
-                elif isinstance(event, CallStarted):
-                    if event.name == "web_search" and not reply.speech.text:
-                        await reply.say(_SEARCHING_LINE)
-                        self._emit("assistant.delta", _SEARCHING_LINE)
-                else:
-                    assert isinstance(event, RoundDone)
+                elif isinstance(event, RoundDone):
                     calls = [
                         _ToolCall(call.call_id, call.name, call.arguments) for call in event.calls
                     ]

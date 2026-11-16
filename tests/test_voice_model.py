@@ -562,7 +562,7 @@ async def test_a_search_runs_between_two_model_calls_on_an_anthropic_model() -> 
     outputs = await _read_until(conversation, "assistant.done")
     await conversation.close()
 
-    assert outputs[-1].text == "Let me check. Norris won."
+    assert outputs[-1].text == "Norris won."
     first, second = llm.requests
     assert first["messages"] == [
         {"role": "user", "content": [{"type": "text", "text": "who won the race?"}]}
@@ -571,7 +571,6 @@ async def test_a_search_runs_between_two_model_calls_on_an_anthropic_model() -> 
     assert assistant == {
         "role": "assistant",
         "content": [
-            {"type": "text", "text": "Let me check."},
             {
                 "type": "tool_use",
                 "id": "toolu_1",

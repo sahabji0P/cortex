@@ -897,11 +897,11 @@ async def test_only_the_unheard_words_of_the_answer_go_to_the_labeller() -> None
     await _read_until(f.conversation, "tool.call")
     await _read_until(f.conversation, "assistant.delta")
     await _let_audio_out()
-    f.clock.advance(_DELAY + 3 + 2.5)  # all of "Let me check." and two words of the answer
+    f.clock.advance(_DELAY + 2.5)  # two words of the answer
     f.stt.say("stop")
     await _read_until(f.conversation, "assistant.done")
 
-    # Not "Let me check.", which stays in the history, and not the two words heard.
+    # Not the two words heard.
     assert llm.labelled == [
         "the race in Brazil ahead of two other drivers and it was very close indeed."
     ]
@@ -1220,19 +1220,16 @@ async def test_a_search_runs_between_two_model_calls() -> None:
 
     assert search.queries == ["who won the last F1 race"]
     assert VoiceEvent(type="tool.call", text="who won the last F1 race") in outputs
-    # The model went straight to searching, so we say "Let me check." for it. That is
-    # its own utterance, finished before the search runs, and heard before the answer.
-    assert [context.pushed for context in f.tts.contexts] == [["Let me check."], ["Norris won."]]
+    assert [context.pushed for context in f.tts.contexts] == [["Norris won."]]
     assert all(context.finished for context in f.tts.contexts)
-    assert _audio_seconds(outputs) == 5
-    assert outputs[-1].text == "Let me check. Norris won."
+    assert _audio_seconds(outputs) == 2
+    assert outputs[-1].text == "Norris won."
     assert len(f.tts.sessions) == 1
-    # The second call gets what was said, the call and its result.
+    # The second call gets the call and its result.
     sent = llm.requests[1]["input"]
-    assert _shape(sent) == ["user", "assistant", "function_call", "function_call_output"]
-    assert sent[1]["content"] == "Let me check."
-    assert sent[2]["call_id"] == sent[3]["call_id"] == "call_1"
-    assert "Norris won in Las Vegas." in sent[3]["output"]
+    assert _shape(sent) == ["user", "function_call", "function_call_output"]
+    assert sent[1]["call_id"] == sent[2]["call_id"] == "call_1"
+    assert "Norris won in Las Vegas." in sent[2]["output"]
     assert llm.requests[0]["tools"][0]["name"] == "web_search"
     await f.conversation.close()
 
@@ -1296,47 +1293,38 @@ async def test_interrupting_the_answer_keeps_the_search_and_the_words_heard() ->
     await _read_until(f.conversation, "tool.call")
     await _read_until(f.conversation, "assistant.delta")
     await _let_audio_out()
-    # "Let me check." takes three seconds; the answer starts right after it.
-    f.clock.advance(_DELAY + 3 + 1.5)
+    f.clock.advance(_DELAY + 1.5)
     f.stt.say("stop")
     await _read_until(f.conversation, "assistant.done")
 
     sent = llm.requests[2]["input"]
-    assert _shape(sent) == [
-        "user",
-        "assistant",
-        "function_call",
-        "function_call_output",
-        "assistant",
-        "user",
-    ]
-    assert sent[1]["content"] == "Let me check."
-    assert sent[4]["content"] == "Norris…"
+    assert _shape(sent) == ["user", "function_call", "function_call_output", "assistant", "user"]
+    assert sent[3]["content"] == "Norris…"
     await f.conversation.close()
 
 
 async def test_what_was_said_before_a_search_is_kept_whole_once_the_model_has_seen_it() -> None:
     call = _search_call("who won the last F1 race")
     llm = _LLM(
-        [_starts(call), _completed(call)],
+        [_delta("One moment."), _starts(call), _completed(_message("One moment."), call)],
         [_delta("Norris won the race."), _completed(_message("Norris won the race."))],
         [_delta("Sure."), _completed(_message("Sure."))],
     )
     f = _conversation(llm)
 
-    # Everything is generated at once; the user speaks one second into "Let me check."
+    # Everything is generated at once; the user speaks one second into "One moment."
     f.stt.say("who won the last race")
     await _read_until(f.conversation, "assistant.done")
     f.clock.advance(_DELAY + 1.2)
     f.stt.say("stop")
     outputs = await _read_until(f.conversation, "assistant.done")
 
-    # "Let me check." had already gone back to the model with the search result, so it
+    # "One moment." had already gone back to the model with the search result, so it
     # stays as it was. The answer was never heard and is dropped.
-    assert outputs[0] == VoiceEvent(type="interrupt", text="Let me check.")
+    assert outputs[0] == VoiceEvent(type="interrupt", text="One moment.")
     sent = llm.requests[2]["input"]
     assert _shape(sent) == ["user", "assistant", "function_call", "function_call_output", "user"]
-    assert sent[1]["content"] == "Let me check."
+    assert sent[1]["content"] == "One moment."
     await f.conversation.close()
 
 
@@ -1539,19 +1527,16 @@ async def test_speaking_during_a_search_leaves_a_placeholder_and_the_search_runn
 
     f.stt.say("what's the weather")
     await _read_until(f.conversation, "tool.call")
-    await _let_audio_out()
-    f.clock.advance(_DELAY + 3)  # "Let me check." was heard in full
     f.stt.say("hello, what's happening?")
     await _read_until(f.conversation, "assistant.done")
 
     sent = llm.requests[1]["input"]
-    assert _shape(sent) == ["user", "assistant", "function_call", "function_call_output", "user"]
-    assert sent[1]["content"] == "Let me check."
-    assert sent[2]["call_id"] == sent[3]["call_id"] == "call_1"
+    assert _shape(sent) == ["user", "function_call", "function_call_output", "user"]
+    assert sent[1]["call_id"] == sent[2]["call_id"] == "call_1"
     # The placeholder says the result comes later, names the call, and how to stop it.
-    assert "Still running" in sent[3]["output"]
-    assert '"deferred_result_for": "call_1"' in sent[3]["output"]
-    assert "cancel_tool_call" in sent[3]["output"]
+    assert "Still running" in sent[2]["output"]
+    assert '"deferred_result_for": "call_1"' in sent[2]["output"]
+    assert "cancel_tool_call" in sent[2]["output"]
     # The search was not stopped: it is still waiting.
     assert search.queries == ["weather in Pune"]
     assert f.conversation._outliving["call_1"].running.done() is False
@@ -2042,7 +2027,6 @@ async def test_the_model_can_cancel_a_search_that_is_still_running() -> None:
     f.stt.say("never mind, stop that")
     outputs = await _read_until(f.conversation, "assistant.done")
 
-    # Cancelling is not a search, so nobody says "Let me check." for it.
     assert outputs[-1].text == "Stopped."
     assert llm.requests[2]["input"][-1] == {
         "type": "function_call_output",
