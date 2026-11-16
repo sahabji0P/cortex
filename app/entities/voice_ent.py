@@ -146,8 +146,11 @@ _GREETING_NOTE = (
 
 # Added to the history when a turn with no words in it cut a reply off.
 _NOISE_NOTE = (
-    "That interruption was background noise, not the user speaking. Continue your reply "
-    "from exactly where it stopped. Do not repeat anything you had already said."
+    "That interruption was background noise, not the user speaking. Carry on with your "
+    'reply. The user heard it up to the "…" and nothing after that, so the first word '
+    "you say now is the word that comes straight after that point, even if that is the "
+    'middle of a sentence. Begin with that word itself, not with "…". Do not say again '
+    'any of the words before the "…", and do not start the sentence over.'
 )
 
 # Added after a reply that was cut with a lot left unheard.
