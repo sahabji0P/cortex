@@ -134,6 +134,13 @@ _RESULT_REMINDER = (
     "have said they no longer want it."
 )
 
+# Opens the history of a conversation in which the assistant is to speak first. The
+# model's own words never come first: its opening line is an answer to this.
+_GREETING_NOTE = (
+    "The call has just connected and the user has not said anything yet. Greet them in "
+    "one short sentence and ask what you can do for them."
+)
+
 # Added to the history when a turn with no words in it cut a reply off.
 _NOISE_NOTE = (
     "That interruption was background noise, not the user speaking. Continue your reply "
@@ -339,6 +346,7 @@ class VoiceConversation:
         llm: VoiceLLM,
         search: ParallelAdapterClass,
         model: VoiceModelName = "6 Luna",
+        speaks_first: bool = False,
         clock: Clock = time.monotonic,
     ) -> None:
         self._stt = stt
@@ -401,6 +409,10 @@ class VoiceConversation:
         self._standby = Standby(tts, clock)
         self._standby.ready()
         self._listening = asyncio.create_task(self._listen())
+        if speaks_first:
+            # Otherwise nothing is said until the user has spoken.
+            self._history.append({"role": "developer", "content": _GREETING_NOTE})
+            self._producing = asyncio.create_task(self._respond())
 
     async def send_audio(self, pcm: bytes) -> None:
         """Feed mic audio: raw 16-bit mono PCM at 16 kHz."""
@@ -820,15 +832,26 @@ class VoiceEntityClass:
         self._anthropic = anthropic
         self._search = search
 
-    async def open_conversation(self, model: VoiceModelName | None = None) -> VoiceConversation:
+    async def open_conversation(
+        self, model: VoiceModelName | None = None, *, speaks_first: bool = False
+    ) -> VoiceConversation:
         """Start listening. The caller owns the conversation and must `close()` it.
 
-        `model` is the model to hold it with; left out, it is the configured one.
+        `model` is the model to hold it with; left out, it is the configured one. With
+        `speaks_first` the assistant greets the user as soon as the conversation opens;
+        without it, it waits for them to speak.
         """
         model = model or settings.voice_model
         llm: VoiceLLM = self._openai if model == "6 Luna" else self._anthropic
         stt = await self._stt.connect_auto_turns()
-        return VoiceConversation(stt=stt, tts=self._tts, llm=llm, search=self._search, model=model)
+        return VoiceConversation(
+            stt=stt,
+            tts=self._tts,
+            llm=llm,
+            search=self._search,
+            model=model,
+            speaks_first=speaks_first,
+        )
 
 
 _WEB_SEARCH_TOOL = ToolSpec(

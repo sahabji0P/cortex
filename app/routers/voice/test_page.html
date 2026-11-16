@@ -12,6 +12,7 @@
   p.note { color: var(--dim); margin: 0 0 16px; font-size: .9rem; }
   button { font: inherit; padding: 10px 20px; border-radius: 8px; border: 1px solid var(--line); cursor: pointer; }
   #status { margin-left: 12px; color: var(--dim); }
+  label.option { display: block; margin-top: 12px; color: var(--dim); font-size: .9rem; }
   #log { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 12px; }
   #log div { margin: 8px 0; white-space: pre-wrap; }
   .you b { color: #3b82f6; } .cortex b { color: #10b981; }
@@ -22,6 +23,7 @@
 <h1>Cortex voice test</h1>
 <p class="note">A test page, not the product UI. Use headphones if Cortex cuts itself off: that means the mic is hearing the speakers.</p>
 <button id="toggle">Start talking</button><span id="status">idle</span>
+<label class="option"><input type="checkbox" id="first"> Cortex speaks first</label>
 <div id="log"></div>
 
 <script>
@@ -53,6 +55,8 @@ registerProcessor("mic", Mic);`;
 const toggle = document.getElementById("toggle");
 const statusEl = document.getElementById("status");
 const log = document.getElementById("log");
+const first = document.getElementById("first");
+first.checked = new URLSearchParams(location.search).get("first") === "assistant";
 
 let socket = null, mic = null, audio = null;
 let playAt = 0;             // when the next speech chunk should start
@@ -147,7 +151,12 @@ async function start() {
   audio.createMediaStreamSource(stream).connect(worklet);
   mic = stream;
 
-  socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/voice/converse${location.search}`);
+  // The page's own query string is passed on (`?model=`), and the checkbox adds to it.
+  const query = new URLSearchParams(location.search);
+  query.delete("first");
+  if (first.checked) query.set("first", "assistant");
+  const asked = query.size ? `?${query}` : "";
+  socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/voice/converse${asked}`);
   socket.binaryType = "arraybuffer";
   socket.onopen = () => { statusEl.textContent = "listening"; reportedDelay = -1; reportDelay(); };
   socket.onmessage = (message) => typeof message.data === "string" ? onEvent(JSON.parse(message.data)) : play(message.data);

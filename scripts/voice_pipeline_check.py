@@ -151,11 +151,16 @@ class Voice:
 
 
 class Talk:
-    def __init__(self, llm, search):
+    def __init__(self, llm, search, *, speaks_first=False):
         self.llm, self.search = Recorder(llm), Search(search)
         self.stt, self.tts, self.clock = T._STT(), Voice(), T._Clock()
         self.c = VoiceConversation(
-            stt=self.stt, tts=self.tts, llm=self.llm, search=self.search, clock=self.clock
+            stt=self.stt,
+            tts=self.tts,
+            llm=self.llm,
+            search=self.search,
+            speaks_first=speaks_first,
+            clock=self.clock,
         )
         self.events = []
         OPEN.append(self)
@@ -507,6 +512,31 @@ async def scenario_15(llm, par, replies):
     await t.close()
 
 
+async def scenario_16(llm, par, replies):
+    """the assistant speaks first"""
+    t = Talk(llm, par, speaks_first=True)
+    greeting = await t.until("assistant.done")
+    t.clock.advance(600)
+    said_first = "user.final" not in [k for k, _ in t.events]
+    a = await t.ask("What is the capital of France?")
+    b = await t.ask("Who won the most recent Formula One race?")
+    replies += [greeting, a, b]
+    greetings = sum(1 for r in (a, b) if re.search(r"\b(hi|hello|hey)\b", r.lower()))
+    note(
+        "speaks first: greets, then carries on as usual",
+        said_first
+        and 0 < len(greeting.split()) <= 25
+        and "Paris" in a
+        and t.search.count >= 1
+        and len(b) > 20
+        and not greetings
+        and not t.errors(),
+        f"greeting {greeting!r}; then {a!r}; then {b[:80]!r}; searches {t.search.count}; "
+        f"greeted again in {greetings} later replies",
+    )
+    await t.close()
+
+
 def style(replies):
     """Checks across every reply the model produced."""
     marks = [
@@ -548,6 +578,7 @@ SCENARIOS = [
     scenario_13,
     scenario_14,
     scenario_15,
+    scenario_16,
 ]
 
 

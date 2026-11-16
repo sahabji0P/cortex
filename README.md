@@ -15,7 +15,9 @@ mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ─�
                       turn.start  the user began speaking     → cancel the reply in progress
 ```
 
-- **Replying.** When a turn ends, its transcript goes to the model. The model's text is pushed to text-to-speech as it streams, and the audio is forwarded to the client as it is produced.
+- **Replying.** When a turn ends, its transcript goes to the model. The model's text is pushed to text-to-speech as it streams, and the audio is forwarded to the client as it is produced. Nothing is held back on the way: over ten real turns the first audio came 0.11 s after the model's first word, and the model's first word (1.1 s) was nearly all of the wait.
+- **The speech connection is opened early.** One is opened when the call starts and again each time the user starts speaking, so it is there before the reply. Opening takes about 0.12 s and used to run while the model was thinking, so this only matters when opening is slow.
+- **Who speaks first.** The user, unless the client asks otherwise: with `?first=assistant` on the WebSocket URL the assistant greets the user as soon as the call connects.
 - **Interrupting.** When the user starts speaking, the server cancels the model call and the speech stream, then sends an `interrupt` event. The client must stop playback and drop audio it has not played yet: speech is generated several times faster than it plays, so the client always holds some.
 - **Searching.** With `PARALLEL_API_KEY` set, the model gets a `web_search` tool. Without it the tool is not offered and everything else works.
 
@@ -69,11 +71,18 @@ cp .env.example .env                      # then set CARTESIA_API_KEY and the mo
 uv run uvicorn app.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow the mic. This is a one-file test page, not a product UI. Use headphones if Cortex cuts itself off, which means the mic is picking up the speakers.
+Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow the mic. Tick **Cortex speaks first** to be greeted. This is a one-file test page, not a product UI. Use headphones if Cortex cuts itself off, which means the mic is picking up the speakers.
 
 ## The WebSocket contract
 
 `WS /v1/voice/converse`
+
+| Query parameter | Meaning |
+| --- | --- |
+| `model` | the model to talk to: `6 Luna`, `Haiku 5.5` or `Sonnet 5.5`. Left out, the configured one |
+| `first` | who says the first words: `user` (the default) or `assistant`, which makes the assistant greet the user when the socket opens |
+
+A value that is not offered closes the socket with code 1008.
 
 | Direction | Frame | Content |
 | --- | --- | --- |
@@ -120,6 +129,6 @@ To check the model and the pipeline together without any audio, with the real Op
 uv run python -m scripts.voice_pipeline_check
 ```
 
-It fakes speech so each scenario can say how much of a reply was heard, and prints PASS or CHECK for 23 behaviours: context, search, cut replies, late search results, cancelling, noise, merged turns, clearing, another language, service failure and spoken style. A scenario that does not finish is shown as CHECK and the rest still run.
+It fakes speech so each scenario can say how much of a reply was heard, and prints PASS or CHECK for 24 behaviours: context, search, cut replies, late search results, cancelling, noise, merged turns, clearing, another language, service failure and spoken style. A scenario that does not finish is shown as CHECK and the rest still run.
 
 Configuration is read from the environment by `app/config.py`. `.env.example` lists every setting. Never commit credentials.

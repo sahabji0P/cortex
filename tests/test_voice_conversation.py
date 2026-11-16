@@ -257,10 +257,17 @@ class _Fixture(SimpleNamespace):
     clock: _Clock
 
 
-def _conversation(llm: _LLM, search: _Search | None = None) -> _Fixture:
+def _conversation(
+    llm: _LLM, search: _Search | None = None, *, speaks_first: bool = False
+) -> _Fixture:
     stt, tts, clock = _STT(), _TTS(), _Clock()
     conversation = VoiceConversation(
-        stt=stt, tts=tts, llm=llm, search=search or _Search(), clock=clock
+        stt=stt,
+        tts=tts,
+        llm=llm,
+        search=search or _Search(),
+        speaks_first=speaks_first,
+        clock=clock,
     )
     return _Fixture(conversation=conversation, stt=stt, tts=tts, llm=llm, clock=clock)
 
@@ -486,6 +493,104 @@ async def test_closing_mid_reply_releases_both_speech_connections() -> None:
     assert f.stt.closed
     assert f.tts.contexts[0].cancelled
     assert f.tts.sessions[0].closed
+
+
+# ---- who speaks first
+
+
+async def test_by_default_nothing_is_said_until_the_user_has_spoken() -> None:
+    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
+    f = _conversation(llm)
+
+    await asyncio.sleep(0.05)
+    assert llm.requests == []
+
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+    assert _shape(llm.requests[0]["input"]) == ["user"]
+    await f.conversation.close()
+
+
+async def test_asked_to_speak_first_the_assistant_greets_before_the_user_says_anything() -> None:
+    llm = _LLM(
+        [_delta("Hi, "), _delta("how can I help?"), _completed(_message("Hi, how can I help?"))],
+        [_delta("Paris."), _completed(_message("Paris."))],
+    )
+    f = _conversation(llm, speaks_first=True)
+
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    # The greeting answers a note of ours: the model's own words never open the history.
+    assert _shape(llm.requests[0]["input"]) == ["developer"]
+    assert "has not said anything yet" in llm.requests[0]["input"][0]["content"]
+    assert outputs[-1].text == "Hi, how can I help?"
+    assert _audio_seconds(outputs) == 5
+    assert "user.final" not in _types(outputs)
+
+    # The conversation then goes on as any other.
+    f.clock.advance(60)
+    f.stt.say("capital of France?")
+    await _read_until(f.conversation, "assistant.done")
+    sent = llm.requests[1]["input"]
+    assert _shape(sent) == ["developer", "assistant", "user"]
+    assert sent[1]["content"] == "Hi, how can I help?"
+    await f.conversation.close()
+
+
+async def test_a_greeting_the_user_talks_over_keeps_only_the_words_they_heard() -> None:
+    llm = _LLM(
+        [_delta("Hi, "), _delta("how can I help?"), _completed(_message("Hi, how can I help?"))],
+        [_delta("Paris."), _completed(_message("Paris."))],
+    )
+    f = _conversation(llm, speaks_first=True)
+
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(_DELAY + 2.5)  # "Hi, how" was heard
+    f.stt.say("capital of France?")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert _event(outputs, "interrupt").text == "Hi, how…"
+    sent = llm.requests[1]["input"]
+    assert _shape(sent) == ["developer", "assistant", "user"]
+    assert sent[1]["content"] == "Hi, how…"
+    await f.conversation.close()
+
+
+async def test_a_greeting_cut_off_before_a_word_of_it_was_heard_leaves_no_trace() -> None:
+    never = asyncio.Event()
+    llm = _LLM(
+        [_delta("Hi, "), never],
+        [_delta("Paris."), _completed(_message("Paris."))],
+    )
+    f = _conversation(llm, speaks_first=True)
+
+    await _read_until(f.conversation, "assistant.delta")
+    f.stt.say("capital of France?")  # before the greeting's first word has played
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert outputs[-1].text == "Paris."
+    assert _shape(llm.requests[1]["input"]) == ["developer", "user"]
+    await f.conversation.close()
+
+
+async def test_a_greeting_cut_off_by_a_noise_is_picked_up_again() -> None:
+    llm = _LLM(
+        [_delta("Hi, "), _delta("how can I help?"), _completed(_message("Hi, how can I help?"))],
+        [_delta("can I help?"), _completed(_message("can I help?"))],
+    )
+    f = _conversation(llm, speaks_first=True)
+
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(_DELAY + 2.5)
+    f.stt.say("")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert outputs[-1].text == "can I help?"
+    sent = llm.requests[1]["input"]
+    assert _shape(sent) == ["developer", "assistant", "developer"]
+    assert sent[1]["content"] == "Hi, how…"
+    assert "background noise" in sent[2]["content"]
+    await f.conversation.close()
 
 
 # ---- the speech connection is opened ahead of the reply

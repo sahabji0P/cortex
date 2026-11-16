@@ -348,6 +348,28 @@ def test_the_websocket_query_names_a_model_or_none() -> None:
         query.model_validate({"model": "Opus 5.5"})
 
 
+def test_the_websocket_query_says_who_speaks_first_and_defaults_to_the_user() -> None:
+    query = VoiceModels.V1.Input.Query
+    assert query.model_validate({}).first == "user"
+    assert query.model_validate({"first": "assistant"}).first == "assistant"
+    with pytest.raises(ValueError, match="first"):
+        query.model_validate({"first": "nobody"})
+
+
+def test_a_history_that_opens_with_a_note_still_starts_with_the_user_side() -> None:
+    # A conversation in which the assistant speaks first opens with a note of ours.
+    messages = to_messages(
+        [
+            {"role": "developer", "content": "Greet the user."},
+            {"role": "assistant", "content": "Hi, how can I help?"},
+            {"role": "user", "content": "capital of France?"},
+        ]
+    )
+
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+    assert messages[0]["content"] == [{"type": "text", "text": "<note>Greet the user.</note>"}]
+
+
 # ---- a whole conversation on an Anthropic model
 
 

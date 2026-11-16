@@ -15,7 +15,8 @@ async def converse(websocket: WebSocket, service: VoiceServiceRegistry.V1) -> No
     """A spoken conversation over one WebSocket.
 
     Add `?model=6 Luna`, `?model=Haiku 5.5` or `?model=Sonnet 5.5` to choose the model;
-    without it the configured one is used.
+    without it the configured one is used. Add `?first=assistant` to have the assistant
+    greet the user as soon as the socket opens; without it, it waits for the user to speak.
     Send mic audio as binary frames: raw 16-bit mono PCM at 16 kHz, about 100 ms each.
     Optionally send `{"type": "playback", "delay": seconds}` as a text frame to report how
     long your sound device delays audio, so interruptions are judged by what was heard.

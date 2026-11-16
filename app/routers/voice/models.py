@@ -12,6 +12,8 @@ class VoiceModels:
                 """The WebSocket's query string. Anything else in it is ignored."""
 
                 model: VoiceModelName | None = None
+                # Who says the first words. By default the assistant waits for the user.
+                first: Literal["user", "assistant"] = "user"
 
             class Playback(BaseModel):
                 """Client text frame reporting how long its sound device delays audio.
