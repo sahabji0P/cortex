@@ -1,7 +1,5 @@
 import json
-import os
 from collections.abc import AsyncIterator, Iterator
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from claude_agent_sdk import (
@@ -96,7 +94,7 @@ class AgentSDKPipelineEntityClass:
             # Empty list = don't load ~/.claude or project .claude settings, so runs are
             # deterministic regardless of local machine state. None = load all sources.
             setting_sources=[] if not load_claude_settings else None,
-            env=self._vertex_env(),
+            env=self._api_env(),
         )
         try:
             async for message in query(prompt=prompt, options=options):
@@ -197,24 +195,14 @@ class AgentSDKPipelineEntityClass:
         return json.dumps(content, default=str)
 
     @staticmethod
-    def _vertex_env() -> dict[str, str]:
-        """Route the spawned harness at Vertex AI.
+    def _api_env() -> dict[str, str]:
+        """Give the spawned harness the Claude API key.
 
-        The SDK spawns a Claude Code subprocess; these vars are injected into its
-        environment. When no GCP project is configured we inject nothing and the
-        harness falls back to ANTHROPIC_API_KEY from the ambient environment.
+        The SDK spawns a Claude Code subprocess; this is injected into its environment,
+        so it talks to the Claude API directly with the same key as the rest of cortex.
+        With no key configured nothing is injected, and the harness uses whatever
+        credentials its own environment has.
         """
-        env: dict[str, str] = {}
-        if not settings.gcp_project_id:
-            return env
-        env["CLAUDE_CODE_USE_VERTEX"] = "1"
-        env["ANTHROPIC_VERTEX_PROJECT_ID"] = settings.gcp_project_id
-        env["CLOUD_ML_REGION"] = settings.vertex_region
-        credentials = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or (
-            str(Path(settings.gcp_credentials_path).expanduser())
-            if settings.gcp_credentials_path
-            else ""
-        )
-        if credentials:
-            env["GOOGLE_APPLICATION_CREDENTIALS"] = credentials
-        return env
+        if not settings.anthropic_api_key:
+            return {}
+        return {"ANTHROPIC_API_KEY": settings.anthropic_api_key}

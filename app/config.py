@@ -8,7 +8,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
-        # A local .env may still carry keys for providers that were removed.
+        # A local .env may still carry settings for things that were removed.
         extra="ignore",
     )
 
@@ -28,13 +28,6 @@ class Settings(BaseSettings):
     environment: Literal["local", "staging", "production"] = "local"
     debug: bool = True
 
-    # Google Cloud / Vertex AI, used only by the Claude Agent SDK pipeline.
-    gcp_project_id: str = ""
-    vertex_region: str = "global"  # "global" (recommended), "us"/"eu", or a specific region
-    # Optional path to a GCP service-account key JSON, handed to the spawned harness.
-    # Leave empty to fall back to gcloud ADC.
-    gcp_credentials_path: str = ""
-
     # The model a voice conversation is held with unless the client asks for another:
     # "6 Luna", "6.1 Terra" or "6.1 Sol" (OpenAI); "Haiku 5.5", "Sonnet 5.5" or "Opus 5.5"
     # (Anthropic). Its provider needs a key.
@@ -45,7 +38,8 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = ""
 
-    # Anthropic
+    # Anthropic: a key for the Claude API itself (platform.claude.com), not a cloud
+    # provider's.
     anthropic_api_key: str = ""
 
     # Cartesia (speech-to-text and text-to-speech)
