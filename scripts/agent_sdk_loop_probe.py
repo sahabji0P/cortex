@@ -13,8 +13,8 @@ Run from anywhere (cortex's venv via uv):
     uv run python scripts/agent_sdk_loop_probe.py "Fix the typo in README.md" \
         --tools Read,Edit,Glob --permission-mode acceptEdits --max-turns 5
 
-Auth mirrors cortex: Vertex via GCP_PROJECT_ID/GCP_CREDENTIALS_PATH from .env,
-else ANTHROPIC_API_KEY from the ambient environment.
+Auth mirrors cortex: ANTHROPIC_API_KEY from .env, else whatever credentials the
+ambient environment has.
 """
 
 import argparse
@@ -43,7 +43,6 @@ from claude_agent_sdk import (  # noqa: E402
     query,
 )
 
-from app.config import settings  # noqa: E402
 from app.entities.pipeline_agent_sdk import AgentSDKPipelineEntityClass  # noqa: E402
 
 _TRUNCATE_AT = 400
@@ -55,15 +54,6 @@ def _trunc(text: str, limit: int = _TRUNCATE_AT) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return f"{collapsed[:limit]}… (+{len(collapsed) - limit} chars)"
-
-
-def _apply_gcp_credentials() -> None:
-    """Mirror main.py's lifespan hook so Vertex auth works outside uvicorn."""
-    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or not settings.gcp_credentials_path:
-        return
-    path = Path(settings.gcp_credentials_path).expanduser()
-    if path.is_file():
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(path)
 
 
 async def _pre_tool_hook(input_data: dict, tool_use_id: str | None, context: HookContext) -> dict:
@@ -141,13 +131,10 @@ async def main() -> tuple[str, str | None]:
     parser.add_argument(
         "--model",
         default=None,
-        help="model id for the harness (e.g. claude-opus-4-8 on Vertex); "
-        "default: whatever the deployment provides",
+        help="model id for the harness (e.g. claude-opus-5-5); default: the harness's own",
     )
     parser.add_argument("--cwd", default=str(REPO_ROOT), help="agent working directory")
     args = parser.parse_args()
-
-    _apply_gcp_credentials()
 
     options = ClaudeAgentOptions(
         allowed_tools=[tool.strip() for tool in args.tools.split(",")],
@@ -156,7 +143,7 @@ async def main() -> tuple[str, str | None]:
         model=args.model,
         max_turns=args.max_turns,
         setting_sources=[],  # ignore ~/.claude and project settings: deterministic runs
-        env=AgentSDKPipelineEntityClass._vertex_env(),
+        env=AgentSDKPipelineEntityClass._api_env(),
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[_pre_tool_hook])]},
     )
 

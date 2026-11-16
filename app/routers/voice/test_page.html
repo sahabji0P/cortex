@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cortex voice test</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: light dark; --line: #8884; --dim: #888; }
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 680px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  p.note { color: var(--dim); margin: 0 0 16px; font-size: .9rem; }
+  button { font: inherit; padding: 10px 20px; border-radius: 8px; border: 1px solid var(--line); cursor: pointer; }
+  #status { margin-left: 12px; color: var(--dim); }
+  .option { display: block; margin-top: 12px; color: var(--dim); font-size: .9rem; }
+  .option select { font: inherit; padding: 4px 8px; margin: 0 16px 0 6px; border-radius: 6px; border: 1px solid var(--line); }
+  #log { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 12px; }
+  #log div { margin: 8px 0; white-space: pre-wrap; }
+  .you b { color: #3b82f6; } .cortex b { color: #10b981; }
+  .meta { color: var(--dim); font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>Cortex voice test</h1>
+<p class="note">A test page, not the product UI. Use headphones if Cortex cuts itself off: that means the mic is hearing the speakers.</p>
+<button id="toggle">Start talking</button><span id="status">idle</span>
+<div class="option">
+  <label>Provider <select id="provider"></select></label>
+  <label>Model <select id="model"></select></label>
+</div>
+<label class="option"><input type="checkbox" id="first"> Cortex speaks first</label>
+<div id="log"></div>
+
+<script>
+const MIC_RATE = 16000;     // what the server expects from us
+const SPEECH_RATE = 24000;  // what the server sends back
+
+// Runs on the audio thread: resamples the mic to 16 kHz and posts ~100 ms PCM16 frames.
+const MIC_WORKLET = `
+class Mic extends AudioWorkletProcessor {
+  constructor() { super(); this.step = sampleRate / ${MIC_RATE}; this.at = 0; this.frame = []; }
+  process(inputs) {
+    const input = inputs[0][0];
+    if (!input) return true;
+    for (; this.at < input.length; this.at += this.step) {
+      const sample = Math.max(-1, Math.min(1, input[Math.floor(this.at)]));
+      this.frame.push(sample * 32767);
+    }
+    this.at -= input.length;
+    if (this.frame.length >= ${MIC_RATE / 10}) {
+      const pcm = Int16Array.from(this.frame);
+      this.frame = [];
+      this.port.postMessage(pcm.buffer, [pcm.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor("mic", Mic);`;
+
+const toggle = document.getElementById("toggle");
+const statusEl = document.getElementById("status");
+const log = document.getElementById("log");
+const first = document.getElementById("first");
+first.checked = new URLSearchParams(location.search).get("first") === "assistant";
+
+// The models come from the server, so this page never lists one it cannot open.
+const providerEl = document.getElementById("provider");
+const modelEl = document.getElementById("model");
+let models = [];
+
+function showModels(chosen) {
+  modelEl.replaceChildren(...models.filter((m) => m.provider === providerEl.value).map((m) => {
+    const option = new Option(m.available ? m.label : `${m.label} (no key set)`, m.name);
+    option.disabled = !m.available;
+    return option;
+  }));
+  const pick = models.find((m) => m.name === chosen && m.provider === providerEl.value && m.available)
+    ?? models.find((m) => m.provider === providerEl.value && m.available);
+  if (pick) modelEl.value = pick.name; else modelEl.selectedIndex = -1;
+}
+
+async function loadModels() {
+  const all = await (await fetch("/v1/voice/models")).json();
+  // A model named in the page's address is offered even if it is not normally listed.
+  const asked = new URLSearchParams(location.search).get("model");
+  models = all.filter((m) => m.listed || m.name === asked);
+  const start = models.find((m) => m.name === asked) ?? models.find((m) => m.default) ?? models[0];
+  providerEl.replaceChildren(...[...new Set(models.map((m) => m.provider))].map((p) => new Option(p, p)));
+  providerEl.value = start.provider;
+  showModels(start.name);
+}
+providerEl.onchange = () => showModels();
+loadModels().catch((error) => { statusEl.textContent = `could not load the models: ${error.message}`; });
+
+let socket = null, mic = null, audio = null;
+let playAt = 0;             // when the next speech chunk should start
+let playing = new Set();    // speech chunks scheduled or playing
+let leftover = null;        // a stray byte when a chunk splits a 16-bit sample
+let partial = null, reply = null;
+let lastReply = null;     // the latest reply's line, kept so an interrupt can trim it
+
+function line(cls, label) {
+  const el = document.createElement("div");
+  el.className = cls;
+  el.innerHTML = label ? `<b>${label}</b> <span></span>` : "<span></span>";
+  log.append(el);
+  el.scrollIntoView({ block: "end" });
+  return el.querySelector("span");
+}
+
+function play(buffer) {
+  let bytes = new Uint8Array(buffer);
+  if (leftover) { const joined = new Uint8Array(bytes.length + 1); joined[0] = leftover[0]; joined.set(bytes, 1); bytes = joined; leftover = null; }
+  if (bytes.length % 2) { leftover = bytes.slice(-1); bytes = bytes.slice(0, -1); }
+  if (!bytes.length) return;
+  const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
+  const chunk = audio.createBuffer(1, pcm.length, SPEECH_RATE);
+  const samples = chunk.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 32768;
+  const source = audio.createBufferSource();
+  source.buffer = chunk;
+  source.connect(audio.destination);
+  playAt = Math.max(playAt, audio.currentTime + 0.05);
+  source.start(playAt);
+  playAt += chunk.duration;
+  reportDelay();  // the browser only knows the device's real delay once audio is flowing
+  playing.add(source);
+  source.onended = () => playing.delete(source);
+}
+
+// Tell the server how long this device holds audio before it is heard (speakers a little,
+// Bluetooth a lot), so that it does not count words still on their way to our ears.
+let reportedDelay = -1;
+function reportDelay() {
+  const delay = (audio?.outputLatency || 0) + (audio?.baseLatency || 0);
+  if (socket?.readyState !== WebSocket.OPEN || Math.abs(delay - reportedDelay) < 0.01) return;
+  reportedDelay = delay;
+  socket.send(JSON.stringify({ type: "playback", delay }));
+}
+
+// The whole of "interruption" on this side: silence everything queued, right now.
+function stopSpeaking() {
+  for (const source of playing) { source.onended = null; source.stop(); }
+  playing.clear();
+  playAt = 0;
+  leftover = null;
+}
+
+function onEvent(event) {
+  if (event.type === "user.partial") {
+    partial ??= line("you", "You");
+    partial.textContent = event.text;
+  } else if (event.type === "user.final") {
+    (partial ?? line("you", "You")).textContent = event.text;
+    partial = null; reply = null;
+  } else if (event.type === "assistant.delta") {
+    reply ??= lastReply = line("cortex", "Cortex");
+    reply.textContent += event.text;
+  } else if (event.type === "assistant.done") {
+    reply = null;
+  } else if (event.type === "tool.call") {
+    line("meta").textContent = `searching the web: ${event.text}`;
+  } else if (event.type === "interrupt") {
+    // `text` is what the server worked out we had played of the reply, which is all
+    // the model will remember of it. Show that instead of everything it generated.
+    if (event.text && lastReply) {
+      lastReply.textContent = event.text;
+      line("meta").textContent = "interrupted: the rest was not heard";
+    }
+    stopSpeaking();
+    reply = lastReply = null;
+  } else if (event.type === "error") {
+    line("meta").textContent = `error: ${event.text}`;
+  }
+}
+
+async function start() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    // Echo cancellation keeps the speakers from being heard as the user talking.
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+  });
+  audio = new AudioContext();
+  await audio.audioWorklet.addModule(URL.createObjectURL(new Blob([MIC_WORKLET], { type: "text/javascript" })));
+  const worklet = new AudioWorkletNode(audio, "mic", { numberOfInputs: 1, numberOfOutputs: 0 });
+  audio.createMediaStreamSource(stream).connect(worklet);
+  mic = stream;
+
+  // The page's own query string is passed on (`?model=`), and the checkbox adds to it.
+  const query = new URLSearchParams(location.search);
+  query.delete("first");
+  if (first.checked) query.set("first", "assistant");
+  if (modelEl.value) query.set("model", modelEl.value);
+  const asked = query.size ? `?${query}` : "";
+  socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/voice/converse${asked}`);
+  socket.binaryType = "arraybuffer";
+  socket.onopen = () => { statusEl.textContent = "listening"; reportedDelay = -1; reportDelay(); };
+  socket.onmessage = (message) => typeof message.data === "string" ? onEvent(JSON.parse(message.data)) : play(message.data);
+  // A refused model or setting closes the socket with the reason in words.
+  socket.onclose = (event) => { if (event.reason) line("meta").textContent = `closed: ${event.reason}`; stop(); };
+  worklet.port.onmessage = (message) => { if (socket?.readyState === WebSocket.OPEN) socket.send(message.data); };
+  toggle.textContent = "Stop";
+  statusEl.textContent = "connecting";
+  providerEl.disabled = modelEl.disabled = first.disabled = true;
+  if (modelEl.value) line("meta").textContent = `talking to ${modelEl.selectedOptions[0].text}`;
+}
+
+function stop() {
+  stopSpeaking();
+  socket?.close(); socket = null;
+  mic?.getTracks().forEach((track) => track.stop()); mic = null;
+  audio?.close(); audio = null;
+  partial = reply = null;
+  toggle.textContent = "Start talking";
+  statusEl.textContent = "idle";
+  providerEl.disabled = modelEl.disabled = first.disabled = false;
+}
+
+toggle.onclick = () => (socket ? stop() : start().catch((error) => { line("meta").textContent = `error: ${error.message}`; stop(); }));
+</script>
+</body>
+</html>

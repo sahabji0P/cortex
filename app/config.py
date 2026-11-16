@@ -8,6 +8,8 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        # A local .env may still carry settings for things that were removed.
+        extra="ignore",
     )
 
     # MongoDB
@@ -26,23 +28,25 @@ class Settings(BaseSettings):
     environment: Literal["local", "staging", "production"] = "local"
     debug: bool = True
 
-    # Google Cloud / Vertex AI (auth via GCP ADC — `gcloud auth application-default login`)
-    # Anthropic and Gemini generateContent run through Vertex with this project/region.
-    gcp_project_id: str = ""
-    vertex_region: str = "global"  # "global" (recommended), "us"/"eu", or a specific region
-    # Optional path to a GCP service-account key JSON. When set, it's exported as
-    # GOOGLE_APPLICATION_CREDENTIALS at startup so the Vertex clients authenticate
-    # via this key. Leave empty to fall back to gcloud ADC.
-    gcp_credentials_path: str = ""
-
-    # Gemini Developer API (used by the Interactions endpoint).
-    gemini_api_key: str = ""
+    # The model a voice conversation is held with unless the client asks for another:
+    # "6 Luna", "6.1 Terra" or "6.1 Sol" (OpenAI); "Haiku 5.5", "Sonnet 5.5" or "Opus 5.5"
+    # (Anthropic). Its provider needs a key.
+    voice_model: Literal[
+        "6 Luna", "6.1 Terra", "6.1 Sol", "Haiku 5.5", "Sonnet 5.5", "Opus 5.5"
+    ] = "6 Luna"
 
     # OpenAI
     openai_api_key: str = ""
 
-    # Cartesia
+    # Anthropic: a key for the Claude API itself (platform.claude.com), not a cloud
+    # provider's.
+    anthropic_api_key: str = ""
+
+    # Cartesia (speech-to-text and text-to-speech)
     cartesia_api_key: str = ""
+
+    # Parallel (web search tool for the voice pipeline). Empty = the tool is not offered.
+    parallel_api_key: str = ""
 
 
 settings = Settings()

@@ -1,11 +1,17 @@
-from collections.abc import Iterable
+import inspect
+import json
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping
 from types import MappingProxyType
 from typing import Literal, cast
 
-from openai import AsyncOpenAI, AsyncStream, Omit, omit
+from openai import AsyncOpenAI, AsyncStream, Omit, omit, pydantic_function_tool
+from openai.types.chat import ChatCompletionFunctionToolParam
 from openai.types.responses import (
     EasyInputMessageParam,
+    FunctionToolParam,
+    ParsedResponse,
     ResponseIncludable,
+    ResponseInputItemParam,
     ResponseInputParam,
     ResponseStreamEvent,
     ResponseTextConfigParam,
@@ -17,24 +23,40 @@ from openai.types.responses import (
 )
 
 # Re-exported (see __all__) so the pipeline can isinstance-narrow web-search citations.
+from openai.types.responses.response_input_param import FunctionCallOutput
 from openai.types.responses.response_output_text import AnnotationURLCitation
+from openai.types.responses.tool_param import ParseableToolParam
 from openai.types.shared_params import Reasoning as OpenAIThinking
+from pydantic import BaseModel
 
 from app.config import settings
 
-__all__ = ["AnnotationURLCitation", "OpenAIAdapterClass", "OpenAIThinking"]
+__all__ = [
+    "AnnotationURLCitation",
+    "FunctionCallOutput",
+    "OpenAIAdapterClass",
+    "OpenAIThinking",
+    "ResponseInputItemParam",
+]
+
+type ToolHandler = Callable[..., object | Awaitable[object]]
 
 
 class _Types:
     """Group private OpenAI adapter model types."""
 
-    type AvailableModels = Literal["5.4", "5.4 Chat", "5.4 Mini", "Luna"]
+    type AvailableModels = Literal[
+        "5.4", "5.4 Chat", "5.4 Mini", "Luna", "6 Luna", "6.1 Terra", "6.1 Sol"
+    ]
     model_map = MappingProxyType[AvailableModels, str](
         {
             "5.4": "gpt-5.4",
             "5.4 Chat": "gpt-5.4-chat-latest",
             "5.4 Mini": "gpt-5.4-mini",
             "Luna": "gpt-5.6-luna",
+            "6 Luna": "gpt-6-luna",
+            "6.1 Terra": "gpt-6.1-terra",
+            "6.1 Sol": "gpt-6.1-sol",
         }
     )
 
@@ -53,7 +75,41 @@ class OpenAIAdapterClass:
         return cast("ResponseInputParam", result)
 
     class Tools:
-        """Server-side tool builders for the Responses API."""
+        """Tool builders for the Responses API."""
+
+        @staticmethod
+        def function(
+            *,
+            name: str,
+            description: str,
+            parameters: dict[str, object],
+        ) -> FunctionToolParam:
+            """Build a strict function tool the caller runs itself.
+
+            The model's call arrives as a `function_call` output item; send the result
+            back as a `function_call_output` input item with the same `call_id`.
+            """
+            return {
+                "type": "function",
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+                "strict": True,
+            }
+
+        @staticmethod
+        def pydantic_function(
+            arguments_model: type[BaseModel],
+            *,
+            name: str | None = None,
+            description: str | None = None,
+        ) -> ChatCompletionFunctionToolParam:
+            """Build a strict function tool whose arguments parse into a Pydantic model."""
+            return pydantic_function_tool(
+                arguments_model,
+                name=name,
+                description=description,
+            )
 
         @staticmethod
         def web_search(
@@ -133,9 +189,14 @@ class OpenAIAdapterClass:
         tool_choice: response_create_params.ToolChoice | Omit = omit,
         tools: Iterable[ToolParam] | Omit = omit,
         reasoning: OpenAIThinking | None | Omit = omit,
-    ) -> AsyncStream[ResponseStreamEvent]:
-        """Create a streamed OpenAI Responses API request and return raw SDK events."""
-        return await self.client.responses.create(
+    ) -> AsyncGenerator[ResponseStreamEvent]:
+        """Create a streamed OpenAI Responses API request and return its raw SDK events.
+
+        To stop the request early, close what is returned (`contextlib.aclosing`). That
+        closes the connection there and then. A stream that is only dropped stays open,
+        with the model still writing, until it is garbage collected.
+        """
+        stream = await self.client.responses.create(
             model=_Types.model_map[model],
             input=input,
             include=include,
@@ -154,6 +215,145 @@ class OpenAIAdapterClass:
             tools=tools,
             reasoning=reasoning,
         )
+        return self._events(stream)
+
+    @staticmethod
+    async def _events(
+        stream: AsyncStream[ResponseStreamEvent],
+    ) -> AsyncGenerator[ResponseStreamEvent]:
+        async with stream:
+            async for event in stream:
+                yield event
+
+    async def text_response(
+        self,
+        *,
+        model: _Types.AvailableModels,
+        input: str | ResponseInputParam,
+        instructions: str | None | Omit = omit,
+        max_output_tokens: int | None | Omit = omit,
+        reasoning: OpenAIThinking | None | Omit = omit,
+    ) -> str:
+        """Create one stateless, non-streamed Responses API request and return its text."""
+        response = await self.client.responses.create(
+            model=_Types.model_map[model],
+            input=input,
+            instructions=instructions,
+            max_output_tokens=max_output_tokens,
+            reasoning=reasoning,
+            store=False,
+        )
+        return response.output_text
+
+    async def structured_response[OutputModelT: BaseModel](
+        self,
+        *,
+        model: _Types.AvailableModels,
+        input: str | ResponseInputParam,
+        output_model: type[OutputModelT],
+        tools: Iterable[ParseableToolParam] = (),
+        tool_handlers: Mapping[str, ToolHandler] | None = None,
+        instructions: str | None | Omit = omit,
+        initial_tool_choice: response_create_params.ToolChoice | Omit = omit,
+        parallel_tool_calls: bool | None | Omit = omit,
+        reasoning: OpenAIThinking | None | Omit = omit,
+        max_tool_rounds: int = 8,
+    ) -> ParsedResponse[OutputModelT]:
+        """Run custom tools until the model returns the requested Pydantic output.
+
+        Built-in tools execute on OpenAI's servers. Custom function calls are dispatched
+        through ``tool_handlers`` and their outputs are sent back to the model. The entire
+        exchange is stateless (``store=False``), so every model output item—including any
+        encrypted reasoning item—is preserved in the next request.
+
+        ``initial_tool_choice`` applies only to the first request. This lets an experiment
+        force a tool call once and then return to automatic selection for the final answer.
+        """
+        if max_tool_rounds < 1:
+            raise ValueError("max_tool_rounds must be at least 1")
+
+        input_items: list[ResponseInputItemParam]
+        if isinstance(input, str):
+            input_items = [{"role": "user", "content": input}]
+        else:
+            input_items = list(input)
+
+        selected_tools = tuple(tools)
+        handlers = tool_handlers or {}
+
+        for round_index in range(max_tool_rounds + 1):
+            response = await self.client.responses.parse(
+                model=_Types.model_map[model],
+                input=cast("ResponseInputParam", input_items),
+                instructions=instructions,
+                tools=selected_tools,
+                text_format=output_model,
+                tool_choice=initial_tool_choice if round_index == 0 else omit,
+                parallel_tool_calls=parallel_tool_calls,
+                include=["reasoning.encrypted_content"],
+                reasoning=reasoning,
+                store=False,
+            )
+
+            function_calls = [item for item in response.output if item.type == "function_call"]
+            if not function_calls:
+                if response.output_parsed is not None:
+                    return response
+                raise RuntimeError(
+                    "OpenAI completed without a function call or parsed structured output "
+                    f"(status={response.status})"
+                )
+
+            if round_index == max_tool_rounds:
+                raise RuntimeError(f"OpenAI exceeded {max_tool_rounds} custom tool rounds")
+
+            # Reasoning-model tool loops must replay every output item, not just the call.
+            for item in response.output:
+                input_item = item.to_dict()
+                # responses.parse() adds this SDK-only convenience field. It is not part
+                # of the API input schema and must not be replayed to /v1/responses.
+                input_item.pop("parsed_arguments", None)
+                input_items.append(cast("ResponseInputItemParam", input_item))
+
+            for call in function_calls:
+                handler = handlers.get(call.name)
+                if handler is None:
+                    raise KeyError(f"No tool handler registered for {call.name!r}")
+
+                arguments = call.parsed_arguments
+                if arguments is None:
+                    arguments = json.loads(call.arguments)
+
+                try:
+                    tool_result = handler(arguments)
+                    if inspect.isawaitable(tool_result):
+                        tool_result = await cast("Awaitable[object]", tool_result)
+                except Exception as exc:
+                    raise RuntimeError(f"Tool {call.name!r} failed") from exc
+
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call.call_id,
+                        "output": self._serialize_tool_output(tool_result),
+                    }
+                )
+
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _serialize_tool_output(value: object) -> str:
+        """Serialize local tool results into the Responses function-output contract."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, BaseModel):
+            return value.model_dump_json()
+        return json.dumps(value, default=str)
+
+    @property
+    def configured(self) -> bool:
+        """Whether an API key was provided."""
+        return self._client is not None
 
     @property
     def client(self) -> AsyncOpenAI:

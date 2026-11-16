@@ -1,18 +1,10 @@
 from fastapi import APIRouter, WebSocket
-from fastapi.responses import StreamingResponse
 
 from app.adapters.cartesia_stt_adp import STTAutoFinalizeModel, STTEncoding
 from app.routers.cortex.models import CortexModels
 from app.routers.cortex.service import CortexServiceRegistry
 
 router = APIRouter(prefix="/v1/cortex", tags=["cortex"])
-
-# Disable proxy/client buffering so chunks reach the client as they're produced.
-_SSE_HEADERS = {
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-}
 
 
 @router.post("/projects", status_code=201)
@@ -77,25 +69,6 @@ async def get_session_turns(
     service: CortexServiceRegistry.V1,
 ) -> list[CortexModels.V1.Output.SessionTurn]:
     return await service.get_session_turns(session_id)
-
-
-@router.post("/listen")
-async def listen(
-    payload: CortexModels.V1.Input.Listen,
-    service: CortexServiceRegistry.V1,
-) -> StreamingResponse:
-    """Stream model output as Server-Sent Events.
-
-    Each event: `event: <delta|info|source|image|done|error>` with a JSON `StreamChunk`
-    data line, plus periodic `: heartbeat` keep-alive frames during idle gaps.
-    Consume with a fetch/stream reader (not EventSource — this is POST).
-    """
-    session_id = await service.resolve_listen_session(payload)
-    return StreamingResponse(
-        service.stream(payload, session_id=session_id),
-        media_type="text/event-stream",
-        headers={**_SSE_HEADERS, "X-Session-ID": session_id},
-    )
 
 
 @router.websocket("/transcribe")
