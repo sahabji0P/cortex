@@ -31,16 +31,18 @@ A conversation is held with one model from start to end, chosen when it opens:
 
 `VOICE_MODEL` sets the model for every conversation, and a client can ask for another with `?model=` on the WebSocket URL. The test page passes its own query string on, so <http://127.0.0.1:8000/v1/voice/test?model=Haiku%205.5> talks to Haiku.
 
-Everything below is the same for either provider. The conversation keeps one history, and only the last step differs: OpenAI is sent it as it stands, and for Anthropic it is translated into alternating user and assistant messages on every request. Four things do differ on an Anthropic model:
+Everything below is the same for either provider. The conversation keeps one history, and only the last step differs: OpenAI is sent it as it stands, and for Anthropic it is translated into alternating user and assistant messages on every request. These things differ on an Anthropic model:
 
-- **Thinking is fixed for the conversation.** It is off on Haiku 5.5, and on Sonnet 5.5 it is set to the nearest that model allows. The switch to a little thinking while a search is pending (rule 2 below) is not made: on this provider every switch makes the whole conversation be read again, and the gain was measured on the OpenAI model only.
+- **Thinking is fixed for the conversation.** It is off on Haiku 5.5, and on Sonnet 5.5 it is set to the nearest that model allows. The switch to a little thinking while a search is pending (rule 2 below) is not made: on this provider each switch makes the whole conversation be read again once, and the gain was measured on the OpenAI model only. So nothing stops an Anthropic model from repeating a search that is still running; how often it does is not known.
 - **Notes from the server travel in a user message**, wrapped in `<note>` tags that the instructions explain. The Messages API has no place for them where they fall, which is after a reply of the model's own.
 - **Caching is asked for on every request.** Conversations shorter than the provider's minimum are not cached at all.
 - **Forbidding a search in the last round costs a full read** of the conversation for that one request.
 
 Opus 5.5 and Fable 5.2 are not offered: their thinking cannot be turned off, which is a wait before every reply.
 
-The Anthropic side has been run against the real SDK with a fake server, and every scenario in the test suite has been replayed through it. It has not yet been run against the live API, so how it sounds and how fast it is are not known.
+Two smaller differences: the short note on an unheard remainder is always worded by Haiku 5.5, and two searches made in one round are sent back to an Anthropic model as two rounds, one after the other.
+
+The Anthropic side has been checked for the shape of its requests only: every model request the test suite's scenarios make was passed through the translation by a throwaway script (not in the repository) and was a valid alternating conversation. It has not been run against the live API, so whether every request is accepted, how it sounds and how fast it is are not known.
 
 ### What the model remembers
 
