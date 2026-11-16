@@ -17,13 +17,20 @@ class VoiceServiceV1Class:
     async def converse(self, websocket: WebSocket) -> None:
         """Bridge a client WebSocket to one voice conversation.
 
-        Uplink: client binary frames are mic audio, and a JSON text frame can report the
-        client's playback delay. Downlink: binary frames are speech audio, text frames are
-        JSON `VoiceEvent`s. Ends when either side drops.
+        The query string may name the model to talk to (`?model=Haiku 5.5`); without it
+        the configured one is used. Uplink: client binary frames are mic audio, and a
+        JSON text frame can report the client's playback delay. Downlink: binary frames
+        are speech audio, text frames are JSON `VoiceEvent`s. Ends when either side drops.
         """
         await websocket.accept()
         try:
-            conversation = await self.voice.open_conversation()
+            asked = VoiceModels.V1.Input.Query.model_validate(dict(websocket.query_params))
+        except ValidationError:
+            # 1008: policy violation — the client asked for a model that is not offered.
+            await websocket.close(code=1008, reason="unknown model")
+            return
+        try:
+            conversation = await self.voice.open_conversation(asked.model)
         except Exception:
             # 1011: internal error — a speech service is unreachable or not configured.
             with contextlib.suppress(Exception):

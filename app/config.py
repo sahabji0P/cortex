@@ -35,10 +35,14 @@ class Settings(BaseSettings):
     # Leave empty to fall back to gcloud ADC.
     gcp_credentials_path: str = ""
 
-    # OpenAI (the model the voice pipeline uses)
+    # The model a voice conversation is held with unless the client asks for another:
+    # "6 Luna" (OpenAI), "Haiku 5.5" or "Sonnet 5.5" (Anthropic). Its provider needs a key.
+    voice_model: Literal["6 Luna", "Haiku 5.5", "Sonnet 5.5"] = "6 Luna"
+
+    # OpenAI
     openai_api_key: str = ""
 
-    # Anthropic (the Claude Messages API adapter; nothing calls it yet)
+    # Anthropic
     anthropic_api_key: str = ""
 
     # Cartesia (speech-to-text and text-to-speech)

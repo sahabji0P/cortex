@@ -2,7 +2,8 @@
 Voice entity: a spoken conversation as a cascade of three services.
 
     mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ──▶ speech audio
-                  (Cartesia)         (OpenAI)   (Cartesia)
+                  (Cartesia)         (OpenAI or (Cartesia)
+                                      Anthropic)
 
 One `VoiceConversation` per client. The speech-to-text service also detects turns:
 
@@ -11,7 +12,9 @@ One `VoiceConversation` per client. The speech-to-text service also detects turn
 - `turn.start` the user began speaking. Whatever reply is in progress is cancelled (model
                and speech), and the client is told to drop audio it has not played yet.
 
-The model may call `web_search` (Parallel) before it answers.
+The model may call `web_search` (Parallel) before it answers. Which model it is is chosen
+when the conversation opens, and everything here is the same for either provider: what
+differs between them is in `voice_model`.
 
 The history is what the model is sent on every call, and it holds what the user heard,
 not what was generated. Speech is generated much faster than it plays, so a reply only
@@ -53,14 +56,23 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from app.adapters.anthropic_adp import AnthropicAdapterClass
 from app.adapters.cartesia_stt_adp import CartesiaSTTAdapterClass, CartesiaSTTSession
 from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
-from app.adapters.openai_adp import (
-    FunctionCallOutput,
-    OpenAIAdapterClass,
-    ResponseInputItemParam,
-)
+from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass, SearchResult
+from app.config import settings
+from app.entities.voice_model import (
+    CallResult,
+    CallStarted,
+    Item,
+    RoundDone,
+    TextDelta,
+    ToolSpec,
+    VoiceLLM,
+    VoiceModelName,
+    voice_model,
+)
 from app.entities.voice_speech import Clock, Playback, Speech, Utterance
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
@@ -206,9 +218,9 @@ class _ToolCall:
     seen: bool = False
     # The result item most recently built by `items()`: the one in the history, once
     # this call is there.
-    result_item: FunctionCallOutput | None = None
+    result_item: CallResult | None = None
 
-    def items(self) -> list[ResponseInputItemParam]:
+    def items(self) -> list[Item]:
         self.result_item = {
             "type": "function_call_output",
             "call_id": self.call_id,
@@ -225,7 +237,7 @@ class _ToolCall:
         ]
 
     @property
-    def search_result(self) -> FunctionCallOutput | None:
+    def search_result(self) -> CallResult | None:
         """The item holding this call's search result, if it has a real one."""
         real = self.name == "web_search" and not self.placeholder
         return self.result_item if real else None
@@ -235,7 +247,7 @@ class _ToolCall:
 class _Heard:
     """A reply as the user heard it."""
 
-    items: list[ResponseInputItemParam]  # what joins the history
+    items: list[Item]  # what joins the history
     spoke: bool  # whether the user heard any of the reply's speech
     kept: str | None  # the text kept of a reply that was cut short; None if heard in full
     unheard: str  # the text that was dropped
@@ -266,10 +278,10 @@ class _Reply:
     def calls(self) -> list[_ToolCall]:
         return [part for part in self._parts if isinstance(part, _ToolCall)]
 
-    def send_back(self) -> list[ResponseInputItemParam]:
+    def send_back(self) -> list[Item]:
         """Everything produced so far, for this reply's own next model call."""
         self._sent_back = len(self._parts)
-        items: list[ResponseInputItemParam] = []
+        items: list[Item] = []
         for part in self._parts:
             if isinstance(part, _ToolCall):
                 part.seen = True
@@ -289,7 +301,7 @@ class _Reply:
           Shortening it now would change something the model has been shown, and with
           it everything a prompt cache holds from there on.
         """
-        items: list[ResponseInputItemParam] = []
+        items: list[Item] = []
         spoken: list[str] = []
         unheard: list[str] = []
         cut = False
@@ -324,19 +336,19 @@ class VoiceConversation:
         *,
         stt: CartesiaSTTSession,
         tts: CartesiaTTSAdapterClass,
-        llm: OpenAIAdapterClass,
+        llm: VoiceLLM,
         search: ParallelAdapterClass,
+        model: VoiceModelName = "6 Luna",
         clock: Clock = time.monotonic,
     ) -> None:
         self._stt = stt
         self._tts = tts
-        self._llm = llm
         self._search = search
         self._clock = clock
         self._playback = Playback(clock)
         # Everything the model sees, oldest first. It only ever grows at the end, and
         # each entry is final when it is added.
-        self._history: list[ResponseInputItemParam] = []
+        self._history: list[Item] = []
         # The user's turn that has not been answered yet, as the pieces it arrived in.
         # It joins the history when some of the reply to it has been heard.
         self._turn: list[str] = []
@@ -355,9 +367,11 @@ class VoiceConversation:
         # fixed for the whole conversation: a prompt cache only helps while that start
         # stays the same.
         self._instructions = _INSTRUCTIONS.format(today=datetime.now(UTC).strftime("%A, %d %B %Y"))
-        self._tools = [_WEB_SEARCH_TOOL, _CANCEL_TOOL] if search.configured else []
         if search.configured:
             self._instructions += _SEARCH_INSTRUCTIONS
+        # `llm` has to be the adapter of the provider that `model` belongs to.
+        tools = [_WEB_SEARCH_TOOL, _CANCEL_TOOL] if search.configured else []
+        self._model = voice_model(llm, model, tools)
         # The task producing a reply, while one is being produced.
         self._producing: asyncio.Task[None] | None = None
         # The latest reply, until it joins the history. That happens when the user next
@@ -377,7 +391,7 @@ class VoiceConversation:
         self._stubs: dict[str, str] = {}
         # Every real search result in the history, oldest first, and how many of them
         # the model has been sent. Only those may be cleared.
-        self._results: list[FunctionCallOutput] = []
+        self._results: list[CallResult] = []
         self._results_sent = 0
         # Working out what the unheard part of a cut reply was about, while the user
         # who cut it is still speaking.
@@ -502,13 +516,7 @@ class VoiceConversation:
     async def _label(self, unheard: str) -> str:
         """Name what an unheard stretch of a reply was about, without saying what it said."""
         try:
-            label = await self._llm.text_response(
-                model="6 Luna",
-                reasoning={"effort": "none"},
-                input=unheard,
-                instructions=_LABEL_INSTRUCTIONS,
-                max_output_tokens=30,
-            )
+            label = await self._model.label(unheard, instructions=_LABEL_INSTRUCTIONS)
         except Exception:
             return ""
         return " ".join(label.split()).rstrip(".")
@@ -688,53 +696,36 @@ class VoiceConversation:
     async def _model_round(self, reply: _Reply, *, must_answer: bool) -> bool:
         """Run one model call, speaking its text. Return True if it searched (so: call again)."""
         self._results_sent = len(self._results)
-        stream = await self._llm.stream_response(
-            model="6 Luna",
-            # No thinking before it speaks: in a conversation the wait is worse than the gain.
-            # The exception is while the history ends in a search with no result yet: one
-            # still running in the background, or finished and waiting to be delivered.
-            # Asked without thinking, the model searched for the same thing again in a
-            # third to a half of measured runs where the user only said "hello?". With a
-            # little thinking it was about one in twenty. That costs about half a second
-            # at the median and 1.5 s for the slowest tenth, on every request made while
-            # this holds, and one prompt-cache miss: the provider keeps a cache per setting,
-            # so the first request after the switch is read in full. Going back to no
-            # thinking finds the earlier cache again.
-            reasoning={"effort": "low" if self._outliving or self._late else "none"},
-            input=[*self._history, *self._open_turn(), *reply.send_back()],
+        # No thinking before it speaks: in a conversation the wait is worse than the gain.
+        # The exception is while the history ends in a search with no result yet: one
+        # still running in the background, or finished and waiting to be delivered.
+        # Asked without thinking, the OpenAI model searched for the same thing again in a
+        # third to a half of measured runs where the user only said "hello?". With a
+        # little thinking it was about one in twenty. That costs about half a second at
+        # the median and 1.5 s for the slowest tenth, on every request made while this
+        # holds. An Anthropic model is not asked to: see `voice_model`.
+        events = self._model.round(
+            [*self._history, *self._open_turn(), *reply.send_back()],
             instructions=self._instructions,
-            tools=self._tools,
-            # Forbidding the tool this way leaves the tool list, and so the cache, intact.
-            tool_choice="none" if must_answer else "auto",
-            store=False,
+            think=bool(self._outliving or self._late),
+            must_answer=must_answer,
         )
-        output = None
-        async for event in stream:
-            if event.type == "response.output_text.delta":
-                await reply.say(event.delta)
-                self._emit("assistant.delta", event.delta)
-            elif event.type == "response.output_item.added":
-                searching = event.item.type == "function_call" and event.item.name == "web_search"
-                if searching and not reply.speech.text:
-                    await reply.say(_SEARCHING_LINE)
-                    self._emit("assistant.delta", _SEARCHING_LINE)
-            elif event.type == "response.completed":
-                output = event.response.output
-            elif event.type == "response.failed":
-                error = event.response.error
-                raise RuntimeError(error.message if error else "the model call failed")
-            elif event.type == "response.incomplete":
-                raise RuntimeError("the model stopped before finishing")
-            elif event.type == "error":
-                raise RuntimeError(event.message)
-        if output is None:
-            raise RuntimeError("the model stream ended early")
-
-        calls = [
-            _ToolCall(item.call_id, item.name, item.arguments)
-            for item in output
-            if item.type == "function_call"
-        ]
+        calls: list[_ToolCall] = []
+        # Closed on the way out whatever happens, so the model call never outlives this.
+        async with contextlib.aclosing(events):
+            async for event in events:
+                if isinstance(event, TextDelta):
+                    await reply.say(event.text)
+                    self._emit("assistant.delta", event.text)
+                elif isinstance(event, CallStarted):
+                    if event.name == "web_search" and not reply.speech.text:
+                        await reply.say(_SEARCHING_LINE)
+                        self._emit("assistant.delta", _SEARCHING_LINE)
+                else:
+                    assert isinstance(event, RoundDone)
+                    calls = [
+                        _ToolCall(call.call_id, call.name, call.arguments) for call in event.calls
+                    ]
         if not calls:
             return False
         # Whatever was said before searching ("Let me check") is complete as it stands.
@@ -772,7 +763,7 @@ class VoiceConversation:
             for result in full[:-_FULL_RESULTS_KEPT]:
                 result["output"] = _CLEARED
 
-    def _open_turn(self) -> list[ResponseInputItemParam]:
+    def _open_turn(self) -> list[Item]:
         """The user's unanswered turn as one message, for a model call."""
         return [{"role": "user", "content": "\n".join(self._turn)}] if self._turn else []
 
@@ -813,21 +804,28 @@ class VoiceEntityClass:
         *,
         stt: CartesiaSTTAdapterClass,
         tts: CartesiaTTSAdapterClass,
-        llm: OpenAIAdapterClass,
+        openai: OpenAIAdapterClass,
+        anthropic: AnthropicAdapterClass,
         search: ParallelAdapterClass,
     ) -> None:
         self._stt = stt
         self._tts = tts
-        self._llm = llm
+        self._openai = openai
+        self._anthropic = anthropic
         self._search = search
 
-    async def open_conversation(self) -> VoiceConversation:
-        """Start listening. The caller owns the conversation and must `close()` it."""
+    async def open_conversation(self, model: VoiceModelName | None = None) -> VoiceConversation:
+        """Start listening. The caller owns the conversation and must `close()` it.
+
+        `model` is the model to hold it with; left out, it is the configured one.
+        """
+        model = model or settings.voice_model
+        llm: VoiceLLM = self._openai if model == "6 Luna" else self._anthropic
         stt = await self._stt.connect_auto_turns()
-        return VoiceConversation(stt=stt, tts=self._tts, llm=self._llm, search=self._search)
+        return VoiceConversation(stt=stt, tts=self._tts, llm=llm, search=self._search, model=model)
 
 
-_WEB_SEARCH_TOOL = OpenAIAdapterClass.Tools.function(
+_WEB_SEARCH_TOOL = ToolSpec(
     name="web_search",
     description=(
         "Search the web for current or factual information. Never call this for something "
@@ -844,7 +842,7 @@ _WEB_SEARCH_TOOL = OpenAIAdapterClass.Tools.function(
 )
 
 
-_CANCEL_TOOL = OpenAIAdapterClass.Tools.function(
+_CANCEL_TOOL = ToolSpec(
     name="cancel_tool_call",
     description=(
         "Stop a search that is still running in the background. Call this only when the "

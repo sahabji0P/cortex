@@ -6,7 +6,8 @@ Cortex is a personal experimentation backend. Its current experiment is a spoken
 
 ```text
 mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ──▶ speech audio
-              Cartesia ink-2     OpenAI    Cartesia Sonic
+              Cartesia ink-2     OpenAI or Cartesia Sonic
+                   │             Anthropic
                    │                │
                    │                └─ may call web_search (Parallel) before answering
                    └─ also detects turns:
@@ -18,9 +19,32 @@ mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ─�
 - **Interrupting.** When the user starts speaking, the server cancels the model call and the speech stream, then sends an `interrupt` event. The client must stop playback and drop audio it has not played yet: speech is generated several times faster than it plays, so the client always holds some.
 - **Searching.** With `PARALLEL_API_KEY` set, the model gets a `web_search` tool. Without it the tool is not offered and everything else works.
 
+### Which model answers
+
+A conversation is held with one model from start to end, chosen when it opens:
+
+| Model | Provider | Needs |
+| --- | --- | --- |
+| `6 Luna` (the default) | OpenAI | `OPENAI_API_KEY` |
+| `Haiku 5.5` | Anthropic | `ANTHROPIC_API_KEY` |
+| `Sonnet 5.5` | Anthropic | `ANTHROPIC_API_KEY` |
+
+`VOICE_MODEL` sets the model for every conversation, and a client can ask for another with `?model=` on the WebSocket URL. The test page passes its own query string on, so <http://127.0.0.1:8000/v1/voice/test?model=Haiku%205.5> talks to Haiku.
+
+Everything below is the same for either provider. The conversation keeps one history, and only the last step differs: OpenAI is sent it as it stands, and for Anthropic it is translated into alternating user and assistant messages on every request. Four things do differ on an Anthropic model:
+
+- **Thinking is fixed for the conversation.** It is off on Haiku 5.5, and on Sonnet 5.5 it is set to the nearest that model allows. The switch to a little thinking while a search is pending (rule 2 below) is not made: on this provider every switch makes the whole conversation be read again, and the gain was measured on the OpenAI model only.
+- **Notes from the server travel in a user message**, wrapped in `<note>` tags that the instructions explain. The Messages API has no place for them where they fall, which is after a reply of the model's own.
+- **Caching is asked for on every request.** Conversations shorter than the provider's minimum are not cached at all.
+- **Forbidding a search in the last round costs a full read** of the conversation for that one request.
+
+Opus 5.5 and Fable 5.2 are not offered: their thinking cannot be turned off, which is a wait before every reply.
+
+The Anthropic side has been run against the real SDK with a fake server, and every scenario in the test suite has been replayed through it. It has not yet been run against the live API, so how it sounds and how fast it is are not known.
+
 ### What the model remembers
 
-The history is what the model is sent on every call. It lives in memory for the life of the connection, nothing is stored at OpenAI, and it follows three rules.
+The history is what the model is sent on every call. It lives in memory for the life of the connection, nothing is stored at the provider, and it follows three rules.
 
 1. **It holds what the user heard, not what was generated.** A reply joins the history only once it has been heard in full or cut off. A reply that is cut off is stored as the words that were heard, ending in "…", and the rest is never sent back. How much was heard comes from Cartesia's word timings and a server-side copy of the client's playback schedule, shifted by the sound-device delay the client reports (about 40 ms on laptop speakers, a few tenths of a second on Bluetooth). In live runs the stored text was within two words of the audio really played, and never past it. When a cut leaves twelve or more words unheard, a short note follows it saying what kind of thing the unheard part was ("the rest of the story", "the answer and its source"), never what it said.
 2. **Every tool call keeps a valid result.** An interruption does not stop a search. Its call gets a placeholder result and the search carries on. What the user said is answered first. Then, at the next quiet moment, the real result is added as a call written by the server (a stub that names the original call) followed by the result, and the model tells the user about it in a reply of its own, without being asked. That holds even when the result came back while the user was still speaking: put in with their words, the model answered them and never mentioned it. A quiet moment is when the reply in progress has finished playing, so a result that lands during a long reply waits for it. If the reply about the result is itself cut off before a word of it is heard, it is made again. The model can stop a running search with `cancel_tool_call`. While a search has no result in the history yet, the model is asked to think a little before it speaks; otherwise it does not think at all. The first word of those replies came after 1.4 s at the median and 2.6 s for the slowest tenth, against 0.9 s and 1.1 s without thinking. Asked without thinking, it started the same search a second time in a third to a half of measured runs where the user only said "hello?"; with it, about one run in twenty. The switch also costs one prompt-cache miss, on the first request made with thinking on; the request after the switch back was served from the cache again.
@@ -39,7 +63,7 @@ The conversation is in [`app/entities/voice_ent.py`](app/entities/voice_ent.py).
 ```bash
 docker compose up -d                      # MongoDB and Redis
 uv sync --extra dev
-cp .env.example .env                      # then set OPENAI_API_KEY and CARTESIA_API_KEY
+cp .env.example .env                      # then set CARTESIA_API_KEY and the model's key (OPENAI_API_KEY by default)
 uv run uvicorn app.main:app --reload
 ```
 
@@ -74,7 +98,7 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 app/
   adapters/    one file per outside service; the only place an SDK is called
                openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
-  entities/    the logic: voice_ent and voice_speech (the cascade), stt_ent, conversation_ent, user_ent
+  entities/    the logic: voice_ent, voice_speech and voice_model (the cascade), stt_ent, conversation_ent, user_ent
   routers/     HTTP and WebSocket endpoints: voice, cortex, user
 ```
 
@@ -88,7 +112,7 @@ uv run ruff check app tests
 uv run pyright
 ```
 
-To check the model and the pipeline together without any audio, with the real model and the real web search:
+To check the model and the pipeline together without any audio, with the real OpenAI model and the real web search:
 
 ```bash
 uv run python -m scripts.voice_pipeline_check

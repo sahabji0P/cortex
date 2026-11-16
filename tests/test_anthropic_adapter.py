@@ -372,3 +372,25 @@ async def test_the_client_needs_an_api_key(monkeypatch: pytest.MonkeyPatch) -> N
     await adapter.initialize()
     assert adapter.client.api_key == "sk-ant-test"
     await adapter.close()
+
+
+def test_stream_message_without_tools_sends_no_tool_choice_either() -> None:
+    adapter = AnthropicAdapterClass()
+    opened: list[dict[str, object]] = []
+
+    def stream(**kwargs: object) -> None:
+        opened.append(kwargs)
+
+    adapter._client = cast(
+        "AsyncAnthropic", SimpleNamespace(messages=SimpleNamespace(stream=stream))
+    )
+    adapter.stream_message(
+        model="Haiku 5.5",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        tool_choice={"type": "auto"},
+    )
+
+    (request,) = opened
+    assert isinstance(request["tools"], Omit)
+    assert isinstance(request["tool_choice"], Omit)
