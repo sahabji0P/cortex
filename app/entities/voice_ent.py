@@ -102,15 +102,15 @@ there instead of starting again. Never end a reply with "…" yourself.
 """
 
 _SEARCH_INSTRUCTIONS = """\
-- For anything recent, or that you are not sure of, call web_search. First say a few \
-words so the user knows you are looking it up, such as "Let me check", and make the call \
-in that same turn: the user hears nothing else while the search runs. Then answer from \
-the results and name the source.
+- When what you are about to do will keep the user waiting for more than a second, such \
+as looking something up, first say in a few words what you are going to do, the way a \
+person would, and do it in that same turn: the user hears nothing else while they wait.
+- When you answer from search results, name the source.
 - If the user interrupts while a search is running, the search carries on in the \
 background. Do not search for the same thing again: say it is still coming, and answer \
 whatever else they asked. Only if they say they no longer want it, call cancel_tool_call: \
 nothing is cancelled unless you make that call. The result reaches you by itself, as a \
-web_search call with "deferred_result_for" in its arguments. You did not make that call: \
+call with "deferred_result_for" in its arguments. You did not make that call: \
 it only delivers the late result. When it arrives, tell the user what it found straight \
 away, without being asked, unless they have said they no longer want it. If they say \
 something else before you have told them, answer that and then tell them. If you have \
