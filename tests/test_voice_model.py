@@ -217,8 +217,9 @@ async def test_a_round_is_sent_as_a_messages_request_and_read_back_as_events() -
     assert request["messages"] == [
         {"role": "user", "content": [{"type": "text", "text": "Who won?"}]}
     ]
-    assert request["system"].startswith("Be brief.\n")
-    assert "<note>" in request["system"]
+    # The instructions go out as given. The line about notes is the caller's to add.
+    assert request["system"] == "Be brief.\n"
+    assert "<note>" in model.own_instructions
     # The thinking setting is fixed for the model: asking to think does not change it.
     assert request["thinking"] == {"type": "between_tools"}
     assert request["tool_choice"] == {"type": "auto"}
@@ -562,7 +563,7 @@ async def test_a_search_runs_between_two_model_calls_on_an_anthropic_model() -> 
     outputs = await _read_until(conversation, "assistant.done")
     await conversation.close()
 
-    assert outputs[-1].text == "Let me check. Norris won."
+    assert outputs[-1].text == "Norris won."
     first, second = llm.requests
     assert first["messages"] == [
         {"role": "user", "content": [{"type": "text", "text": "who won the race?"}]}
@@ -571,7 +572,6 @@ async def test_a_search_runs_between_two_model_calls_on_an_anthropic_model() -> 
     assert assistant == {
         "role": "assistant",
         "content": [
-            {"type": "text", "text": "Let me check."},
             {
                 "type": "tool_use",
                 "id": "toolu_1",

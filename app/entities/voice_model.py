@@ -158,6 +158,10 @@ type ModelEvent = TextDelta | CallStarted | RoundDone
 
 
 class VoiceModel(Protocol):
+    # Lines this model needs in its instructions, for the caller to put there. The caller
+    # decides where, so that what changes from day to day can still come last.
+    own_instructions: str
+
     def round(
         self, items: list[Item], *, instructions: str, think: bool, must_answer: bool
     ) -> AsyncGenerator[ModelEvent]:
@@ -196,6 +200,8 @@ _OPENAI_EFFORT: dict[_OpenAIModelName, tuple[Literal["none", "low"], Literal["lo
 
 
 class _OpenAIVoiceModel:
+    own_instructions = ""
+
     def __init__(
         self, llm: OpenAIAdapterClass, name: _OpenAIModelName, tools: Sequence[ToolSpec]
     ) -> None:
@@ -304,6 +310,8 @@ _NO_OUTPUT = "No output."
 
 
 class _AnthropicVoiceModel:
+    own_instructions = _NOTE_INSTRUCTIONS
+
     def __init__(
         self,
         llm: AnthropicAdapterClass,
@@ -333,7 +341,7 @@ class _AnthropicVoiceModel:
         request = self._llm.stream_message(
             model=self._name,
             messages=to_messages(items),
-            system=instructions + _NOTE_INSTRUCTIONS,
+            system=instructions,
             max_tokens=_MAX_REPLY_TOKENS,
             thinking=settings.thinking,
             output_config=settings.output_config,
