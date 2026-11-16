@@ -243,10 +243,21 @@ async def test_a_round_that_must_answer_forbids_tools_without_changing_the_list(
 
 @pytest.mark.parametrize(
     ("stop_reason", "message"),
-    [("refusal", "declined to answer"), ("max_tokens", "stopped before finishing")],
+    [
+        ("refusal", "declined to answer"),
+        ("max_tokens", "stopped before finishing"),
+        ("model_context_window_exceeded", "stopped before finishing"),
+        ("pause_turn", "stopped before finishing"),
+        # A stream that broke off between events: no reason was ever given.
+        (None, "stopped before finishing"),
+    ],
 )
-async def test_a_round_that_is_refused_or_cut_off_raises(stop_reason: str, message: str) -> None:
-    llm = _Claude([_text("I"), _final(("toolu_1", "f1"), stop_reason=stop_reason)])
+async def test_a_round_that_is_refused_or_cut_off_raises(
+    stop_reason: str | None, message: str
+) -> None:
+    final = _final(("toolu_1", "f1"))
+    final.stop_reason = stop_reason
+    llm = _Claude([_text("I"), final])
     model = voice_model(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
 
     with pytest.raises(RuntimeError, match=message):
