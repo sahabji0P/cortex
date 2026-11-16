@@ -245,7 +245,13 @@ class AnthropicAdapterClass:
 
         Check the final message's `stop_reason` before using its content: `refusal`
         and `max_tokens` both arrive as an ordinary, successful response.
+
+        An empty `tools` is sent as no tools at all, and `tool_choice` is then left out
+        with it: the API takes a tool choice only together with tools.
         """
+        offered = omit if isinstance(tools, Omit) else list(tools)
+        if not offered:
+            offered = tool_choice = omit
         return self.client.messages.stream(
             model=_Types.model_map[model],
             messages=messages,
@@ -253,7 +259,7 @@ class AnthropicAdapterClass:
             max_tokens=max_tokens,
             thinking=thinking,
             output_config=output_config,
-            tools=tools,
+            tools=offered,
             tool_choice=tool_choice,
             cache_control=cache_control,
             stop_sequences=stop_sequences,

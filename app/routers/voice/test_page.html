@@ -147,7 +147,7 @@ async function start() {
   audio.createMediaStreamSource(stream).connect(worklet);
   mic = stream;
 
-  socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/voice/converse`);
+  socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/voice/converse${location.search}`);
   socket.binaryType = "arraybuffer";
   socket.onopen = () => { statusEl.textContent = "listening"; reportedDelay = -1; reportDelay(); };
   socket.onmessage = (message) => typeof message.data === "string" ? onEvent(JSON.parse(message.data)) : play(message.data);

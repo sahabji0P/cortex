@@ -37,7 +37,8 @@ class EntitiesRegistry:
         cls.Voice = VoiceEntityClass(
             stt=adapter.CartesiaSTT,
             tts=adapter.CartesiaTTS,
-            llm=adapter.OpenAI,
+            openai=adapter.OpenAI,
+            anthropic=adapter.Anthropic,
             search=adapter.Parallel,
         )
 

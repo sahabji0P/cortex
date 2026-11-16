@@ -14,6 +14,8 @@ _TEST_PAGE = Path(__file__).parent / "test_page.html"
 async def converse(websocket: WebSocket, service: VoiceServiceRegistry.V1) -> None:
     """A spoken conversation over one WebSocket.
 
+    Add `?model=6 Luna`, `?model=Haiku 5.5` or `?model=Sonnet 5.5` to choose the model;
+    without it the configured one is used.
     Send mic audio as binary frames: raw 16-bit mono PCM at 16 kHz, about 100 ms each.
     Optionally send `{"type": "playback", "delay": seconds}` as a text frame to report how
     long your sound device delays audio, so interruptions are judged by what was heard.
