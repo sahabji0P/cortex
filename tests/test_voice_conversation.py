@@ -94,14 +94,17 @@ class _STT:
 class _TTSContext:
     """Text-to-speech for one utterance. Every word takes exactly one second to say."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, dead: bool = False) -> None:
         self._events: asyncio.Queue[bytes | list[CartesiaTTSWord] | None] = asyncio.Queue()
         self._seconds = 0
+        self._dead = dead
         self.pushed: list[str] = []
         self.finished = False
         self.cancelled = False
 
     async def push(self, text: str) -> None:
+        if self._dead:
+            raise ConnectionError("the connection was closed")
         self.pushed.append(text)
         words = text.split()
         if not words:
@@ -129,10 +132,13 @@ class _TTSSession(CartesiaTTSSession):
     def __init__(self, contexts: list[_TTSContext]) -> None:
         self._contexts = contexts
         self.closed = False
+        self.dead = False  # dropped by the service while it sat unused
 
     def context(self) -> _TTSContext:
-        self._contexts.append(_TTSContext())
-        return self._contexts[-1]
+        context = _TTSContext(dead=self.dead)
+        if not self.dead:
+            self._contexts.append(context)
+        return context
 
     async def close(self) -> None:
         self.closed = True
@@ -142,8 +148,12 @@ class _TTS:
     def __init__(self) -> None:
         self.sessions: list[_TTSSession] = []
         self.contexts: list[_TTSContext] = []
+        self.failures = 0  # how many of the next connections fail to open
 
     async def connect(self) -> _TTSSession:
+        if self.failures:
+            self.failures -= 1
+            raise ConnectionError("could not reach the speech service")
         self.sessions.append(_TTSSession(self.contexts))
         return self.sessions[-1]
 
@@ -476,6 +486,102 @@ async def test_closing_mid_reply_releases_both_speech_connections() -> None:
     assert f.stt.closed
     assert f.tts.contexts[0].cancelled
     assert f.tts.sessions[0].closed
+
+
+# ---- the speech connection is opened ahead of the reply
+
+
+async def test_a_speech_connection_is_open_before_anyone_speaks_and_the_reply_uses_it() -> None:
+    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
+    f = _conversation(llm)
+
+    await _let_audio_out()
+    assert len(f.tts.sessions) == 1  # opened when the call started
+
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+
+    assert len(f.tts.sessions) == 1  # and the reply spoke on that one
+    assert "".join(f.tts.contexts[0].pushed) == "Hi."
+    await f.conversation.close()
+
+
+async def test_each_turn_start_has_a_connection_open_for_the_reply_to_come() -> None:
+    llm = _LLM(
+        [_delta("Hi."), _completed(_message("Hi."))],
+        [_delta("Fine."), _completed(_message("Fine."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(5)
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    await _let_audio_out()
+
+    # The first reply closed its own. The next one's is open while the user still speaks.
+    assert [session.closed for session in f.tts.sessions] == [True, False]
+    f.stt.turn_end("how are you")
+    await _read_until(f.conversation, "assistant.done")
+    assert len(f.tts.sessions) == 2
+    await f.conversation.close()
+
+
+async def test_a_connection_that_has_waited_too_long_is_replaced_before_it_is_used() -> None:
+    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
+    f = _conversation(llm)
+
+    await _let_audio_out()
+    f.clock.advance(120)  # nobody spoke for two minutes: the service may have dropped it
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+    await _let_audio_out()
+
+    assert len(f.tts.sessions) == 2
+    assert f.tts.sessions[0].closed
+    assert f.tts.contexts[0].pushed == ["Hi."]
+    await f.conversation.close()
+
+
+async def test_a_connection_that_failed_to_open_ahead_of_time_does_not_fail_the_reply() -> None:
+    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
+    stt, tts, clock = _STT(), _TTS(), _Clock()
+    tts.failures = 1
+    conversation = VoiceConversation(stt=stt, tts=tts, llm=llm, search=_Search(), clock=clock)
+
+    await _let_audio_out()
+    stt.say("hello")
+    outputs = await _read_until(conversation, "assistant.done")
+
+    assert "error" not in _types(outputs)
+    assert _audio_seconds(outputs) == 1
+    await conversation.close()
+
+
+async def test_a_connection_that_died_while_it_waited_is_replaced_when_first_used() -> None:
+    llm = _LLM([_delta("Hi "), _delta("there."), _completed(_message("Hi there."))])
+    f = _conversation(llm)
+
+    await _let_audio_out()
+    f.tts.sessions[0].dead = True
+    f.stt.say("hello")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    assert "error" not in _types(outputs)
+    assert _audio_seconds(outputs) == 2
+    assert f.tts.sessions[0].closed
+    assert f.tts.contexts[0].pushed == ["Hi ", "there."]
+    await f.conversation.close()
+
+
+async def test_closing_closes_a_connection_that_no_reply_took() -> None:
+    f = _conversation(_LLM())
+
+    await _let_audio_out()
+    await f.conversation.close()
+
+    assert [session.closed for session in f.tts.sessions] == [True]
 
 
 # ---- interrupting: a note on what went unheard

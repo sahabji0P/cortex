@@ -73,7 +73,7 @@ from app.entities.voice_model import (
     VoiceModelName,
     voice_model,
 )
-from app.entities.voice_speech import Clock, Playback, Speech, Utterance
+from app.entities.voice_speech import Clock, Playback, Speech, Standby, Utterance
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
 
@@ -397,6 +397,9 @@ class VoiceConversation:
         # who cut it is still speaking.
         self._labelling: asyncio.Task[str] | None = None
         self._closed = False
+        # The speech connection for the next reply, opened before it is needed.
+        self._standby = Standby(tts, clock)
+        self._standby.ready()
         self._listening = asyncio.create_task(self._listen())
 
     async def send_audio(self, pcm: bytes) -> None:
@@ -428,6 +431,7 @@ class VoiceConversation:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.gather(*others, return_exceptions=True)
+        await self._standby.close()
         with contextlib.suppress(Exception):
             await self._stt.close()
 
@@ -442,6 +446,8 @@ class VoiceConversation:
                     self._user_speaking = True
                     self._turn_began_at = self._clock()
                     await self._interrupt()
+                    # A reply will be wanted when they finish: have its connection open.
+                    self._standby.ready()
                 elif event.type == "turn.update":
                     self._emit("user.partial", event.transcript)
                 elif event.type == "turn.end":
@@ -673,7 +679,7 @@ class VoiceConversation:
 
     async def _respond(self, *, brings_results: bool = False) -> None:
         """Produce one reply: model rounds (with searches in between), spoken as they stream."""
-        speech = Speech(self._tts, self._out.put_nowait, self._playback)
+        speech = Speech(self._tts, self._out.put_nowait, self._playback, self._standby.take())
         reply = _Reply(speech, brings_results=brings_results)
         self._reply = reply
         try:

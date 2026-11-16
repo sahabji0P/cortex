@@ -23,7 +23,7 @@ from app.adapters.cartesia_tts_adp import (
     CartesiaTTSWord,
 )
 
-__all__ = ["Clock", "Playback", "Speech", "Utterance"]
+__all__ = ["Clock", "Playback", "Speech", "Standby", "Utterance"]
 
 type Clock = Callable[[], float]
 
@@ -38,6 +38,64 @@ _CLIENT_DELAY = 0.15
 # The most a client may add to that for its sound device. Bluetooth runs to a few tenths
 # of a second; anything far beyond is taken as a mistake.
 _MAX_OUTPUT_DELAY = 1.0
+
+
+# A connection opened ahead of time is used only if it is no older than this. Cartesia
+# closes one that sits idle for some minutes, and waiting is all a spare one does.
+_STANDBY_MAX_AGE = 30.0
+
+
+async def _release(connecting: asyncio.Task[CartesiaTTSSession]) -> None:
+    """Close a connection, whether or not it has finished opening."""
+    connecting.cancel()
+    (connected,) = await asyncio.gather(connecting, return_exceptions=True)
+    if isinstance(connected, CartesiaTTSSession):
+        with contextlib.suppress(Exception):
+            await connected.close()
+
+
+class Standby:
+    """One text-to-speech connection, opened ahead of the reply that will use it.
+
+    Opening a connection takes a tenth of a second or two. A reply opens its own while
+    the model is still thinking, which is nearly always soon enough. This covers the
+    times it is not: the connection is opened when the call starts and again each time
+    the user starts speaking, so that it is there before the reply is.
+    """
+
+    def __init__(self, tts: CartesiaTTSAdapterClass, clock: Clock = time.monotonic) -> None:
+        self._tts = tts
+        self._clock = clock
+        self._connecting: asyncio.Task[CartesiaTTSSession] | None = None
+        self._opened_at = 0.0
+        self._releasing: set[asyncio.Task[None]] = set()
+
+    def ready(self) -> None:
+        """Make sure a usable connection is open or on its way. A reply is expected soon."""
+        spare = self._connecting
+        if spare is not None:
+            failed = spare.done() and (spare.cancelled() or spare.exception() is not None)
+            if not failed and self._clock() - self._opened_at <= _STANDBY_MAX_AGE:
+                return
+            releasing = asyncio.create_task(_release(spare))
+            self._releasing.add(releasing)
+            releasing.add_done_callback(self._releasing.discard)
+        self._connecting = asyncio.create_task(self._tts.connect())
+        self._opened_at = self._clock()
+
+    def take(self) -> asyncio.Task[CartesiaTTSSession]:
+        """Hand the connection over to a reply, which closes it when it is done."""
+        self.ready()
+        connecting, self._connecting = self._connecting, None
+        assert connecting is not None
+        return connecting
+
+    async def close(self) -> None:
+        """Close the connection nobody took, and wait for the ones being put away."""
+        if self._connecting is not None:
+            await _release(self._connecting)
+            self._connecting = None
+        await asyncio.gather(*self._releasing, return_exceptions=True)
 
 
 class Playback:
@@ -126,9 +184,10 @@ class Utterance:
 class Speech:
     """The spoken side of one reply: text in, audio sent to the client.
 
-    Each reply gets its own text-to-speech connection, opened while the model is still
-    thinking and closed when the reply ends. A connection kept open between replies
-    would be dropped by Cartesia once the user stays quiet for a while.
+    Each reply gets its own text-to-speech connection and closes it when the reply
+    ends. It is handed one that is open already or still opening (see `Standby`). A
+    single connection kept for the whole conversation would be dropped by Cartesia once
+    the user stays quiet for a while.
 
     A reply is one utterance, or more when it searches: what is said before a search
     ("Let me check") is ended as its own utterance, because Cartesia drops an utterance
@@ -140,10 +199,15 @@ class Speech:
         tts: CartesiaTTSAdapterClass,
         send: Callable[[bytes], None],
         playback: Playback,
+        connecting: asyncio.Task[CartesiaTTSSession],
     ) -> None:
+        self._tts = tts
         self._send = send
         self._playback = playback
-        self._connecting = asyncio.create_task(tts.connect())
+        self._connecting = connecting
+        # Whether the connection has carried anything yet. One that was opened ahead of
+        # time may have died while it waited, which only shows when it is first used.
+        self._untried = True
         self._utterance: Utterance | None = None
         self._open = False  # whether the utterance still takes text
         self._forwarding: asyncio.Task[None] | None = None
@@ -152,17 +216,40 @@ class Speech:
 
     async def say(self, text: str) -> Utterance:
         """Speak the next piece of text. Return the utterance it became part of."""
-        if self._utterance is None or not self._open:
-            if self._forwarding is not None:
-                # The previous utterance's audio goes out before this one's.
-                await self._forwarding
-            self._utterance = Utterance((await self._connecting).context())
-            self._open = True
-            self._forwarding = asyncio.create_task(self._forward(self._utterance))
         self.text += text
-        self._utterance.text += text
-        await self._utterance.context.push(text)
-        return self._utterance
+        if self._utterance is not None and self._open:
+            self._utterance.text += text
+            await self._utterance.context.push(text)
+            return self._utterance
+        if self._forwarding is not None:
+            # The previous utterance's audio goes out before this one's.
+            await self._forwarding
+        try:
+            return await self._begin(text)
+        except Exception:
+            if not self._untried:
+                raise
+            # Nothing has been said on this connection, so nothing is lost by opening
+            # another and saying it there.
+            await _release(self._connecting)
+            self._connecting = asyncio.create_task(self._tts.connect())
+            return await self._begin(text)
+        finally:
+            self._untried = False
+
+    async def _begin(self, text: str) -> Utterance:
+        """Start a new utterance with this text."""
+        utterance = Utterance((await self._connecting).context())
+        utterance.text = text
+        forwarding = asyncio.create_task(self._forward(utterance))
+        try:
+            await utterance.context.push(text)
+        except BaseException:
+            forwarding.cancel()
+            await asyncio.gather(forwarding, return_exceptions=True)
+            raise
+        self._utterance, self._open, self._forwarding = utterance, True, forwarding
+        return utterance
 
     async def _forward(self, utterance: Utterance) -> None:
         async for event in utterance.context.events():
@@ -208,8 +295,4 @@ class Speech:
         await self._disconnect()
 
     async def _disconnect(self) -> None:
-        self._connecting.cancel()
-        (connected,) = await asyncio.gather(self._connecting, return_exceptions=True)
-        if isinstance(connected, CartesiaTTSSession):
-            with contextlib.suppress(Exception):
-                await connected.close()
+        await _release(self._connecting)
