@@ -589,7 +589,7 @@ async def test_a_greeting_cut_off_by_a_noise_is_picked_up_again() -> None:
     sent = llm.requests[1]["input"]
     assert _shape(sent) == ["developer", "assistant", "developer"]
     assert sent[1]["content"] == "Hi, how…"
-    assert "background noise" in sent[2]["content"]
+    assert "no words" in sent[2]["content"]
     await f.conversation.close()
 
 
@@ -930,7 +930,7 @@ async def test_a_reply_cut_by_noise_is_resumed_without_a_note_on_the_remainder()
 
     # The model is about to say the rest itself, so naming it would only be clutter.
     assert _shape(sent) == ["user", "assistant", "developer"]
-    assert "background noise" in sent[2]["content"]
+    assert "no words" in sent[2]["content"]
     await f.conversation.close()
 
 
@@ -1028,7 +1028,7 @@ async def test_a_reply_cut_off_by_a_noise_is_picked_up_again() -> None:
     sent = llm.requests[1]["input"]
     assert _shape(sent) == ["user", "assistant", "developer"]
     assert sent[1]["content"] == "Once upon a time…"
-    assert "background noise" in sent[2]["content"]
+    assert "no words" in sent[2]["content"]
     await f.conversation.close()
 
 
@@ -1051,7 +1051,7 @@ async def test_a_stray_word_just_after_the_reply_starts_is_dropped_and_the_reply
     sent = llm.requests[1]["input"]
     assert _shape(sent) == ["user", "assistant", "developer"]
     assert sent[1]["content"] == "The capital…"
-    assert "background noise" in sent[2]["content"]
+    assert "no words" in sent[2]["content"]
     await f.conversation.close()
 
 
@@ -1660,9 +1660,8 @@ async def test_a_result_whose_reply_was_cut_off_unheard_by_noise_is_told_again()
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert outputs[-1].text == "It is sunny."
-    again = llm.requests[3]["input"]
-    assert _shape(again)[-3:] == ["function_call", "function_call_output", "developer"]
-    assert "has not been told to the user" in again[-1]["content"]
+    # Nothing of it was heard, so the history is as it was and the request is the same.
+    assert llm.requests[3]["input"] == llm.requests[2]["input"]
 
     # Once it has been heard, the user is owed nothing more.
     f.clock.advance(60)
@@ -1671,13 +1670,12 @@ async def test_a_result_whose_reply_was_cut_off_unheard_by_noise_is_told_again()
     await f.conversation.close()
 
 
-async def test_a_result_whose_reply_the_user_talked_over_is_told_after_their_answer() -> None:
+async def test_a_result_whose_reply_the_user_talked_over_is_left_to_the_model() -> None:
     never = asyncio.Event()
     llm, finish = _slow_search_then(
         [_delta("Still looking."), _completed(_message("Still looking."))],
         [_delta("It is"), never],
         [_delta("Four."), _completed(_message("Four."))],
-        [_delta("It is sunny."), _completed(_message("It is sunny."))],
     )
     f = _conversation(llm, _Search(gate=finish))
 
@@ -1687,37 +1685,14 @@ async def test_a_result_whose_reply_the_user_talked_over_is_told_after_their_ans
     outputs = await _read_until(f.conversation, "assistant.done")
     assert outputs[-1].text == "Four."
 
+    # The model was sent the result and then the question, with nothing of ours added.
+    asked = llm.requests[3]["input"]
+    assert _shape(asked)[-3:] == ["function_call", "function_call_output", "user"]
+    assert [item for item in asked if item.get("role") == "developer"] == []
+    # Nothing is brought up afterwards: telling the user is the model's to do.
     f.clock.advance(60)
-    outputs = await _read_until(f.conversation, "assistant.done")
-    assert outputs[-1].text == "It is sunny."
-    assert "has not been told to the user" in llm.requests[4]["input"][-1]["content"]
-    await f.conversation.close()
-
-
-async def test_the_reminder_follows_a_question_that_got_no_answer() -> None:
-    never = asyncio.Event()
-    failed = SimpleNamespace(
-        type="response.failed",
-        response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
-    )
-    llm, finish = _slow_search_then(
-        [_delta("Still looking."), _completed(_message("Still looking."))],
-        [_delta("It is"), never],
-        [failed],
-        [_delta("It is sunny."), _completed(_message("It is sunny."))],
-    )
-    f = _conversation(llm, _Search(gate=finish))
-
-    await _interrupted_search_then_hello(f, finish)
-    await _read_until(f.conversation, "assistant.delta")
-    # The user talks over the reply about the result, and the answer to them fails.
-    f.stt.say("what is two plus two?")
-    await _read_until(f.conversation, "error")
-    outputs = await _read_until(f.conversation, "assistant.done")
-
-    # Their question stays where the model saw it, and the reminder comes after it.
-    assert outputs[-1].text == "It is sunny."
-    assert _shape(llm.requests[4]["input"])[-2:] == ["user", "developer"]
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 4
     await f.conversation.close()
 
 
@@ -1728,29 +1703,26 @@ async def test_words_said_before_a_search_but_never_heard_do_not_count_as_tellin
         [_delta("Still looking."), _completed(_message("Still looking."))],
         [_delta("It is sunny."), _starts(more), _completed(_message("It is sunny."), more)],
         [_delta("And tomorrow"), never],
-        [_delta("Four."), _completed(_message("Four."))],
         [_delta("It is sunny."), _completed(_message("It is sunny."))],
     )
     f = _conversation(llm, _Search(gate=finish, only="weather"))
 
     await _interrupted_search_then_hello(f, finish)
     # The reply about the result says it, searches again and goes on, all before any of
-    # it has played. Then the user speaks.
+    # it has played. Then a noise cuts it off.
     await _read_until(f.conversation, "tool.call")
     await _read_until(f.conversation, "assistant.delta")
-    f.stt.say("what is two plus two?")
-    outputs = await _read_until(f.conversation, "assistant.done")
-    assert outputs[-1].text == "Four."
+    f.stt.say("")
 
     # "It is sunny." is in the history, because the model was sent it. The user never
-    # heard it, so they are still told.
-    f.clock.advance(60)
+    # heard it, so the reply is made again.
     outputs = await _read_until(f.conversation, "assistant.done")
     assert outputs[-1].text == "It is sunny."
+    assert len(llm.requests) == 5
     await f.conversation.close()
 
 
-async def test_a_reply_about_a_result_that_says_nothing_does_not_set_off_reminders() -> None:
+async def test_a_reply_about_a_result_that_says_nothing_is_not_made_again() -> None:
     llm, finish = _slow_search_then(
         [_delta("Still looking."), _completed(_message("Still looking."))],
         [_completed(_message(""))],
@@ -1770,8 +1742,8 @@ async def test_a_reply_about_a_result_that_says_nothing_does_not_set_off_reminde
 
     # Two questions, two answers: nothing was brought up again in between or after.
     assert len(llm.requests) == 5
-    reminders = [i for i in llm.requests[-1]["input"] if i.get("role") == "developer"]
-    assert reminders == []
+    notes = [i for i in llm.requests[-1]["input"] if i.get("role") == "developer"]
+    assert notes == []
     await f.conversation.close()
 
 
@@ -1779,8 +1751,7 @@ async def test_a_result_is_still_owed_if_its_reply_was_cut_off_before_it_said_an
     never = asyncio.Event()
     llm, finish = _slow_search_then(
         [_delta("Still looking."), _completed(_message("Still looking."))],
-        [never],  # the model is still thinking about the result when the user speaks
-        [_delta("Four."), _completed(_message("Four."))],
+        [never],  # the model is still thinking about the result when a noise comes
         [_delta("It is sunny."), _completed(_message("It is sunny."))],
     )
     f = _conversation(llm, _Search(gate=finish))
@@ -1788,17 +1759,15 @@ async def test_a_result_is_still_owed_if_its_reply_was_cut_off_before_it_said_an
     await _interrupted_search_then_hello(f, finish)
     await asyncio.sleep(0.25)  # the reply about the result has been asked for
     assert len(llm.requests) == 3
-    f.stt.say("what is two plus two?")
+    f.stt.say("")
     outputs = await _read_until(f.conversation, "assistant.done")
-    assert outputs[-1].text == "Four."
 
-    f.clock.advance(60)
-    outputs = await _read_until(f.conversation, "assistant.done")
     assert outputs[-1].text == "It is sunny."
+    assert llm.requests[3]["input"] == llm.requests[2]["input"]
     await f.conversation.close()
 
 
-async def test_a_result_is_still_owed_if_its_reply_failed() -> None:
+async def test_a_result_whose_reply_failed_is_there_when_the_user_next_speaks() -> None:
     failed = SimpleNamespace(
         type="response.failed",
         response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
@@ -1807,7 +1776,6 @@ async def test_a_result_is_still_owed_if_its_reply_failed() -> None:
         [_delta("Still looking."), _completed(_message("Still looking."))],
         [failed],
         [_delta("Four."), _completed(_message("Four."))],
-        [_delta("It is sunny."), _completed(_message("It is sunny."))],
     )
     f = _conversation(llm, _Search(gate=finish))
 
@@ -1815,39 +1783,10 @@ async def test_a_result_is_still_owed_if_its_reply_failed() -> None:
     await _read_until(f.conversation, "error")
     f.stt.say("what is two plus two?")
     outputs = await _read_until(f.conversation, "assistant.done")
+
     assert outputs[-1].text == "Four."
-
-    f.clock.advance(60)
-    outputs = await _read_until(f.conversation, "assistant.done")
-    assert outputs[-1].text == "It is sunny."
-    await f.conversation.close()
-
-
-async def test_a_result_is_brought_up_again_only_once() -> None:
-    never = asyncio.Event()
-    llm, finish = _slow_search_then(
-        [_delta("Still looking."), _completed(_message("Still looking."))],
-        [_delta("It is"), never],
-        [_delta("Four."), _completed(_message("Four."))],
-        [_delta("It is"), never],
-        [_delta("Five."), _completed(_message("Five."))],
-    )
-    f = _conversation(llm, _Search(gate=finish))
-
-    await _interrupted_search_then_hello(f, finish)
-    # Twice the reply about the result is talked over before any of it is heard.
-    for question in ("what is two plus two?", "and two plus three?"):
-        await _read_until(f.conversation, "assistant.delta")
-        f.stt.say(question)
-        await _read_until(f.conversation, "assistant.done")
-        f.clock.advance(60)
-    await asyncio.sleep(0.25)
-
-    # It was tried once more after the first time, and then left: the result is in the
-    # history for whenever the user asks.
-    assert len(llm.requests) == 6
-    reminders = [i for i in llm.requests[-1]["input"] if i.get("role") == "developer"]
-    assert len(reminders) == 1
+    asked = llm.requests[3]["input"]
+    assert _shape(asked)[-3:] == ["function_call", "function_call_output", "user"]
     await f.conversation.close()
 
 

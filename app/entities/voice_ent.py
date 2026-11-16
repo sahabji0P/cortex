@@ -92,11 +92,13 @@ unless the user asks for more.
 way they are said.
 - The user's words come from speech recognition and may contain mistakes. Go with the \
 likely meaning, and ask when it is unclear.
-- The user can interrupt you at any time. When they do, drop what you were saying and \
-answer what they just said.
-- An earlier reply of yours that ends in "…" was cut off there by the user. They heard \
-nothing after that point, so do not assume they know the rest. Never end a reply with \
-"…" yourself.
+- The user can interrupt you at any time, the way people do in conversation. If they ask \
+or say something, answer that first, then go back to what you were saying if it is still \
+worth finishing. If it was only a sound, or a word like "yes" or "okay", carry on from \
+where you stopped.
+- An earlier reply of yours that ends in "…" was cut off at that point. The user heard \
+nothing after it, so do not assume they know the rest. When you carry on, continue from \
+there instead of starting again. Never end a reply with "…" yourself.
 """
 
 _SEARCH_INSTRUCTIONS = """\
@@ -110,7 +112,8 @@ whatever else they asked. Only if they say they no longer want it, call cancel_t
 nothing is cancelled unless you make that call. The result reaches you by itself, as a \
 web_search call with "deferred_result_for" in its arguments. You did not make that call: \
 it only delivers the late result. When it arrives, tell the user what it found straight \
-away, without being asked, unless they have said they no longer want it. If you have \
+away, without being asked, unless they have said they no longer want it. If they say \
+something else before you have told them, answer that and then tell them. If you have \
 already told them the same thing, do not repeat it: say in a few words that the search \
 confirms it.
 """
@@ -130,13 +133,6 @@ _FULL_RESULTS_ALLOWED = 6
 _FULL_RESULTS_KEPT = 2
 _CLEARED = "[Cleared to save context. Search again if this is still needed.]"
 
-# Added when the reply that was to tell the user of a late result was cut off unheard.
-_RESULT_REMINDER = (
-    "The search result above has not been told to the user: the reply meant to tell them "
-    "was cut off before they heard any of it. Tell them what it found now, unless they "
-    "have said they no longer want it."
-)
-
 # Opens the history of a conversation in which the assistant is to speak first. The
 # model's own words never come first: its opening line is an answer to this.
 _GREETING_NOTE = (
@@ -144,14 +140,11 @@ _GREETING_NOTE = (
     "one short sentence and ask what you can do for them."
 )
 
-# Added to the history when a turn with no words in it cut a reply off.
-_NOISE_NOTE = (
-    "That interruption was background noise, not the user speaking. Carry on with your "
-    'reply. The user heard it up to the "…" and nothing after that, so the first word '
-    "you say now is the word that comes straight after that point, even if that is the "
-    'middle of a sentence. Begin with that word itself, not with "…". Do not say again '
-    'any of the words before the "…", and do not start the sentence over.'
-)
+# Added to the history when a turn with no words in it cut off a reply that was being
+# heard. It records what happened and no more: what to do about it is in the
+# instructions. Something has to stand there, because the history would otherwise end
+# with the model's own words, and an Anthropic model takes no request that ends that way.
+_NO_WORDS_NOTE = "The user made a sound there, with no words in it."
 
 # Added after a reply that was cut with a lot left unheard.
 _REMAINDER_NOTE = (
@@ -393,7 +386,8 @@ class VoiceConversation:
         self._outliving: dict[str, _ToolCall] = {}
         # Results of such calls, waiting for a quiet moment to be given to the model.
         self._late: list[tuple[_ToolCall, str]] = []
-        # Whether a late result is in the history that the user has not been told of.
+        # Whether a late result is in the history that the user has heard no reply to
+        # and has not spoken since. The reply about it is then made again.
         self._results_owed = False
         self._announcing: asyncio.Task[None] | None = None
         # The calls in the history that we wrote to carry a late result: stub call id to
@@ -594,8 +588,9 @@ class VoiceConversation:
         If the user speaks first, this is cancelled, and it starts again after they have
         been answered.
 
-        The user is owed the result until they have heard some of the reply about it. If
-        that reply is cut off unheard, it is made once more, with a note saying why.
+        If a noise cuts that reply off before any of it is heard, the history is as it
+        was, so the same request is simply made again. If the user speaks first, what
+        they said is answered, and telling them of the result is left to the model.
         """
         while True:
             if self._producing is not None and not self._producing.done():
@@ -608,12 +603,7 @@ class VoiceConversation:
         if self._late:
             self._add_late_results()
             self._results_owed = True
-        elif self._results_owed:
-            self._close_turn()
-            self._history.append({"role": "developer", "content": _RESULT_REMINDER})
-            # One more try is all a result gets, so reminders cannot pile up.
-            self._results_owed = False
-        else:
+        elif not self._results_owed:
             return  # the user has been told in the meantime
         self._producing = asyncio.create_task(self._respond(brings_results=True))
 
@@ -670,21 +660,24 @@ class VoiceConversation:
         self._user_speaking = False
         # The reply that was to tell the user of a late result, cut off unheard, is not
         # "picked up where it stopped": it is made again, by the same path as before.
-        retell = self._results_owed and not self._cut_after_hearing
+        retell = self._results_owed and not said
         if not said and not self._turn and (not self._cut_a_reply or retell):
             # Nothing was said and nothing heard was stopped: late results may be waiting.
             self._announce_when_quiet()
             return
         if said:
+            # The result is in front of the model along with what the user now says.
+            self._results_owed = False
             self._clear_old_results()
             self._turn.append(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
             self._emit("user.final", transcript)
-        elif not self._turn:
-            # Nothing was said, yet it stopped a reply that was being heard. (If the
-            # user's own turn is still unanswered, it is simply answered again.)
-            self._history.append({"role": "developer", "content": _NOISE_NOTE})
+        elif self._cut_after_hearing:
+            # Nothing was said, yet it stopped a reply that was being heard, which now
+            # ends the history. (A reply cut before any of it was heard left the history
+            # as it was, and is simply made again.)
+            self._history.append({"role": "developer", "content": _NO_WORDS_NOTE})
         self._producing = asyncio.create_task(self._respond())
         # A result that came in while the user was speaking is not slipped in with their
         # turn: the model would answer what they said and never mention it. It waits
