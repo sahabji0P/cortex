@@ -84,7 +84,7 @@ _MAX_SEARCHES = 3
 
 _INSTRUCTIONS = """\
 You are Cortex, a voice assistant in a live spoken conversation. Everything you write \
-is read aloud by a text-to-speech voice. Today is {today}.
+is read aloud by a text-to-speech voice.
 
 - Talk like a person on a call: short, natural sentences. Keep to one or two sentences \
 unless the user asks for more.
@@ -116,6 +116,12 @@ away, without being asked, unless they have said they no longer want it. If they
 something else before you have told them, answer that and then tell them. If you have \
 already told them the same thing, do not repeat it: say in a few words that the search \
 confirms it.
+"""
+
+# The last line of the instructions. It is the one part that differs from one day to the
+# next, so everything before it is the same in every conversation.
+_TODAY = """
+Today is {today}.
 """
 
 # Stands in for the result of a call that was still running when the user spoke.
@@ -366,15 +372,17 @@ class VoiceConversation:
         self._turn_began_at = 0.0
         self._user_scripts: set[str] = set()
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
-        # The instructions and the tool list are the start of every request, so they are
-        # fixed for the whole conversation: a prompt cache only helps while that start
-        # stays the same.
-        self._instructions = _INSTRUCTIONS.format(today=datetime.now(UTC).strftime("%A, %d %B %Y"))
-        if search.configured:
-            self._instructions += _SEARCH_INSTRUCTIONS
         # `llm` has to be the adapter of the provider that `model` belongs to.
         tools = [_WEB_SEARCH_TOOL, _CANCEL_TOOL] if search.configured else []
         self._model = voice_model(llm, model, tools)
+        # The instructions and the tool list are the start of every request, so they are
+        # fixed for the whole conversation: a prompt cache only helps while that start
+        # stays the same. The date goes last, after whatever the model adds of its own.
+        self._instructions = _INSTRUCTIONS
+        if search.configured:
+            self._instructions += _SEARCH_INSTRUCTIONS
+        self._instructions += self._model.own_instructions
+        self._instructions += _TODAY.format(today=datetime.now(UTC).strftime("%A, %d %B %Y"))
         # The task producing a reply, while one is being produced.
         self._producing: asyncio.Task[None] | None = None
         # The latest reply, until it joins the history. That happens when the user next
