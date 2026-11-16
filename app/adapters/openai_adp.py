@@ -1,6 +1,6 @@
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping
 from types import MappingProxyType
 from typing import Literal, cast
 
@@ -185,9 +185,14 @@ class OpenAIAdapterClass:
         tool_choice: response_create_params.ToolChoice | Omit = omit,
         tools: Iterable[ToolParam] | Omit = omit,
         reasoning: OpenAIThinking | None | Omit = omit,
-    ) -> AsyncStream[ResponseStreamEvent]:
-        """Create a streamed OpenAI Responses API request and return raw SDK events."""
-        return await self.client.responses.create(
+    ) -> AsyncGenerator[ResponseStreamEvent]:
+        """Create a streamed OpenAI Responses API request and return its raw SDK events.
+
+        To stop the request early, close what is returned (`contextlib.aclosing`). That
+        closes the connection there and then. A stream that is only dropped stays open,
+        with the model still writing, until it is garbage collected.
+        """
+        stream = await self.client.responses.create(
             model=_Types.model_map[model],
             input=input,
             include=include,
@@ -206,6 +211,15 @@ class OpenAIAdapterClass:
             tools=tools,
             reasoning=reasoning,
         )
+        return self._events(stream)
+
+    @staticmethod
+    async def _events(
+        stream: AsyncStream[ResponseStreamEvent],
+    ) -> AsyncGenerator[ResponseStreamEvent]:
+        async with stream:
+            async for event in stream:
+                yield event
 
     async def text_response(
         self,

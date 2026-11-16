@@ -5,11 +5,14 @@ through it.
 """
 
 import asyncio
+import contextlib
 import json
 from types import SimpleNamespace
 from typing import cast
 
+import httpx
 import pytest
+from openai import AsyncOpenAI
 
 from app.adapters.anthropic_adp import AnthropicAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
@@ -368,6 +371,60 @@ def test_a_history_that_opens_with_a_note_still_starts_with_the_user_side() -> N
 
     assert [message["role"] for message in messages] == ["user", "assistant", "user"]
     assert messages[0]["content"] == [{"type": "text", "text": "<note>Greet the user.</note>"}]
+
+
+# ---- the OpenAI side, through the real SDK
+
+
+class _EndlessBody(httpx.AsyncByteStream):
+    """A streamed reply that says one word and then never ends."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aiter__(self):
+        yield (
+            b"event: response.output_text.delta\n"
+            b'data: {"type":"response.output_text.delta","delta":"Hi ","item_id":"x",'
+            b'"output_index":0,"content_index":0,"sequence_number":1,"logprobs":[]}\n\n'
+        )
+        await asyncio.Event().wait()
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_cutting_off_an_openai_reply_closes_its_connection_there_and_then() -> None:
+    body = _EndlessBody()
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)
+
+    adapter = OpenAIAdapterClass()
+    adapter._client = AsyncOpenAI(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    )
+    model = voice_model(adapter, "6 Luna", [])
+    speaking = asyncio.Event()
+
+    async def reply() -> None:
+        events = model.round(
+            [{"role": "user", "content": "hi"}], instructions="", think=False, must_answer=False
+        )
+        async with contextlib.aclosing(events):
+            async for _ in events:
+                speaking.set()
+                await asyncio.sleep(60)  # busy saying the first words when the user cuts in
+
+    replying = asyncio.create_task(reply())
+    async with asyncio.timeout(2):
+        await speaking.wait()
+    assert not body.closed
+    replying.cancel()
+    await asyncio.gather(replying, return_exceptions=True)
+
+    # Not left for the garbage collector: until it closes, the model is still writing.
+    assert body.closed
 
 
 # ---- a whole conversation on an Anthropic model

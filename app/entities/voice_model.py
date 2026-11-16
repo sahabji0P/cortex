@@ -16,6 +16,7 @@ The two providers are not handled alike:
   requests that each start with the whole of the one before.
 """
 
+import contextlib
 import json
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
@@ -176,21 +177,24 @@ class _OpenAIVoiceModel:
             store=False,
         )
         output = None
-        async for event in stream:
-            if event.type == "response.output_text.delta":
-                yield TextDelta(event.delta)
-            elif event.type == "response.output_item.added":
-                if event.item.type == "function_call":
-                    yield CallStarted(event.item.name)
-            elif event.type == "response.completed":
-                output = event.response.output
-            elif event.type == "response.failed":
-                error = event.response.error
-                raise RuntimeError(error.message if error else "the model call failed")
-            elif event.type == "response.incomplete":
-                raise RuntimeError("the model stopped before finishing")
-            elif event.type == "error":
-                raise RuntimeError(event.message)
+        # Leaving this block closes the connection, which is what stops the model when
+        # the reply is cut off while it is busy with something else, such as speaking.
+        async with contextlib.aclosing(stream):
+            async for event in stream:
+                if event.type == "response.output_text.delta":
+                    yield TextDelta(event.delta)
+                elif event.type == "response.output_item.added":
+                    if event.item.type == "function_call":
+                        yield CallStarted(event.item.name)
+                elif event.type == "response.completed":
+                    output = event.response.output
+                elif event.type == "response.failed":
+                    error = event.response.error
+                    raise RuntimeError(error.message if error else "the model call failed")
+                elif event.type == "response.incomplete":
+                    raise RuntimeError("the model stopped before finishing")
+                elif event.type == "error":
+                    raise RuntimeError(event.message)
         if output is None:
             raise RuntimeError("the model stream ended early")
         yield RoundDone(

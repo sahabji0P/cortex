@@ -15,6 +15,7 @@ and the rest still run.
 """
 
 import asyncio
+import contextlib
 import json
 import re
 
@@ -54,17 +55,18 @@ class Recorder:
         stream = await self._real.stream_response(**kw)
 
         async def tap():
-            async for event in stream:
-                if event.type == "response.output_text.delta":
-                    record["text"] += event.delta
-                elif event.type == "response.completed":
-                    record["usage"] = event.response.usage
-                    record["calls"] = [
-                        (i.name, i.arguments)
-                        for i in event.response.output
-                        if i.type == "function_call"
-                    ]
-                yield event
+            async with contextlib.aclosing(stream):
+                async for event in stream:
+                    if event.type == "response.output_text.delta":
+                        record["text"] += event.delta
+                    elif event.type == "response.completed":
+                        record["usage"] = event.response.usage
+                        record["calls"] = [
+                            (i.name, i.arguments)
+                            for i in event.response.output
+                            if i.type == "function_call"
+                        ]
+                    yield event
 
         return tap()
 
