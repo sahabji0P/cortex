@@ -1,9 +1,9 @@
 """Check the AI and pipeline part of the voice cascade, with no audio involved.
 
-Run from the repository root (needs OPENAI_API_KEY and PARALLEL_API_KEY in .env):
+Run from the repository root (needs PARALLEL_API_KEY and the model's own key in .env):
 
     uv run python -m scripts.voice_pipeline_check              # the default model, 6 Luna
-    uv run python -m scripts.voice_pipeline_check "6.1 Terra"  # or another OpenAI model
+    uv run python -m scripts.voice_pipeline_check "Haiku 5.5"  # or any other model's name
 
 The model and the web search are real. Speech is faked with the test suite's stand-ins:
 every word takes exactly one second to say and the clock is moved by hand, so each
@@ -21,57 +21,127 @@ import json
 import re
 import sys
 
+from app.adapters.anthropic_adp import AnthropicAdapterClass
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.entities import voice_ent
 from app.entities.voice_ent import VoiceConversation, VoiceEvent
+from app.entities.voice_model import RoundDone, TextDelta, is_openai
 from tests import test_voice_conversation as T
 
 DELAY = T._DELAY
-MODEL = sys.argv[1] if len(sys.argv) > 1 else "6 Luna"  # an OpenAI model's name
+MODEL = sys.argv[1] if len(sys.argv) > 1 else "6 Luna"
 RESULTS = []  # (scenario, verdict, detail)
 OPEN = []  # conversations not yet closed, so that a scenario that fails can be cleaned up
 
 
 class Recorder:
-    """The real model, with every request and reply written down."""
+    """Every request the model is sent and what it answered, whichever provider it is.
 
-    def __init__(self, real):
-        self._real, self.requests = real, []
+    It sits between the conversation and its model, so what it writes down is the
+    history as the conversation holds it, before any provider's translation.
+    """
+
+    def __init__(self):
+        self.requests = []
+        self._model = None
+
+    def wrap(self, model):
+        self._model = model
+        return self
+
+    async def label(self, text, *, instructions):
+        return await self._model.label(text, instructions=instructions)
+
+    async def round(self, items, *, instructions, think, must_answer):
+        sent = [dict(i) for i in items]
+        if self.requests:
+            T._assert_only_grew(self.requests[-1]["input"], sent)
+        record = {
+            "input": sent,
+            "tool_choice": "none" if must_answer else "auto",
+            "text": "",
+            "calls": [],
+            "usage": None,  # (input tokens, of which read from the cache)
+        }
+        self.requests.append(record)
+        events = self._model.round(
+            items, instructions=instructions, think=think, must_answer=must_answer
+        )
+        async with contextlib.aclosing(events):
+            async for event in events:
+                if isinstance(event, TextDelta):
+                    record["text"] += event.text
+                elif isinstance(event, RoundDone):
+                    record["calls"] = [(call.name, call.arguments) for call in event.calls]
+                yield event
+
+    def used(self, input_tokens, cached_tokens):
+        """The provider's count for the request in progress."""
+        if self.requests:
+            self.requests[-1]["usage"] = (input_tokens, cached_tokens)
+
+
+class OpenAITap:
+    """The OpenAI adapter, reporting each request's token counts to the recorder."""
+
+    def __init__(self, real, recorder):
+        self._real, self._recorder = real, recorder
 
     def __getattr__(self, name):
         return getattr(self._real, name)
 
     async def stream_response(self, **kw):
-        sent = [dict(i) for i in kw["input"]]
-        if self.requests:
-            T._assert_only_grew(self.requests[-1]["input"], sent)
-        record = {
-            "input": sent,
-            "tool_choice": kw.get("tool_choice"),
-            "text": "",
-            "calls": [],
-            "usage": None,
-        }
-        self.requests.append(record)
         stream = await self._real.stream_response(**kw)
 
         async def tap():
             async with contextlib.aclosing(stream):
                 async for event in stream:
-                    if event.type == "response.output_text.delta":
-                        record["text"] += event.delta
-                    elif event.type == "response.completed":
-                        record["usage"] = event.response.usage
-                        record["calls"] = [
-                            (i.name, i.arguments)
-                            for i in event.response.output
-                            if i.type == "function_call"
-                        ]
+                    if event.type == "response.completed" and event.response.usage:
+                        usage = event.response.usage
+                        self._recorder.used(
+                            usage.input_tokens, usage.input_tokens_details.cached_tokens
+                        )
                     yield event
 
         return tap()
+
+
+class AnthropicTap:
+    """The Anthropic adapter, reporting each request's token counts to the recorder."""
+
+    def __init__(self, real, recorder):
+        self._real, self._recorder = real, recorder
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def stream_message(self, **kw):
+        return _TappedStream(self._real.stream_message(**kw), self._recorder)
+
+
+class _TappedStream:
+    def __init__(self, manager, recorder):
+        self._manager, self._recorder, self._stream = manager, recorder, None
+
+    async def __aenter__(self):
+        self._stream = await self._manager.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc):
+        return await self._manager.__aexit__(*exc)
+
+    def __aiter__(self):
+        return self._stream.__aiter__()
+
+    async def get_final_message(self):
+        message = await self._stream.get_final_message()
+        usage = message.usage
+        read = usage.cache_read_input_tokens or 0
+        written = usage.cache_creation_input_tokens or 0
+        self._recorder.used(usage.input_tokens + read + written, read)
+        return message
 
 
 class Search:
@@ -157,17 +227,23 @@ class Voice:
 
 class Talk:
     def __init__(self, llm, search, *, speaks_first=False):
-        self.llm, self.search = Recorder(llm), Search(search)
+        self.llm, self.search = Recorder(), Search(search)
         self.stt, self.tts, self.clock = T._STT(), Voice(), T._Clock()
+        tap = OpenAITap if is_openai(MODEL) else AnthropicTap
         self.c = VoiceConversation(
             stt=self.stt,
             tts=self.tts,
-            llm=self.llm,
+            llm=tap(llm, self.llm),
             search=self.search,
             model=MODEL,
-            speaks_first=speaks_first,
+            speaks_first=False,
             clock=self.clock,
         )
+        self.c._model = self.llm.wrap(self.c._model)
+        if speaks_first:
+            # Started here, not by the conversation, so that the greeting is recorded too.
+            self.c._history.append({"role": "developer", "content": voice_ent._GREETING_NOTE})
+            self.c._producing = asyncio.create_task(self.c._respond())
         self.events = []
         OPEN.append(self)
 
@@ -257,7 +333,8 @@ async def scenario_3(llm, par, replies):
     leaked = [
         w
         for w in re.findall(r"[A-Za-z]{6,}", unheard)[:40]
-        if w.lower() in a.lower() and w.lower() not in heard.lower()
+        # A word of the user's own request is not something only the unheard part held.
+        if w.lower() in a.lower() and w.lower() not in (heard + STORY).lower()
     ]
     note(
         "cut reply: only heard words are known",
@@ -424,11 +501,7 @@ async def scenario_10(llm, par, replies):
     replies.append(a)
     last = t.llm.requests[-1]
     cleared = sum(1 for i in last["input"] if i.get("output") == voice_ent._CLEARED)
-    usage = [
-        (r["usage"].input_tokens, r["usage"].input_tokens_details.cached_tokens)
-        for r in t.llm.requests
-        if r["usage"]
-    ]
+    usage = [r["usage"] for r in t.llm.requests if r["usage"]]
     note(
         "clearing: old results cleared, conversation still coherent",
         cleared >= 5 and "Oslo" in a and not t.errors(),
@@ -589,7 +662,8 @@ SCENARIOS = [
 
 
 async def main():
-    llm, par = OpenAIAdapterClass(), ParallelAdapterClass()
+    llm = OpenAIAdapterClass() if is_openai(MODEL) else AnthropicAdapterClass()
+    par = ParallelAdapterClass()
     await asyncio.gather(llm.initialize(), par.initialize())
     replies = []  # every reply the model produced, for the style checks
     for scenario in SCENARIOS:
