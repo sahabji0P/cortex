@@ -458,10 +458,9 @@ def test_the_models_are_listed_in_order_with_whether_each_can_be_used(
         ("OpenAI", "6 Luna", True, True),
         ("OpenAI", "6.1 Sol", True, False),
         ("Anthropic", "Opus 5.5", False, False),
+        ("Anthropic", "Sonnet 5.5", False, False),
         ("Anthropic", "Haiku 5.5", False, False),
     ]
-    # One that a picker does not offer still works by name.
-    assert [info.name for info, _, _ in entity.models() if not info.listed] == ["Sonnet 5.5"]
 
 
 def test_the_websocket_query_names_a_model_or_none() -> None:

@@ -34,7 +34,7 @@ A conversation is held with one model from start to end, chosen when it opens:
 | `Opus 5.5` | Anthropic | a little: it cannot be turned off | `ANTHROPIC_API_KEY` |
 | `Sonnet 5.5` | Anthropic | no | `ANTHROPIC_API_KEY` |
 
-`VOICE_MODEL` sets the model for every conversation, and a client can ask for another with `?model=` on the WebSocket URL. `GET /v1/voice/models` lists them, with whether each one's key is set. The test page has a provider and a model picker built from that list; a model whose key is missing is shown but cannot be chosen. Sonnet 5.5 is not in the picker and still works by name, as in <http://127.0.0.1:8000/v1/voice/test?model=Sonnet%205.5>. Asking for a model whose provider has no key closes the socket with code 1008 and the reason in words.
+`VOICE_MODEL` sets the model for every conversation, and a client can ask for another with `?model=` on the WebSocket URL. `GET /v1/voice/models` lists them, with whether each one's key is set. The test page has a provider and a model picker built from that list; a model whose key is missing is shown but cannot be chosen. A model can also be named in the page's address, as in <http://127.0.0.1:8000/v1/voice/test?model=Sonnet%205.5>. Asking for a model whose provider has no key closes the socket with code 1008 and the reason in words.
 
 Everything below is the same for either provider. The conversation keeps one history, and only the last step differs: OpenAI is sent it as it stands, and for Anthropic it is translated into alternating user and assistant messages on every request. These things differ on an Anthropic model:
 

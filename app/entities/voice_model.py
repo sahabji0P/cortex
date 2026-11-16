@@ -79,8 +79,8 @@ VOICE_MODELS: tuple[ModelInfo, ...] = (
     ModelInfo("6 Luna", "OpenAI", "GPT-6 Luna", listed=True),
     ModelInfo("6.1 Sol", "OpenAI", "GPT-6.1 Sol", listed=True),
     ModelInfo("Opus 5.5", "Anthropic", "Claude Opus 5.5", listed=True),
+    ModelInfo("Sonnet 5.5", "Anthropic", "Claude Sonnet 5.5", listed=True),
     ModelInfo("Haiku 5.5", "Anthropic", "Claude Haiku 5.5", listed=True),
-    ModelInfo("Sonnet 5.5", "Anthropic", "Claude Sonnet 5.5", listed=False),
 )
 _OPENAI_MODELS: tuple[_OpenAIModelName, ...] = ("6 Luna", "6.1 Terra", "6.1 Sol")
 
