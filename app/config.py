@@ -35,8 +35,11 @@ class Settings(BaseSettings):
     # Leave empty to fall back to gcloud ADC.
     gcp_credentials_path: str = ""
 
-    # OpenAI (the only model provider)
+    # OpenAI (the model the voice pipeline uses)
     openai_api_key: str = ""
+
+    # Anthropic (the Claude Messages API adapter; nothing calls it yet)
+    anthropic_api_key: str = ""
 
     # Cartesia (speech-to-text and text-to-speech)
     cartesia_api_key: str = ""
