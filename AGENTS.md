@@ -36,3 +36,13 @@ What that means in practice:
 - **The app expects more than this backend sends.** It has screens for cost (it looks
   for a `usage` event that does not exist yet), text chat, and a library of files per
   gem. Those are marked "coming soon" in the app. When one is built here, tell the app.
+
+## Where the project is going
+
+`docs/darbar-notes.md` holds the plan in short lines: the project's own words (gem,
+Darbar, Bhandar and the rest), what is decided, what comes next, what is deferred, and
+what is still to be tried out. Read it before designing anything new, and use its words.
+When something new comes up or is put off, add one line there. Keep it to simple lines,
+no long paragraphs.
+
+`docs/voice-context.excalidraw` is a diagram of what the model is sent during a call.
