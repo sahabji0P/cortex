@@ -105,6 +105,33 @@ A value that is not offered, or a model whose provider has no key, closes the so
 | `interrupt` | the user started speaking: stop playback and drop queued audio. If that cut a reply short, `text` holds what the history keeps of it (just "…" if nothing); otherwise it is empty |
 | `error` | something failed; `text` holds the message |
 
+## Gems
+
+A gem is one of the user's assistants. Each has one config, kept in the `Gems` collection but treated like a config file. It holds only what a call can honour today:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | the version of the config's shape, 1 today. Every stored config carries it |
+| `name` | what the gem is called: required, trimmed, at most 100 characters |
+| `instructions` | plain text saying who the gem is and how it behaves. May be empty; at most 20,000 characters |
+| `model` | a `name` from `GET /v1/voice/models`, or null for the configured default |
+| `speaks_first` | whether the gem greets the user when a call connects. Default false |
+| `tools` | the names of the tools it may use, no name twice. Default `["web_search"]` |
+
+Something new (a voice, skills, looks) is added by raising the version and writing one step that brings older configs up to the new shape (`upgrade_gem_document` in [`app/entities/gem_ent.py`](app/entities/gem_ent.py)). A config from a newer version than the code knows is refused. One with no version is read as version 1, the first shape.
+
+A call does not take a gem yet: the WebSocket still takes `?model=` and `?first=`.
+
+| Route | Does |
+| --- | --- |
+| `POST /v1/gems` | makes a gem (201) |
+| `GET /v1/gems` | lists them, the one changed most recently first |
+| `GET /v1/gems/{gem_id}` | one gem |
+| `PATCH /v1/gems/{gem_id}` | changes only the fields sent. Only `model` may be null |
+| `DELETE /v1/gems/{gem_id}` | deletes it (204) |
+
+Ids go out as strings, and a missing or malformed id is a 404. There is no sign-in: this backend has one user for now.
+
 ## Layout
 
 Imports only go one way: `config ← core ← adapters ← entities ← routers ← main`.
@@ -113,8 +140,8 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 app/
   adapters/    one file per outside service; the only place an SDK is called
                openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
-  entities/    the logic: voice_ent and voice_speech (the cascade), model (either provider's model, for any conversation), tools (the tools a model may call, each a small object), user_ent
-  routers/     HTTP and WebSocket endpoints: voice, user
+  entities/    the logic: voice_ent and voice_speech (the cascade), model (either provider's model, for any conversation), tools (the tools a model may call, each a small object), gem_ent (a gem's config), user_ent
+  routers/     HTTP and WebSocket endpoints: voice, gems, user
 ```
 
 Also still present from earlier experiments: user registration and login (`/v1/users`), kept because a login will be needed.
