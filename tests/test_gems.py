@@ -184,9 +184,30 @@ async def test_a_stored_gem_with_a_tool_that_has_gone_still_loads_and_can_be_cha
     assert changed.tools == ["web_search", "weather"]
 
 
-async def test_a_gem_cannot_be_answered_by_a_model_that_does_not_exist() -> None:
+async def test_a_gem_cannot_be_given_a_model_that_does_not_exist() -> None:
+    gems, docdb = _gems()
+
     with pytest.raises(ValidationError):
-        GemConfig.model_validate(_stored(model="GPT-2"))
+        await gems.create(name="Lata", model=cast("Any", "GPT-2"))
+    assert docdb.documents == {}
+
+    made = await gems.create(name="Lata", model="Opus 5.5")
+    with pytest.raises(ValidationError):
+        await gems.update(str(made.id), {"model": "GPT-2"})
+    assert (await gems.get(str(made.id))).model == "Opus 5.5"
+
+
+async def test_a_stored_gem_whose_model_has_gone_is_answered_by_the_default() -> None:
+    # One gem saved before a model was dropped must not stop every gem being listed.
+    gems, docdb = _gems()
+    document = _stored(model="GPT-2")
+    docdb.documents[document["_id"]] = document
+
+    read = await gems.get(str(document["_id"]))
+    listed = await gems.list_all()
+
+    assert read.model is None
+    assert [gem.model for gem in listed] == [None]
 
 
 async def test_an_update_changes_only_the_fields_given() -> None:

@@ -123,7 +123,7 @@ A gem is one of the user's assistants. Each has one config, kept in the `Gems` c
 | `version` | the version of the config's shape, 1 today. Every stored config carries it |
 | `name` | what the gem is called: required, trimmed, at most 100 characters |
 | `instructions` | plain text saying who the gem is and how it behaves. May be empty; at most 20,000 characters |
-| `model` | a `name` from `GET /v1/voice/models`, or null for the configured default |
+| `model` | a `name` from `GET /v1/voice/models`, or null for the configured default. A stored name that is no longer offered is read as null |
 | `speaks_first` | whether the gem greets the user when a call connects. Default false |
 | `tools` | the names of the tools it may use, no name twice. Default `["web_search"]`, the only tool there is today. Any other name is refused when a gem is made or changed |
 
