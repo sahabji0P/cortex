@@ -341,8 +341,9 @@ async def scenario_3(llm, par, replies):
         stored == heard,
         f"stored {stored!r} ({len(full.split())} words were generated)",
     )
-    # 4. nothing of ours follows the cut, and the model still knows the rest went unheard
-    notes = [i["content"] for i in hist if i.get("role") == "developer"]
+    # 4. nothing of ours follows the cut (the line that opens the call is first), and the
+    # model still knows the rest went unheard
+    notes = [i["content"] for i in hist[1:] if i.get("role") == "developer"]
     t.clock.advance(600)
     a = await t.ask("Did I hear your whole story, yes or no?")
     replies.append(a)

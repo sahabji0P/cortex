@@ -72,7 +72,12 @@ from app.entities.voice_speech import Clock, Playback, Speech, Standby
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
 
-# Opens the history of a conversation in which the assistant is to speak first. The
+# The first item of a call's history. The gem is told one instruction text however it is
+# reached, and that text says a line in the conversation marks when a call starts: this
+# is that line.
+_CALL_STARTED = "The user has called you. From here on the conversation is spoken."
+
+# Follows it in a conversation in which the assistant is to speak first. The
 # model's own words never come first: its opening line is an answer to this.
 _GREETING_NOTE = (
     "The call has just connected and the user has not said anything yet. Greet them in "
@@ -155,8 +160,8 @@ class VoiceConversation:
         self._clock = clock
         self._playback = Playback(clock)
         # Everything the model sees, oldest first. It only ever grows at the end, and
-        # each entry is final when it is added.
-        self._history: list[Item] = []
+        # each entry is final when it is added. A call starts with nothing before it.
+        self._history: list[Item] = [{"role": "developer", "content": _CALL_STARTED}]
         # The user's turn that has not been answered yet, as the pieces it arrived in.
         # It joins the history when some of the reply to it has been heard.
         self._turn: list[str] = []
