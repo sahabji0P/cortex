@@ -19,7 +19,7 @@ a change here needs a matching change there:
 | The standing socket `/v1/link` (`app/routers/link`; its frames in `docs/chat-contract.md`) | `src/link.rs`, `src/chat.rs`, `src/voice.rs`, `src/audio.rs` | Written chat, and calls: `call.start` and its settings, the call's audio and how it is played, `call.playback`, and the frames a call ends with |
 | `VoiceEvent` in `app/entities/voice_ent.py` | `src/protocol.rs` | A call's events, sent on the link with `call.` put before their type |
 | `/v1/gems` (`app/routers/gems`, `GemConfig` in `app/entities/gem_ent.py`) | `src/gem_routes.rs` | The gems and their configs |
-| `GET /v1/gems/{id}/chat` | `src/chat.rs` | A gem's written conversation so far |
+| `GET /v1/gems/{id}/chat` | `src/chat.rs` | A gem's conversation so far, a call's turns included |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
 | `GET /v1/voice/models` | `src/models.rs` | The models a call can be held with |
 
@@ -44,6 +44,13 @@ What that means in practice:
   tool result), and the gem's own instructions. Both are the user's to change.
 - **A call is always with a gem.** `call.start` names the gem, and may say who speaks
   first. The gem's config says which model answers: a call cannot ask for another.
+- **A gem has one conversation, called or written to.** A call starts from what is
+  stored and stores its turns as they settle; the history route shows them as `user`
+  and `gem` messages. One writer at a time: while a call holds a gem, a `chat.send` to it
+  gets `chat.error` and another `call.start` gets `call.refused`, both with "the gem is in
+  a call", and a `call.start` cuts a reply being written to it. A call whose turns cannot
+  be stored ends in `call.failed`. A message whose reply never got through joins the next
+  one, and they are stored as one user message.
 - **The app expects more than this backend sends.** It has screens for cost (it looks
   for a `usage` event that does not exist yet) and a library of files per gem. Those
   are marked "coming soon" or show sample data in the app. When one is built here, tell
