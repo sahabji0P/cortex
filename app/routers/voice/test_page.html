@@ -248,6 +248,8 @@ async function start() {
   if (pageQuery.has("gem")) asked.gem = pageQuery.get("gem");
   if (modelEl.value) asked.model = modelEl.value;
   if (first.checked) asked.first = "assistant";
+  // Checked again: the link may have closed while the browser asked for the mic.
+  if (link.readyState !== WebSocket.OPEN) throw new Error("the link closed: reload the page");
   link.send(JSON.stringify(asked));
   calling = true;
   // Mic audio sent before `call.ready` is kept by the backend, so it is sent at once.
