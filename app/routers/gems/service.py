@@ -4,23 +4,27 @@ from typing import Annotated
 from fastapi import Depends
 
 from app.entities import EntitiesRegistry
-from app.entities.chat_ent import ChatEntityClass
+from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.routers.gems.models import GemsModels
 
 
 class GemsServiceV1Class:
     def __init__(
-        self, gems: GemEntityClass | None = None, chat: ChatEntityClass | None = None
+        self,
+        gems: GemEntityClass | None = None,
+        conversations: ConversationEntityClass | None = None,
     ) -> None:
         # Tests hand in their own. The app uses the ones the registry made at startup.
         self.gems = EntitiesRegistry.Gems if gems is None else gems
-        self._chat = chat
+        self._conversations = conversations
 
     @property
-    def chat(self) -> ChatEntityClass:
+    def conversations(self) -> ConversationEntityClass:
         # Looked up when it is first needed, so a test of the gems alone need not make it.
-        return EntitiesRegistry.Chat if self._chat is None else self._chat
+        if self._conversations is None:
+            return EntitiesRegistry.Conversations
+        return self._conversations
 
     @staticmethod
     def _gem_out(gem: GemConfig) -> GemsModels.V1.Output.Gem:
@@ -76,7 +80,7 @@ class GemsServiceV1Class:
                 GemsModels.V1.Output.ChatMessage(
                     role=message.role, text=message.text, at=message.at
                 )
-                for message in await self.chat.messages(gem_id)
+                for message in await self.conversations.messages(gem_id)
             ]
         )
 

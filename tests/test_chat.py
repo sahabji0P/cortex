@@ -17,9 +17,10 @@ from bson import ObjectId
 from pydantic import BaseModel
 
 from app.core.errors import NotFoundError
-from app.entities import chat_ent, late_results
+from app.entities import chat_ent, conversation_ent, late_results
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
+from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig, GemEntityClass
@@ -376,6 +377,7 @@ class _Chat(SimpleNamespace):
     store: ConversationStoreClass
     llm: _LLM
     search: Any
+    conversations: ConversationEntityClass
     chat: ChatEntityClass
     gem: GemConfig
 
@@ -388,23 +390,28 @@ class _Chat(SimpleNamespace):
         )
         return LinkServiceV1Class(self.chat, call)
 
-    def again(self) -> "_Chat":
-        """The same database, read by a new chat entity, as after a restart."""
+    def again(self, **parts: Any) -> "_Chat":
+        """The same database, read by new entities, as after a restart.
+
+        `parts` stand in for the gems, the store, the two model adapters or the search.
+        """
+        gems = parts.get("gems", self.gems)
+        conversations = ConversationEntityClass(gems=gems, store=parts.get("store", self.store))
         chat = ChatEntityClass(
-            gems=self.gems,
+            gems=gems,
             darbar=DarbarEntityClass(cast("Any", self.docdb)),
-            store=self.store,
-            openai=cast("Any", self.llm),
-            anthropic=cast("Any", _NoKey()),
-            search=self.search,
+            conversations=conversations,
+            openai=parts.get("openai", cast("Any", self.llm)),
+            anthropic=parts.get("anthropic", cast("Any", _NoKey())),
+            search=parts.get("search", self.search),
         )
-        return _Chat(**{**vars(self), "chat": chat})
+        return _Chat(**{**vars(self), "conversations": conversations, "chat": chat})
 
     async def stored(self) -> list[Any]:
         return [item.item for item in await self.store.load(self.gem.id)]
 
     async def shown(self) -> list[tuple[str, str]]:
-        chat = await GemsServiceV1Class(self.gems, self.chat).get_chat(str(self.gem.id))
+        chat = await GemsServiceV1Class(self.gems, self.conversations).get_chat(str(self.gem.id))
         return [(message.role, message.text) for message in chat.messages]
 
 
@@ -413,10 +420,11 @@ async def _chat(*rounds: list[Any], search: Any = None, **gem: Any) -> _Chat:
     gems, store = GemEntityClass(adapter), ConversationStoreClass(adapter)
     llm = _LLM(*rounds)
     search = _Search() if search is None else search
+    conversations = ConversationEntityClass(gems=gems, store=store)
     chat = ChatEntityClass(
         gems=gems,
         darbar=DarbarEntityClass(adapter),
-        store=store,
+        conversations=conversations,
         openai=cast("Any", llm),
         anthropic=cast("Any", _NoKey()),
         search=search,
@@ -429,7 +437,16 @@ async def _chat(*rounds: list[Any], search: Any = None, **gem: Any) -> _Chat:
             **gem,
         }
     )
-    return _Chat(docdb=docdb, gems=gems, store=store, llm=llm, search=search, chat=chat, gem=made)
+    return _Chat(
+        docdb=docdb,
+        gems=gems,
+        store=store,
+        llm=llm,
+        search=search,
+        conversations=conversations,
+        chat=chat,
+        gem=made,
+    )
 
 
 async def _open(service: LinkServiceV1Class) -> tuple[_Socket, asyncio.Task[None]]:
@@ -728,14 +745,7 @@ async def test_a_reply_that_cannot_be_stored_ends_in_chat_error() -> None:
     setup = await _chat(_said("Hi."), _said("Hi again."))
     # Another process took the conversation's next place first.
     await setup.store.add([_item(setup.gem.id, 0, "from elsewhere")])
-    setup.chat = ChatEntityClass(
-        gems=setup.gems,
-        darbar=DarbarEntityClass(cast("Any", setup.docdb)),
-        store=cast("Any", _BlindStore(setup.store)),
-        openai=cast("Any", setup.llm),
-        anthropic=cast("Any", _NoKey()),
-        search=setup.search,
-    )
+    setup = setup.again(store=_BlindStore(setup.store))
     socket, linked = await _open(setup.service())
 
     socket.send(setup.gem.id, "hello")
@@ -919,7 +929,7 @@ async def test_the_history_is_shown_oldest_first_with_times_in_utc() -> None:
         ]
     )
 
-    chat = await GemsServiceV1Class(setup.gems, setup.chat).get_chat(str(setup.gem.id))
+    chat = await GemsServiceV1Class(setup.gems, setup.conversations).get_chat(str(setup.gem.id))
 
     assert json.loads(chat.model_dump_json()) == {
         "messages": [
@@ -939,7 +949,7 @@ async def test_the_history_of_a_gem_that_is_not_there_is_a_404(gem_id: str) -> N
     setup = await _chat()
 
     with pytest.raises(NotFoundError):
-        await GemsServiceV1Class(setup.gems, setup.chat).get_chat(gem_id)
+        await GemsServiceV1Class(setup.gems, setup.conversations).get_chat(gem_id)
 
 
 async def test_a_deleted_gem_has_no_history() -> None:
@@ -953,7 +963,7 @@ async def test_a_deleted_gem_has_no_history() -> None:
 
     assert setup.docdb.collections["ChatItems"] == []
     with pytest.raises(NotFoundError):
-        await GemsServiceV1Class(setup.gems, setup.chat).get_chat(str(setup.gem.id))
+        await GemsServiceV1Class(setup.gems, setup.conversations).get_chat(str(setup.gem.id))
 
 
 async def test_a_changed_darbar_text_applies_from_the_next_message() -> None:
@@ -1778,7 +1788,7 @@ async def test_rewording_a_result_does_not_change_which_stored_calls_are_lost(
         if how == "lost"
         else ("CANCELLED", "Reworded: stopped.")
     )
-    for module in (late_results, chat_ent):
+    for module in (late_results, chat_ent, conversation_ent):
         monkeypatch.setattr(module, name, reworded, False)
     later = setup.again()
     setup.llm.then(_said("Hi."))
@@ -1876,14 +1886,7 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
         [_text("Hi."), _final()],
     )
     setup = await _chat(model="Haiku 5.5", search=searches)
-    setup.chat = ChatEntityClass(
-        gems=setup.gems,
-        darbar=DarbarEntityClass(cast("Any", setup.docdb)),
-        store=setup.store,
-        openai=cast("Any", _NoKey()),
-        anthropic=cast("Any", claude),
-        search=cast("Any", searches),
-    )
+    setup = setup.again(openai=_NoKey(), anthropic=claude, search=searches)
     socket, linked = await _open(setup.service())
     await _cut_while_searching(setup, socket)
     searches.gates[_WEATHER].set()
@@ -2040,14 +2043,7 @@ async def test_a_search_left_running_is_kept_track_of_even_if_the_next_step_fail
     searches = _Searches(_WEATHER)
     setup = await _chat(_looks(), _said("Noon."), _said("Also, it is sunny."), search=searches)
     gems = _FlakyGems(setup.gems)
-    setup.chat = ChatEntityClass(
-        gems=cast("Any", gems),
-        darbar=DarbarEntityClass(cast("Any", setup.docdb)),
-        store=setup.store,
-        openai=cast("Any", setup.llm),
-        anthropic=cast("Any", _NoKey()),
-        search=setup.search,
-    )
+    setup = setup.again(gems=gems)
     grows = _Grows(setup)
     socket, linked = await _open(setup.service())
     socket.send(setup.gem.id, "weather?")
@@ -2108,13 +2104,15 @@ async def test_nothing_is_kept_for_an_id_that_names_no_gem_or_a_client_that_has_
         socket.send(ObjectId(), "hello")
     socket.send("not-an-id", "hello")
     await socket.until("chat.error", 4)
-    assert setup.chat._outliving == {}
+    assert setup.conversations._kept == {}
+    assert setup.chat._latest == {}
 
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
-    assert list(setup.chat._outliving) == [str(setup.gem.id)]
+    assert setup.conversations._kept == {}
+    assert list(setup.chat._latest) == [str(setup.gem.id)]
     await _close(socket, linked)
-    assert setup.chat._outliving == {}
+    assert setup.chat._latest == {}
 
 
 async def test_a_search_running_when_its_reply_cannot_be_stored_is_stopped() -> None:
@@ -2123,14 +2121,7 @@ async def test_a_search_running_when_its_reply_cannot_be_stored_is_stopped() -> 
     setup = await _chat(_looks(), search=searches)
     # Another process took the conversation's next place first.
     await setup.store.add([_item(setup.gem.id, 0, "from elsewhere")])
-    setup.chat = ChatEntityClass(
-        gems=setup.gems,
-        darbar=DarbarEntityClass(cast("Any", setup.docdb)),
-        store=cast("Any", _BlindStore(setup.store)),
-        openai=cast("Any", setup.llm),
-        anthropic=cast("Any", _NoKey()),
-        search=setup.search,
-    )
+    setup = setup.again(store=_BlindStore(setup.store))
     socket, linked = await _open(setup.service())
     socket.send(setup.gem.id, "weather?")
     await socket.until("chat.tool")
@@ -2139,7 +2130,7 @@ async def test_a_search_running_when_its_reply_cannot_be_stored_is_stopped() -> 
     await _settle()
 
     assert searches.cancelled == [_WEATHER]
-    assert setup.chat._outliving == {}
+    assert setup.conversations._kept == {}
 
 
 async def test_a_search_running_when_its_gem_is_deleted_is_stopped() -> None:
@@ -2155,7 +2146,7 @@ async def test_a_search_running_when_its_gem_is_deleted_is_stopped() -> None:
 
     assert searches.cancelled == [_WEATHER]
     assert setup.docdb.collections.get("ChatItems", []) == []
-    assert setup.chat._outliving == {}
+    assert setup.conversations._kept == {}
 
 
 async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_open() -> None:
@@ -2169,8 +2160,9 @@ async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_open(
     # No reply got through, so nothing is stored: the message waits, in memory, for the
     # next one to join it. That client is not written to again.
     assert await setup.stored() == []
-    [state] = setup.chat._outliving.values()
-    assert state.latest is None
+    [kept] = setup.conversations._kept.values()
+    assert kept.turn.open
+    assert setup.chat._latest == {}
     other, other_linked = await _open(setup.service())
     other.send(setup.gem.id, "are you there?")
     await other.until("chat.done")
@@ -2179,4 +2171,4 @@ async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_open(
         {"role": "assistant", "content": "Hi."},
     ]
     await _close(other, other_linked)
-    assert setup.chat._outliving == {}
+    assert setup.conversations._kept == {}
