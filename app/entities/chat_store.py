@@ -3,8 +3,8 @@ Chat store entity: each gem's written conversation, kept in the `ChatItems` coll
 
 The conversation is kept as the model is sent it: one document per item of the history
 (a message, a tool call, or a call's result), in order. It is only ever added to. That
-is what lets the database be the truth: every reply is made from what is stored, so
-nothing about a conversation needs to be kept in memory between messages.
+is what lets the database be the truth: every reply is made from what is stored. All
+that is kept in memory between messages is the searches still running (see `chat_ent.py`).
 
 A gem's conversation goes when the gem does (see `GemEntityClass.delete`).
 """

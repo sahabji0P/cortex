@@ -7,7 +7,9 @@ app shows of it and wants spoken (its description, picture, voice and speed), wh
 backend only keeps. Anything new is added by raising `GEM_CONFIG_VERSION` and writing one
 step in `upgrade_gem_document` that brings older documents up to the new shape.
 
-A call is held with a gem when the voice WebSocket names it with `?gem=`.
+A call is held with a gem when it is opened with the gem's id: `call.start` on the
+standing socket, or `?gem=` on the old call socket. A chat names the gem in every
+`chat.send`.
 """
 
 from collections.abc import Callable, Mapping
