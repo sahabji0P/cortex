@@ -10,6 +10,9 @@ from app.entities import EntitiesRegistry
 from app.entities.chat_ent import ChatEntityClass, ChatTurn
 from app.routers.link.models import LinkModels
 
+# How long one frame may take to be taken by the client before the client counts as gone.
+_SEND_SECONDS = 10.0
+
 
 class LinkServiceV1Class:
     def __init__(self, chat: ChatEntityClass | None = None) -> None:
@@ -30,7 +33,16 @@ class LinkServiceV1Class:
 
         async def send(frame: BaseModel) -> None:
             async with sending:
-                await websocket.send_text(frame.model_dump_json())
+                try:
+                    async with asyncio.timeout(_SEND_SECONDS):
+                        await websocket.send_text(frame.model_dump_json())
+                except TimeoutError:
+                    # A client that is connected but has stopped reading. Left alone, it
+                    # would hold up its gem's next message, from any socket, and every
+                    # other reply on this one. So it is treated as gone.
+                    with contextlib.suppress(Exception):
+                        await websocket.close()
+                    raise
 
         turns: list[ChatTurn] = []
         try:

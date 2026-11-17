@@ -37,8 +37,8 @@ from app.entities.chat_store import ChatItem, ChatStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.instructions import instructions
-from app.entities.model import LLM, is_openai, model_for
-from app.entities.tools import Toolbox, web_search_tool
+from app.entities.model import LLM, Item, is_openai, model_for
+from app.entities.tools import Tool, Toolbox, web_search_tool
 from app.entities.written_ent import WrittenConversation, WrittenEvent
 
 __all__ = ["ChatEntityClass", "ChatEvent", "ChatMessage", "ChatTurn", "Deliver"]
@@ -200,12 +200,21 @@ class ChatEntityClass:
                 provider = "OpenAI" if is_openai(name) else "Anthropic"
                 await tell("chat.error", f"no {provider} key is set, so {name} cannot be used")
                 return
+            stored = await self._store.load(gem.id)
             # Writing offers web search when the gem's tools name it and the key is set.
             # Nothing outlives its reply in writing, so a call's cancel_tool_call is not.
             offers_search = self._search.configured and "web_search" in gem.tools
-            tools = Toolbox([web_search_tool(self._search)] if offers_search else [])
+            search = web_search_tool(self._search)
+            if offers_search:
+                tools = Toolbox([search])
+            elif any(_calls(item.item, search.name) for item in stored):
+                # The conversation holds searches from when the gem could search. A
+                # provider refuses a history with calls of a tool it is not told of, so
+                # the tool stays declared, and a call of it now is answered with why not.
+                tools = Toolbox([Tool(search.spec, _not_available)])
+            else:
+                tools = Toolbox()
             model = model_for(llm, name, tools.specs)
-            stored = await self._store.load(gem.id)
             # Read for every reply, so a change to it applies from the next message.
             darbar = (await self._darbar.read()).text
             conversation = WrittenConversation(
@@ -242,6 +251,10 @@ class ChatEntityClass:
             except Exception as exc:
                 await tell("chat.error", f"the reply could not be stored: {exc}")
                 return
+            if not await self._gems.exists(gem_id):
+                # The gem was deleted while its reply was being written. Its conversation
+                # went with it, so what was just added goes too.
+                await self._store.forget(gem.id)
             if failure is not None:
                 await tell("chat.error", f"reply failed: {failure}")
             elif ended is not None:
@@ -276,6 +289,15 @@ async def _read(
     except Exception as exc:
         return None, exc
     return None, None
+
+
+def _calls(item: Item, tool: str) -> bool:
+    """Whether a history item is a call of the tool called `tool`."""
+    return "type" in item and item["type"] == "function_call" and item["name"] == tool
+
+
+async def _not_available(arguments: str) -> str:
+    return "This tool is not available to you now."
 
 
 def _key(gem_id: str) -> str:

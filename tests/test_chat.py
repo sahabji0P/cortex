@@ -131,14 +131,22 @@ class _DocDB:
         self.collections: dict[str, list[dict[str, Any]]] = {}
         # When set, every write waits for it: a slow store.
         self.slow: Any = None
+        # When set, a write of several documents stops after this many, and fails.
+        self.breaks_after: int | None = None
 
     def _all(self, collection: type[BaseModel]) -> list[dict[str, Any]]:
         return self.collections.setdefault(_name(collection), [])
 
     @staticmethod
     def _matches(document: dict[str, Any], filters: MutableMapping[str, Any]) -> bool:
+        def same(found: Any, wanted: Any) -> bool:
+            if isinstance(wanted, dict) and set(wanted) == {"$in"}:
+                return found in wanted["$in"]
+            return found == wanted
+
         return all(
-            document.get("_id" if key == "id" else key) == value for key, value in filters.items()
+            same(document.get("_id" if key == "id" else key), value)
+            for key, value in filters.items()
         )
 
     @staticmethod
@@ -178,7 +186,9 @@ class _DocDB:
         if self.slow is not None:
             await self.slow.wait()
         documents = self._all(type(data[0]))
-        for item in data:
+        for written, item in enumerate(data):
+            if self.breaks_after is not None and written == self.breaks_after:
+                raise ConnectionError("the database went away part-way")
             document = self._stored(item)
             if isinstance(item, ChatItem) and any(
                 (d["gem_id"], d["place"]) == (document["gem_id"], document["place"])
@@ -959,4 +969,82 @@ async def test_a_changed_darbar_text_applies_from_the_next_message() -> None:
     assert second.startswith("Every gem answers to the user alone.\n\nYou are Kuber.\n")
     # An empty one tells the gem nothing there.
     assert third.startswith("You are Kuber.\n")
+    await _close(socket, linked)
+
+
+async def test_a_gem_that_lost_its_search_still_declares_it_while_its_history_holds_searches() -> (
+    None
+):
+    call = _search_call("Pune weather")
+    again = _search_call("Pune weather now", "call_2")
+    setup = await _chat(
+        [_delta("Let me look."), _starts(call), _completed(call)],
+        _said("Sunny."),
+        [_starts(again), _completed(again)],
+        _said("I cannot look that up now."),
+    )
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.done")
+
+    await setup.gems.update(str(setup.gem.id), {"tools": []})
+    socket.send(setup.gem.id, "and now?")
+    await socket.until("chat.done", 2)
+
+    asked = setup.llm.requests[2]
+    # A provider refuses calls of a tool it is not told of, so it is still told of it.
+    assert _tool_names(asked) == ["web_search"]
+    assert [item.get("type") for item in asked["input"][2:4]] == [
+        "function_call",
+        "function_call_output",
+    ]
+    # But the gem is given none of the rules for searching, and a search does not run.
+    assert "search" not in asked["instructions"]
+    assert setup.search.queries == ["Pune weather"]
+    refused = setup.llm.requests[3]["input"][-1]
+    assert refused == {
+        "type": "function_call_output",
+        "call_id": "call_2",
+        "output": "This tool is not available to you now.",
+    }
+    await _close(socket, linked)
+
+
+async def test_a_write_that_stops_part_way_leaves_none_of_the_reply() -> None:
+    call = _search_call("Pune weather")
+    setup = await _chat(
+        [_delta("Let me look."), _starts(call), _completed(call)], _said("Sunny."), _said("Hi.")
+    )
+    socket, linked = await _open(setup.service())
+
+    # The write stops after the user's message, the first text and the call: a call
+    # would be left with no result.
+    setup.docdb.breaks_after = 3
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.error")
+    assert socket.chat()[-1][1].startswith("the reply could not be stored")
+    assert await setup.stored() == []
+
+    setup.docdb.breaks_after = None
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done")
+    assert await setup.stored() == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi."},
+    ]
+    await _close(socket, linked)
+
+
+async def test_a_gem_deleted_while_its_reply_is_written_leaves_no_conversation() -> None:
+    held = asyncio.Event()
+    setup = await _chat([_delta("Once upon "), held, _delta("a time."), _completed()])
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "a story")
+    await socket.until("chat.text")
+
+    await setup.gems.delete(str(setup.gem.id))
+    held.set()
+    await socket.until("chat.done")
+
+    assert setup.docdb.collections.get("ChatItems", []) == []
     await _close(socket, linked)

@@ -265,14 +265,20 @@ function openChat(gem) {
     } else if (frame.type === "chat.done") {
       writing = null;
     } else if (frame.type === "chat.cut") {
-      // Shown as it is kept: what was written, ending in "…".
+      // The stretch being written is shown as it is kept: ending in "…". Nothing is
+      // added when no text was being written (cut before any, or while a tool ran):
+      // the conversation keeps no reply for that.
       if (writing && !writing.textContent.trimEnd().endsWith("…")) writing.textContent = `${writing.textContent.trimEnd()}…`;
-      else if (!writing) say("cortex", name, "…");
       say("meta", "", "cut off by a new message");
       writing = null;
-    } else if (frame.type === "chat.error" || frame.type === "error") {
+    } else if (frame.type === "chat.error") {
+      // What was written before a failure is kept the same way, ending in "…".
+      if (writing && !writing.textContent.trimEnd().endsWith("…")) writing.textContent = `${writing.textContent.trimEnd()}…`;
       say("meta", "", `error: ${frame.text}`);
       writing = null;
+    } else if (frame.type === "error") {
+      // A frame that was refused. A reply being written carries on.
+      say("meta", "", `error: ${frame.text}`);
     }
   }
 

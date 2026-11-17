@@ -9,6 +9,7 @@ nothing about a conversation needs to be kept in memory between messages.
 A gem's conversation goes when the gem does (see `GemEntityClass.delete`).
 """
 
+import contextlib
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Annotated, ClassVar
@@ -58,9 +59,22 @@ class ChatStoreClass:
         return await self._docdb.get_many(ChatItem, filters={"gem_id": gem_id}, sort=[("place", 1)])
 
     async def add(self, items: Sequence[ChatItem]) -> None:
-        """Add items, in one write, so a tool call is never stored without its result."""
-        if items:
+        """Add a message and its reply together: all of the items, or none of them.
+
+        They go in one request, but the database may still stop part-way, which would
+        leave a tool call without its result. So what a failed write did put in is
+        taken out again before the failure is raised.
+        """
+        if not items:
+            return
+        try:
             await self._docdb.insert_many(items)
+        except BaseException:
+            # If this cannot be done either (the database is out of reach), the part
+            # that was written stays. That is the one way left to a half-stored reply.
+            with contextlib.suppress(Exception):
+                await self._docdb.delete_many(ChatItem, {"id": {"$in": [i.id for i in items]}})
+            raise
 
     async def forget(self, gem_id: ObjectId) -> None:
         await self._docdb.delete_many(ChatItem, {"gem_id": gem_id})
