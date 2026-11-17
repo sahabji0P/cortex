@@ -1091,6 +1091,12 @@ def _placeholder(call_id: str) -> str:
     )
 
 
+_LOST = (
+    "This search was lost before it finished, and its result will not arrive. Search again "
+    "if it is still needed."
+)
+
+
 class _Searches:
     """Web search, with a gate of its own for each query that is given one."""
 
@@ -1641,6 +1647,89 @@ async def test_thinking_lasts_while_a_search_has_no_result_in_the_history() -> N
     await _close(socket, linked)
 
 
+async def test_a_search_lost_to_a_restart_is_closed_once_before_the_next_message() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), search=searches)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    await _close(socket, linked)
+    # The old process is gone: its search never comes back (its gate is never opened).
+
+    later = setup.again()
+    grows = _Grows(later)
+    before = await grows.check()
+    setup.llm.then(_said("That search was lost. Shall I look again?"), _said("Okay."))
+    socket, linked = await _open(later.service())
+    socket.send(later.gem.id, "so, the weather?")
+    await socket.until("chat.done")
+
+    stored = await grows.check()
+    assert _kinds(stored[6:]) == ["function_call", "function_call_output", "user", "assistant"]
+    assert _stub_of(stored[6]) == "call_1"
+    assert stored[6]["name"] == "web_search"
+    assert stored[7] == {
+        "type": "function_call_output",
+        "call_id": stored[6]["call_id"],
+        "output": _LOST,
+    }
+    assert setup.llm.requests[2]["input"] == [
+        *before,
+        stored[6],
+        stored[7],
+        {"role": "user", "content": "so, the weather?"},
+    ]
+    # Nothing is pending any more, and the stub is not shown.
+    assert _thinks(setup)[2] is False
+    assert ("gem", "That search was lost. Shall I look again?") in await later.shown()
+    assert len(await later.shown()) == 7
+
+    socket.send(later.gem.id, "no")
+    await socket.until("chat.done", 2)
+    stored = await grows.check()
+    stubs = [
+        item
+        for item in stored
+        if item.get("type") == "function_call" and "late_" in item["call_id"]
+    ]
+    assert len(stubs) == 1
+    await _close(socket, linked)
+
+
+@pytest.mark.parametrize("how", ["cancelled", "delivered"])
+async def test_a_search_that_was_cancelled_or_told_is_not_lost(how: str) -> None:
+    searches = _Searches(_WEATHER)
+    cancel = _cancel_call("call_9", "call_1")
+    setup = await _chat(
+        _looks(),
+        *(
+            [[_starts(cancel), _completed(cancel)], _said("Stopped.")]
+            if how == "cancelled"
+            else [_said("Noon."), _said("It is sunny.")]
+        ),
+        search=searches,
+    )
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    if how == "delivered":
+        searches.gates[_WEATHER].set()
+        await socket.until("chat.done", 2)
+    await _close(socket, linked)
+    before = await setup.stored()
+
+    later = setup.again()
+    setup.llm.then(_said("Hi."))
+    socket, linked = await _open(later.service())
+    socket.send(later.gem.id, "hello")
+    await socket.until("chat.done")
+
+    assert await later.stored() == [
+        *before,
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi."},
+    ]
+    await _close(socket, linked)
+
+
 async def test_a_reply_about_a_result_that_fails_to_begin_ends_in_chat_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1734,6 +1823,29 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
     await _cut_while_searching(setup, socket)
     searches.gates[_WEATHER].set()
     await socket.until("chat.done", 2)
+    # And a search lost to a restart, closed before a message.
+    await setup.store.add(
+        [
+            ChatItem(gem_id=setup.gem.id, place=place, at=_NOW, item=item)
+            for place, item in enumerate(
+                [
+                    {"role": "user", "content": "and Delhi?"},
+                    {
+                        "type": "function_call",
+                        "call_id": "toolu_2",
+                        "name": "web_search",
+                        "arguments": json.dumps({"query": "Delhi weather"}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "toolu_2",
+                        "output": _placeholder("toolu_2"),
+                    },
+                ],
+                start=len(await setup.stored()),
+            )
+        ]
+    )
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done", 3)
 
@@ -1749,10 +1861,16 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
         "function_call_output",
         "assistant",
         "user",
+        "function_call",
+        "function_call_output",
+        "function_call",
+        "function_call_output",
+        "user",
         "assistant",
     ]
     assert stored[3]["output"] == _placeholder("toolu_1")
     assert _stub_of(stored[6]) == "toolu_1"
+    assert _stub_of(stored[12]) == "toolu_2" and stored[13]["output"] == _LOST
     _a_valid_chain(stored)
     for request in claude.requests:
         _a_valid_anthropic_request(request["messages"])

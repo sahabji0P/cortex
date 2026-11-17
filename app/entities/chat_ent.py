@@ -21,8 +21,11 @@ finishes, at the next moment no reply is being written to that gem, its result i
 to the stored conversation as a stub call followed by the result (see
 `late_results.py`), and the gem tells the user about it in a reply of its own, sent to
 the socket that sent the latest message to it. The gem can stop a running search with
-`cancel_tool_call`. Which stub delivered which call is read from the stored
-conversation.
+`cancel_tool_call`. Which stub delivered which call, and which calls were cancelled, are
+read from the stored conversation.
+
+Searches live in this process's memory, so a restart loses them. A placeholder whose
+search is gone is closed with a stub saying so, before the next reply is made.
 
 A call is not joined to this yet: a call starts empty and adds nothing here.
 """
@@ -52,6 +55,7 @@ from app.entities.late_results import (
     CANCEL_TOOL,
     CANCELLED,
     NOTHING_RUNNING,
+    PLACEHOLDER,
     delivers,
     late_stub,
 )
@@ -86,6 +90,13 @@ class ChatEvent(BaseModel):
 
 # Sends one frame to the client that sent the message. It raises if the client is gone.
 type Deliver = Callable[[ChatEvent], Awaitable[None]]
+
+# The result a search lost to a restart is given, so its placeholder does not promise a
+# result for ever. THE OWNER HAS NOT RULED ON THIS WORDING.
+_LOST = (
+    "This search was lost before it finished, and its result will not arrive. Search "
+    "again if it is still needed."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +260,8 @@ class ChatEntityClass:
                 return
             stored = await self._store.load(ready.gem.id)
             history = [item.item for item in stored]
+            # A search lost to a restart is closed before the new message.
+            history += await self._add_stubs(ready.gem.id, history, self._lost(key, history))
             await self._write(turn, key, ready, history, text, at, gem_id, deliver)
         except Exception as exc:
             # Anything else, such as the store being out of reach before the reply began.
@@ -422,7 +435,8 @@ class ChatEntityClass:
                 return  # the gem went, and its conversation with it: they are dropped
             gem_oid = ObjectId(key)
             history = [item.item for item in await self._store.load(gem_oid)]
-            stubs = [late_stub(call, output) for call, output in told]
+            lost = self._lost(key, history, also_here=[call for call, _ in told])
+            stubs = [*lost, *(late_stub(call, output) for call, output in told)]
             history += await self._add_stubs(gem_oid, history, stubs)
             if not await self._gems.exists(gem_id):
                 await self._store.forget(gem_oid)  # deleted while they were stored
@@ -440,8 +454,8 @@ class ChatEntityClass:
             begun = True
             await self._write(turn, key, ready, history, None, datetime.now(UTC), gem_id, deliver)
         except Exception as exc:
-            # As when the store is out of reach. A result taken and not stored is lost.
-            # A client sent
+            # As when the store is out of reach. A result taken and not stored is lost:
+            # its placeholder is closed as lost before the next reply. A client sent
             # `chat.result` is owed a last frame: `_write` sends one only once nothing
             # after it can fail.
             if begun:
@@ -462,6 +476,46 @@ class ChatEntityClass:
             ]
         )
         return items
+
+    def _lost(
+        self, key: str, history: Sequence[Item], *, also_here: Sequence[ToolCall] = ()
+    ) -> list[ToolCall]:
+        """A stub for each search lost to a restart, closing its placeholder.
+
+        Lost is a placeholder whose search is not running or waiting here (or one of
+        `also_here`), that no stub has delivered, and that no `cancel_tool_call` stopped.
+        """
+        here = {call.call_id for call in also_here}
+        if (state := self._outliving.get(key)) is not None:
+            here |= {*state.running, *(call.call_id for call, _ in state.waiting)}
+        calls = {
+            item["call_id"]: item
+            for item in history
+            if "type" in item and item["type"] == "function_call"
+        }
+        delivered = set(_stubs(history).values())
+        outputs = {
+            item["call_id"]: item["output"]
+            for item in history
+            if "type" in item and item["type"] == "function_call_output"
+        }
+        cancelled = {
+            _named(item["arguments"])
+            for item in calls.values()
+            if item["name"] == CANCEL_TOOL.name and outputs.get(item["call_id"]) == CANCELLED
+        }
+        lost: list[ToolCall] = []
+        for item in history:
+            if "type" not in item or item["type"] != "function_call_output":
+                continue
+            call_id = item["call_id"]
+            if item["output"] != PLACEHOLDER.format(call_id=call_id) or call_id not in calls:
+                continue
+            if call_id in here or call_id in delivered or call_id in cancelled:
+                continue
+            call = calls[call_id]
+            lost.append(late_stub(ToolCall(call_id, call["name"], call["arguments"]), _LOST))
+        return lost
 
     async def _cancel(self, key: str, stubs: dict[str, str], arguments: str) -> str:
         """Stop a search of the gem's that outlived its reply. Its result never arrives.
@@ -508,6 +562,15 @@ def _stubs(history: Sequence[Item]) -> dict[str, str]:
         for item in history
         if "type" in item and item["type"] == "function_call" and (original := delivers(item))
     }
+
+
+def _named(arguments: str) -> str | None:
+    """The call_id a `cancel_tool_call` named, if it can be read."""
+    try:
+        named = json.loads(arguments)["call_id"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return str(named)
 
 
 async def _read(
