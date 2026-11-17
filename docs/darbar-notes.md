@@ -38,6 +38,8 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A tool registry, then skills.
 - The standing WebSocket, with the call moved onto it.
 - Chat.
+- The call code still stops a reply at 3 searches. Take the cap out, as decided above.
+- A sound before the greeting's first word leaves the call silent. Small fix.
 
 ## Deferred
 
@@ -95,3 +97,4 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Sizes: short in a call, medium in chat, long as a granth.
 - One context with both speaking and writing in it: does the gem keep to the right one?
 - No cap on tool rounds: does a gem ever loop?
+- Call: three things are now asked of the model and not yet run live: a few words before a wait, carrying on after a sound, telling a late result after answering.
