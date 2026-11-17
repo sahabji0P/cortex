@@ -128,7 +128,6 @@ class Delivered:
     items: list[Item]  # what joins the history
     any_text: bool  # whether any of the reply's text was delivered
     kept: str | None  # the text kept of a reply that was cut short; None if delivered in full
-    undelivered: str  # the text that was dropped
 
 
 class Reply:
@@ -179,7 +178,6 @@ class Reply:
         """
         items: list[Item] = []
         kept: list[str] = []
-        undelivered: list[str] = []
         cut = False
         any_text = False
         for index, part in enumerate(self._parts):
@@ -188,20 +186,18 @@ class Reply:
                 continue
             said = part.text.strip()
             if cut and index >= self._sent_back:
-                undelivered.append(said)  # produced after delivery stopped
-                continue
+                continue  # produced after delivery stopped
             text, whole = part.delivered(at)
             any_text = any_text or bool(text)
             if index < self._sent_back:
                 text = said
             elif not whole:
-                undelivered.append(said[len(text) :].strip())
                 text = f"{text}{CUT_MARK}" if text else ""
             cut = cut or not whole
             if text:
                 kept.append(text)
                 items.append({"role": "assistant", "content": text})
-        return Delivered(items, any_text, " ".join(kept) if cut else None, " ".join(undelivered))
+        return Delivered(items, any_text, " ".join(kept) if cut else None)
 
 
 class RoundInput(NamedTuple):
