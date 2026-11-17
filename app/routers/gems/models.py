@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -56,3 +57,15 @@ class GemsModels:
                 tools: list[str]
                 created_at: datetime
                 updated_at: datetime
+
+            class ChatMessage(BaseModel):
+                # `tool`: the gem used a tool. `text` is what its `chat.tool` frame said.
+                role: Literal["user", "gem", "tool"]
+                # A reply that was cut ends in "…".
+                text: str
+                at: datetime
+
+            class Chat(BaseModel):
+                """A gem's written conversation so far, oldest first."""
+
+                messages: list["GemsModels.V1.Output.ChatMessage"]

@@ -1,4 +1,5 @@
 from app.adapters import AdapterRegistry
+from app.entities.chat_ent import ChatEntityClass
 from app.entities.chat_store import ChatItem, ChatStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
@@ -24,6 +25,13 @@ class EntitiesRegistry:
         cls.Gems = GemEntityClass(docdb=adapter.DocDB)
         cls.Darbar = DarbarEntityClass(docdb=adapter.DocDB)
         cls.ChatStore = ChatStoreClass(docdb=adapter.DocDB)
+        cls.Chat = ChatEntityClass(
+            gems=cls.Gems,
+            store=cls.ChatStore,
+            openai=adapter.OpenAI,
+            anthropic=adapter.Anthropic,
+            search=adapter.Parallel,
+        )
         cls.Voice = VoiceEntityClass(
             stt=adapter.CartesiaSTT,
             tts=adapter.CartesiaTTS,

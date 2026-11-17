@@ -314,7 +314,7 @@ def _service() -> GemsServiceV1Class:
     return GemsServiceV1Class(_gems()[0])
 
 
-def test_the_routes_are_the_five_a_client_expects() -> None:
+def test_the_routes_are_the_ones_a_client_expects() -> None:
     routes = {
         (method, route.path, route.status_code)
         for route in router.routes
@@ -326,6 +326,8 @@ def test_the_routes_are_the_five_a_client_expects() -> None:
         ("POST", "/v1/gems", 201),
         ("GET", "/v1/gems", None),
         ("GET", "/v1/gems/{gem_id}", None),
+        # The gem's written conversation, for showing on screen.
+        ("GET", "/v1/gems/{gem_id}/chat", None),
         ("PATCH", "/v1/gems/{gem_id}", None),
         ("DELETE", "/v1/gems/{gem_id}", 204),
     }
