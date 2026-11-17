@@ -26,6 +26,7 @@ from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.entities import voice_ent
+from app.entities.gem_ent import DEFAULT_GEM_INSTRUCTIONS
 from app.entities.model import RoundDone, TextDelta, is_openai
 from app.entities.voice_ent import VoiceConversation, VoiceEvent
 from tests import test_voice_conversation as T
@@ -33,6 +34,8 @@ from tests import test_voice_conversation as T
 DELAY = T._DELAY
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "6 Luna"
 RESULTS = []  # (scenario, verdict, detail)
+# A gem as a new one is made: the style checks below are of its default instructions.
+GEM = T._GEM.model_copy(update={"instructions": DEFAULT_GEM_INSTRUCTIONS})
 OPEN = []  # conversations not yet closed, so that a scenario that fails can be cleaned up
 
 
@@ -229,7 +232,7 @@ class Talk:
             tts=self.tts,
             llm=tap(llm, self.llm),
             search=self.search,
-            gem=T._GEM,
+            gem=GEM,
             model=MODEL,
             speaks_first=False,
             clock=self.clock,
