@@ -17,6 +17,12 @@ from app.routers.link.models import LinkModels
 # How long one frame may take to be taken by the client before the client counts as gone.
 _SEND_SECONDS = 10.0
 
+# How many frames of mic audio may wait to be fed into a call: about half a minute. The
+# old call socket made the client wait when speech recognition took no audio. Here the
+# socket is read whatever the call does, so audio that is not taken piles up instead, and
+# a call that far behind is of no use: it is failed.
+_MIC_FRAMES_WAITING = 300
+
 _log = logging.getLogger(__name__)
 
 type _Send = Callable[[BaseModel], Awaitable[None]]
@@ -51,8 +57,11 @@ class LinkServiceV1Class:
         turns: list[ChatTurn] = []
         # The socket's call: the latest one asked for, until the next replaces it.
         call: _Call | None = None
+        # Set once the client has stopped reading and the socket was closed on it.
+        gone = False
 
         async def put(write: Callable[[], Awaitable[None]]) -> None:
+            nonlocal gone
             async with sending:
                 try:
                     async with asyncio.timeout(_SEND_SECONDS):
@@ -64,10 +73,14 @@ class LinkServiceV1Class:
                     # is ended here and now, whichever frame it was: a socket closed by
                     # us may not wake the loop below, and a call left open holds speech
                     # connections open.
+                    gone = True
                     if call is not None:
                         call.hang_up()
+                    # Closing waits on the client too, and this holds every other frame
+                    # of the socket back, so it gets no longer than a frame does.
                     with contextlib.suppress(Exception):
-                        await websocket.close()
+                        async with asyncio.timeout(_SEND_SECONDS):
+                            await websocket.close()
                     raise
 
         async def send(frame: BaseModel) -> None:
@@ -83,7 +96,10 @@ class LinkServiceV1Class:
             await send(LinkModels.V1.Output.Ready())
             while True:
                 message = await websocket.receive()
-                if message["type"] == "websocket.disconnect":
+                if gone or message["type"] == "websocket.disconnect":
+                    # Frames a client sent before it stopped reading can still be handed
+                    # over after the socket was closed on it. They are not acted on: a
+                    # `call.start` among them would open a call nobody is there for.
                     return
                 if (audio := message.get("bytes")) is not None:
                     # Mic audio for the socket's call. With no call, it is dropped.
@@ -169,9 +185,9 @@ class _Call:
 
     The conversation holds speech connections open on the owner's paid account, so
     however the call ends it is closed, once, before that last frame: on `call.end`, on
-    the socket closing, on a failure feeding audio in or sending it out, when the
-    conversation ends by itself, when the opening is stopped part-way, and when this
-    task is cancelled.
+    the socket closing, on a failure feeding audio in or sending it out, when mic audio
+    piles up untaken, when the conversation ends by itself, when the opening is stopped
+    part-way, and when this task is cancelled.
     """
 
     def __init__(
@@ -188,7 +204,9 @@ class _Call:
         self._send = send
         self._send_audio = send_audio
         # Mic audio waits here from `call.start` until the call is open, so none is lost.
-        self._audio: asyncio.Queue[bytes] = asyncio.Queue()
+        self._audio: asyncio.Queue[bytes] = asyncio.Queue(_MIC_FRAMES_WAITING)
+        # Whether the call is being ended because that audio was not being taken.
+        self._behind = False
         self._delay: float | None = None
         self._hung_up = asyncio.Event()
         # The conversation, once there is one. Only `_run` closes it.
@@ -200,8 +218,13 @@ class _Call:
 
     def hear(self, pcm: bytes) -> None:
         """Take a frame of mic audio. It is fed in once the call is open."""
-        if not self.ending:
+        if self.ending:
+            return
+        try:
             self._audio.put_nowait(pcm)
+        except asyncio.QueueFull:
+            self._behind = True
+            self.hang_up()
 
     def report_delay(self, seconds: float) -> None:
         """Take the app's sound device delay. One reported while opening is kept for later."""
@@ -220,6 +243,8 @@ class _Call:
         try:
             if after is not None:
                 await asyncio.wait({after.task})
+            if self._hung_up.is_set():
+                return  # hung up while it waited for the call before it: `call.ended`
             if self._start is None:
                 last = LinkModels.V1.Output.CallRefused(text="unknown model or setting")
                 return
@@ -228,7 +253,7 @@ class _Call:
                 return
             conversation = self._conversation
             if conversation is None or self._hung_up.is_set():
-                return  # hung up while it opened: `call.ended`
+                return  # hung up while it opened: `call.ended`, unless it fell behind
             await self._out(LinkModels.V1.Output.CallReady())
             relays = [
                 asyncio.create_task(self._pump(conversation)),
@@ -255,12 +280,20 @@ class _Call:
             )
         finally:
             self.ending = True
+            if self._behind and isinstance(last, LinkModels.V1.Output.CallEnded):
+                last = LinkModels.V1.Output.CallFailed(
+                    text="the call broke: speech recognition is not taking the audio"
+                )
             for task in relays:
                 task.cancel()
             await asyncio.gather(*relays, return_exceptions=True)
             if self._conversation is not None:
-                with contextlib.suppress(Exception):
+                try:
                     await self._conversation.close()
+                except Exception:
+                    # Said, since a close that fails part-way can leave a speech
+                    # connection open. The call still ends for the app.
+                    _log.warning("a call on the link did not close cleanly", exc_info=True)
             # Nothing more is sent for this call after this frame. A client that has
             # gone is not told.
             with contextlib.suppress(Exception):
