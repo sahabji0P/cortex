@@ -100,16 +100,11 @@ class _Claude:
         self._rounds = list(rounds)
         self.requests: list[dict] = []
         self.streams: list[_Stream] = []
-        self.labelled: list[dict] = []
 
     def stream_message(self, **request) -> _Stream:
         self.requests.append(request)
         self.streams.append(_Stream(self._rounds.pop(0)))
         return self.streams[-1]
-
-    async def text_response(self, **request) -> str:
-        self.labelled.append(request)
-        return "the rest of the story"
 
 
 def _conversation(llm: _Claude, model: str = "Haiku 5.5", search: _Search | None = None):
@@ -285,24 +280,6 @@ async def test_a_round_that_is_refused_or_cut_off_raises(
             [{"role": "user", "content": "hi"}], instructions="", think=False, must_answer=False
         ):
             pass
-
-
-async def test_the_label_is_asked_of_the_small_model_without_thinking() -> None:
-    llm = _Claude()
-    model = model_for(cast("AnthropicAdapterClass", llm), "Sonnet 5.5", [])
-
-    assert await model.label("and then the wolf", instructions="Name it.") == (
-        "the rest of the story"
-    )
-    assert llm.labelled == [
-        {
-            "model": "Haiku 5.5",
-            "thinking": {"type": "disabled"},
-            "messages": "and then the wolf",
-            "system": "Name it.",
-            "max_tokens": 30,
-        }
-    ]
 
 
 @pytest.mark.parametrize(
