@@ -17,9 +17,9 @@ mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ─�
 
 - **Replying.** When a turn ends, its transcript goes to the model. The model's text is pushed to text-to-speech as it streams, and the audio is forwarded to the client as it is produced. Nothing is held back on the way: over ten real turns the first audio came 0.11 s after the model's first word, and the model's first word (1.1 s) was nearly all of the wait.
 - **The speech connection is opened early.** One is opened when the call starts and again each time the user starts speaking, so it is there before the reply. Opening takes about 0.12 s and used to run while the model was thinking, so this only matters when opening is slow.
-- **Who speaks first.** The user, unless the client asks otherwise: with `?first=assistant` on the WebSocket URL the assistant greets the user as soon as the call connects.
+- **Who speaks first.** The user, unless the client or the gem asks otherwise: with `?first=assistant` on the WebSocket URL the assistant greets the user as soon as the call connects.
 - **Interrupting.** When the user starts speaking, the server cancels the model call and the speech stream, then sends an `interrupt` event. The client must stop playback and drop audio it has not played yet: speech is generated several times faster than it plays, so the client always holds some.
-- **Searching.** With `PARALLEL_API_KEY` set, the model gets a `web_search` tool. Without it the tool is not offered and everything else works. One reply may search as many times as the model needs: there is no limit.
+- **Searching.** With `PARALLEL_API_KEY` set, the model gets a `web_search` tool, unless the call is with a gem whose `tools` leave it out. Without the key the tool is not offered and everything else works. One reply may search as many times as the model needs: there is no limit.
 
 ### Which model answers
 
@@ -34,7 +34,7 @@ A conversation is held with one model from start to end, chosen when it opens:
 | `Opus 5.5` | Anthropic | a little: it cannot be turned off | `ANTHROPIC_API_KEY` |
 | `Sonnet 5.5` | Anthropic | no | `ANTHROPIC_API_KEY` |
 
-`VOICE_MODEL` sets the model for every conversation, and a client can ask for another with `?model=` on the WebSocket URL. `GET /v1/voice/models` lists them, with whether each one's key is set. The test page has a provider and a model picker built from that list; a model whose key is missing is shown but cannot be chosen. A model can also be named in the page's address, as in <http://127.0.0.1:8000/v1/voice/test?model=Sonnet%205.5>. Asking for a model whose provider has no key closes the socket with code 1008 and the reason in words.
+`VOICE_MODEL` sets the model for every conversation, a gem can name another, and a client can ask for another with `?model=` on the WebSocket URL. `GET /v1/voice/models` lists them, with whether each one's key is set. The test page has a provider and a model picker built from that list; a model whose key is missing is shown but cannot be chosen. A model can also be named in the page's address, as in <http://127.0.0.1:8000/v1/voice/test?model=Sonnet%205.5>. Asking for a model whose provider has no key closes the socket with code 1008 and the reason in words.
 
 Everything below is the same for either provider. The conversation keeps one history, and only the last step differs: OpenAI is sent it as it stands, and for Anthropic it is translated into alternating user and assistant messages on every request. These things differ on an Anthropic model:
 
@@ -62,7 +62,7 @@ The user's turn is put together before it reaches the model. A turn stays open u
 
 A one or two word fragment in a writing system the user has not spoken in during the conversation, starting within three seconds of the end of their sentence, is dropped as noise. So is one the recognizer has run on to the end of the sentence itself. This only works when the recognizer writes the noise in another script: it sometimes writes the same sound in Latin letters, and then nothing marks it as noise. A turn with no usable words puts back whatever it interrupted: an unanswered question is answered again, and a reply that was being heard is resumed. For the second, the history gets one line saying that the sound had no words in it, and the model's instructions tell it to carry on from where it stopped. The limits on the filter matter, because a real word dropped as noise means the user is talked over.
 
-The conversation is in [`app/entities/voice_ent.py`](app/entities/voice_ent.py). Speaking, and working out what was heard, is in [`app/entities/voice_speech.py`](app/entities/voice_speech.py). What differs between the providers is in [`app/entities/model.py`](app/entities/model.py), and the web search tool is in [`app/entities/tools.py`](app/entities/tools.py). Neither is particular to a call.
+The conversation is in [`app/entities/voice_ent.py`](app/entities/voice_ent.py). Speaking, and working out what was heard, is in [`app/entities/voice_speech.py`](app/entities/voice_speech.py). What the model is told is put together in [`app/entities/instructions.py`](app/entities/instructions.py). What differs between the providers is in [`app/entities/model.py`](app/entities/model.py), and the web search tool is in [`app/entities/tools.py`](app/entities/tools.py). Neither is particular to a call.
 
 ## Try it
 
@@ -81,10 +81,13 @@ Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow t
 
 | Query parameter | Meaning |
 | --- | --- |
-| `model` | the model to talk to: a `name` from `GET /v1/voice/models`. Left out, the configured one |
-| `first` | who says the first words: `user` (the default) or `assistant`, which makes the assistant greet the user when the socket opens |
+| `gem` | the id of a gem to talk to (see [Gems](#gems)). Left out, the call is with Cortex, as it always was |
+| `model` | the model to talk to: a `name` from `GET /v1/voice/models`. Left out, the gem's, or the configured one |
+| `first` | who says the first words: `user` or `assistant`, which makes the assistant greet the user when the socket opens. Left out, the gem says, and without a gem it is `user` |
 
-A value that is not offered, or a model whose provider has no key, closes the socket with code 1008 and the reason.
+With a gem, a `model` or `first` that is sent wins over the gem's for that call, and one that is left out leaves the gem's. Without a gem they work as they always have.
+
+A value that is not offered, a gem that is not there or an id that is not an id, or a model whose provider has no key, closes the socket with code 1008 and the reason. A gem whose stored config cannot be read, as when a newer cortex wrote it, closes it with 1011.
 
 `GET /v1/voice/models` returns one object per model: `name` (what to send), `provider`, `label` (what to show), `available` (its key is set), `default` (used when none is named) and `listed` (whether a picker should offer it).
 
@@ -120,7 +123,9 @@ A gem is one of the user's assistants. Each has one config, kept in the `Gems` c
 
 Something new (a voice, skills, looks) is added by raising the version and writing one step that brings older configs up to the new shape (`upgrade_gem_document` in [`app/entities/gem_ent.py`](app/entities/gem_ent.py)). A config from a newer version than the code knows is refused. One with no version is read as version 1, the first shape. A stored config that names a tool which has since gone still loads: a call just does not offer that tool.
 
-A call does not take a gem yet: the WebSocket still takes `?model=` and `?first=`.
+A call is held with a gem when the WebSocket names it with `?gem=`. The gem's name and its instructions open what the model is told, ahead of the rules for a spoken conversation. Its model answers, it greets the user if it speaks first, and it is offered web search only if its `tools` name `web_search` and the search key is set. A call without a gem is unchanged: it is Cortex, with the same instructions as before.
+
+What the model is told is put together in layers, in [`app/entities/instructions.py`](app/entities/instructions.py), from what changes least to what changes most: the Darbar (what is true for every gem, empty for now), the gem, the spoken rules, the tools' rules, what the model itself needs, and the date. The order keeps the start of every request the same for as long as possible, which is what a prompt cache needs.
 
 | Route | Does |
 | --- | --- |
@@ -140,7 +145,7 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 app/
   adapters/    one file per outside service; the only place an SDK is called
                openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
-  entities/    the logic: voice_ent and voice_speech (the cascade), model (either provider's model, for any conversation), tools (the tools a model may call, each a small object), gem_ent (a gem's config), user_ent
+  entities/    the logic: voice_ent and voice_speech (the cascade), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), gem_ent (a gem's config), user_ent
   routers/     HTTP and WebSocket endpoints: voice, gems, user
 ```
 
