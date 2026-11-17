@@ -11,21 +11,20 @@ The database is the truth, not the connection. For every message:
 4. what the user wrote and what was delivered of the reply are added to the database.
 
 Little about a gem's conversation is kept in memory between messages: the reply in
-progress, so that a new message can cut it, and the searches still running, so that
+progress, so that a new message can cut it, and the tool calls still running, so that
 their results can be told. So a changed gem applies from the next message, two windows
 on one gem cannot drift apart, and a dropped connection loses nothing.
 
-A search outlives a reply that is cut, as in a call. Its call is stored with the call's
-placeholder as its result, and the new message is answered first. When the search
-finishes, at the next moment no reply is being written to that gem, its result is added
-to the stored conversation as a stub call followed by the result (see
-`late_results.py`), and the gem tells the user about it in a reply of its own, sent to
-the socket that sent the latest message to it. The gem can stop a running search with
-`cancel_tool_call`. Which stub delivered which call, and which calls were cancelled, are
-read from the stored conversation.
+A tool call outlives a reply that is cut, as in a call, and by the same code (see
+`late_results.py`). Its call is stored with the placeholder as its result, and the new
+message is answered first. When the call finishes, at the next moment no reply is being
+written to that gem, its result is added to the stored conversation as a stub call
+followed by the result, and the gem tells the user about it in a reply of its own, sent
+to the socket that sent the latest message to it. Which stub delivered which call, and
+which calls were cancelled, are read from the stored conversation.
 
-Searches live in this process's memory, so a restart loses them. A placeholder whose
-search is gone is closed with a stub saying so, before the next reply is made.
+Running calls live in this process's memory, so a restart loses them. A placeholder whose
+call is gone is closed with a stub saying so, before the next reply is made.
 
 A call is not joined to this yet: a call starts empty and adds nothing here.
 """
@@ -35,7 +34,7 @@ import contextlib
 import functools
 import json
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -54,8 +53,9 @@ from app.entities.instructions import instructions
 from app.entities.late_results import (
     CANCEL_TOOL,
     CANCELLED,
-    NOTHING_RUNNING,
     PLACEHOLDER,
+    LateResult,
+    LateResults,
     delivers,
     late_stub,
 )
@@ -91,7 +91,7 @@ class ChatEvent(BaseModel):
 # Sends one frame to the client that sent the message. It raises if the client is gone.
 type Deliver = Callable[[ChatEvent], Awaitable[None]]
 
-# The result a search lost to a restart is given, so its placeholder does not promise a
+# The result a call lost to a restart is given, so its placeholder does not promise a
 # result for ever. THE OWNER HAS NOT RULED ON THIS WORDING.
 _LOST = (
     "This search was lost before it finished, and its result will not arrive. Search "
@@ -145,19 +145,12 @@ class ChatTurn:
 
 @dataclass(slots=True)
 class _Outliving:
-    """What outlives a gem's replies: its searches still running, and who to tell."""
+    """What outlives a gem's replies: its calls still running, and who to tell."""
 
-    # Calls still running after their reply was cut, by call id.
-    running: dict[str, ToolCall] = field(default_factory=dict[str, ToolCall])
-    # Results of such calls that have finished and are waiting to be told, in order.
-    waiting: list[tuple[ToolCall, str]] = field(default_factory=list[tuple[ToolCall, str]])
+    # The gem's calls that outlived their replies, until their results are told.
+    late: LateResults
     # The latest message to the gem: its id as the client spelled it, and its client.
     latest: tuple[str, Deliver] | None = None
-
-    @property
-    def pending(self) -> bool:
-        """Whether a search of the gem has no result in the conversation yet."""
-        return bool(self.running or self.waiting)
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,8 +263,8 @@ class ChatEntityClass:
                 self._state(key).latest = (gem_id, deliver)
             stored = await self._store.load(ready.gem.id)
             history = [item.item for item in stored]
-            # A search lost to a restart is closed before the new message.
-            history += await self._add_stubs(ready.gem.id, history, self._lost(key, history))
+            # A call lost to a restart is closed before the new message.
+            history += await self._add_stubs(ready.gem.id, history, self._lost(key, stored))
             await self._write(turn, key, ready, history, text, at, gem_id, deliver)
         except Exception as exc:
             # Anything else, such as the store being out of reach before the reply began.
@@ -312,12 +305,12 @@ class ChatEntityClass:
         """
         tell = _teller(gem_id, deliver)
         gem = ready.gem
-        state = self._state(key)
+        late = self._state(key).late
         # Writing offers web search when the gem's tools name it and the key is set, and
-        # with it, as in a call, cancel_tool_call to stop a search that carries on.
+        # with it, as in a call, cancel_tool_call to stop a call that carries on.
         offers_search = self._search.configured and "web_search" in gem.tools
         search = web_search_tool(self._search)
-        cancel = Tool(CANCEL_TOOL, functools.partial(self._cancel, key, _stubs(history)))
+        cancel = late.tool
         if offers_search:
             tools = Toolbox([search, cancel])
         else:
@@ -349,8 +342,7 @@ class ChatEntityClass:
             # summed up, and old search results are not cleared, so the context
             # only grows, and quickly when searches are used.
             history=history,
-            # As in a call: a little thinking while a search has no result yet.
-            think=lambda: state.pending,
+            late=late,
         )
         turn.begin(conversation)
         ended, failure = await _read(conversation, text, at, gem_id, deliver)
@@ -370,18 +362,16 @@ class ChatEntityClass:
         except Exception as exc:
             # The calls left running are in no stored conversation: nothing could take
             # their results.
-            _stop(conversation.left_running)
+            late.forget(conversation.left_running)
             await tell("chat.error", f"the reply could not be stored: {exc}")
             return
-        # Tracked from here on, whatever fails next: its placeholder is stored, so its
-        # result has to be taken when it comes.
-        for call in conversation.left_running:
-            self._outlive(key, call)
+        # From here on their placeholders are stored, so their results have to be taken
+        # when they come, whatever fails next.
         if not await self._gems.exists(gem_id):
             # The gem was deleted while its reply was being written. Its conversation
-            # went with it, so what was just added goes too, and so do its searches.
+            # went with it, so what was just added goes too, and so do its calls.
             await self._store.forget(gem.id)
-            _stop(conversation.left_running)
+            late.forget(conversation.left_running)
         if failure is not None:
             await tell("chat.error", f"reply failed: {failure}")
         elif ended is not None:
@@ -412,34 +402,20 @@ class ChatEntityClass:
                 turn.cut()
 
     def _state(self, key: str) -> _Outliving:
-        return self._outliving.setdefault(key, _Outliving())
+        state = self._outliving.get(key)
+        if state is None:
+            late = LateResults(functools.partial(self._tell_when_quiet, key))
+            state = self._outliving[key] = _Outliving(late)
+        return state
 
     def _forget_if_idle(self, key: str) -> None:
-        """Keep nothing for a gem with no search running, no result waiting and no client."""
+        """Keep nothing for a gem with no reply being written, no call running, no result
+        waiting and no client. A reply being written may still leave a call running."""
         state = self._outliving.get(key)
-        if state is not None and not state.pending and state.latest is None:
+        if state is None or key in self._turns:
+            return
+        if not state.late.pending and state.latest is None:
             del self._outliving[key]
-
-    def _outlive(self, key: str, call: ToolCall) -> None:
-        """Let a call left running at a cut carry on. Its placeholder is stored."""
-        running = call.running
-        if running is None:
-            return
-        self._state(key).running[call.call_id] = call
-        running.add_done_callback(functools.partial(self._finished_late, key, call))
-
-    def _finished_late(self, key: str, call: ToolCall, finished: asyncio.Task[str]) -> None:
-        state = self._outliving.get(key)
-        if state is None or state.running.pop(call.call_id, None) is None:
-            # `cancel_tool_call` took it first. It may have finished in that same
-            # instant, too late to be stopped: its result is dropped all the same, since
-            # the gem has been told it was cancelled.
-            return
-        if finished.cancelled():
-            self._forget_if_idle(key)
-            return  # stopped because its gem went
-        state.waiting.append((call, finished.result()))
-        self._tell_when_quiet(key)
 
     def _tell_when_quiet(self, key: str) -> None:
         """If results are waiting and no reply is being written to the gem, tell them.
@@ -448,7 +424,7 @@ class ChatEntityClass:
         between them, so a message that arrives at that instant waits for this reply.
         """
         state = self._outliving.get(key)
-        if state is None or not state.waiting or key in self._turns:
+        if state is None or not state.late.ready or key in self._turns:
             return
         turn = ChatTurn()
         self._turns[key] = turn
@@ -470,13 +446,14 @@ class ChatEntityClass:
             if turn.was_cut:
                 return  # a message came first: the results wait until it is answered
             # Taken at once, so that whatever happens next they are not taken again.
-            told, state.waiting = state.waiting, []
+            told = state.late.take()
             if not await self._gems.exists(key):
                 return  # the gem went, and its conversation with it: they are dropped
             gem_oid = ObjectId(key)
-            history = [item.item for item in await self._store.load(gem_oid)]
-            lost = self._lost(key, history, also_here=[call for call, _ in told])
-            stubs = [*lost, *(late_stub(call, output) for call, output in told)]
+            stored = await self._store.load(gem_oid)
+            history = [item.item for item in stored]
+            lost = self._lost(key, stored, told=told)
+            stubs = [*lost, *(late.stub for late in told)]
             history += await self._add_stubs(gem_oid, history, stubs)
             if not await self._gems.exists(key):
                 await self._store.forget(gem_oid)  # deleted while they were stored
@@ -494,8 +471,9 @@ class ChatEntityClass:
                 # when it answers.
                 return
             try:
-                for call, _ in told:
-                    await deliver(ChatEvent(type="chat.result", gem=gem_id, text=shown(call) or ""))
+                for late in told:
+                    text = shown(late.call) or ""
+                    await deliver(ChatEvent(type="chat.result", gem=gem_id, text=text))
             except Exception:
                 return  # the client has gone: the results stay stored, untold
             owed = deliver
@@ -525,67 +503,43 @@ class ChatEntityClass:
         return items
 
     def _lost(
-        self, key: str, history: Sequence[Item], *, also_here: Sequence[ToolCall] = ()
+        self, key: str, stored: Sequence[ChatItem], *, told: Sequence[LateResult] = ()
     ) -> list[ToolCall]:
-        """A stub for each search lost to a restart, closing its placeholder.
+        """A stub for each call lost to a restart, closing its placeholder.
 
-        Lost is a placeholder whose search is not running or waiting here (or one of
-        `also_here`), that no stub has delivered, and that no `cancel_tool_call` stopped.
+        Lost is a placeholder whose call is not running or waiting here (or being `told`
+        now), that no stub has delivered, and that no `cancel_tool_call` stopped.
         """
-        here = {call.call_id for call in also_here}
-        if (state := self._outliving.get(key)) is not None:
-            here |= {*state.running, *(call.call_id for call, _ in state.waiting)}
+        state = self._outliving.get(key)
+        here = {late.call.call_id for late in told}
+        items = [entry.item for entry in stored]
         calls = {
             item["call_id"]: item
-            for item in history
+            for item in items
             if "type" in item and item["type"] == "function_call"
         }
-        delivered = set(_stubs(history).values())
-        outputs = {
-            item["call_id"]: item["output"]
-            for item in history
-            if "type" in item and item["type"] == "function_call_output"
-        }
-        cancelled = {
-            _named(item["arguments"])
-            for item in calls.values()
-            if item["name"] == CANCEL_TOOL.name and outputs.get(item["call_id"]) == CANCELLED
-        }
-        lost: list[ToolCall] = []
-        for item in history:
+        delivered = {original for item in items if (original := delivers(item))}
+        placeholders: list[str] = []
+        cancelled: set[str | None] = set()
+        for item in items:
             if "type" not in item or item["type"] != "function_call_output":
                 continue
             call_id = item["call_id"]
-            if item["output"] != PLACEHOLDER.format(call_id=call_id) or call_id not in calls:
+            if item["output"] == PLACEHOLDER.format(call_id=call_id):
+                placeholders.append(call_id)
+            elif item["output"] == CANCELLED and call_id in calls:
+                cancel = calls[call_id]
+                if cancel["name"] == CANCEL_TOOL.name:
+                    cancelled.add(_named(cancel["arguments"]))
+        lost: list[ToolCall] = []
+        for call_id in placeholders:
+            if call_id not in calls or call_id in here or call_id in delivered:
                 continue
-            if call_id in here or call_id in delivered or call_id in cancelled:
+            if call_id in cancelled or (state is not None and state.late.holds(call_id)):
                 continue
             call = calls[call_id]
             lost.append(late_stub(ToolCall(call_id, call["name"], call["arguments"]), _LOST))
         return lost
-
-    async def _cancel(self, key: str, stubs: dict[str, str], arguments: str) -> str:
-        """Stop a search of the gem's that outlived its reply. Its result never arrives.
-
-        This is the `cancel_tool_call` tool, as in a call. A finished result that has not
-        been told yet is dropped.
-        """
-        call_id = str(json.loads(arguments)["call_id"])
-        # The model may name the call by a stub that already delivered its result.
-        call_id = stubs.get(call_id, call_id)
-        state = self._state(key)
-        waiting = [late for late in state.waiting if late[0].call_id == call_id]
-        if waiting:
-            state.waiting.remove(waiting[0])
-            return CANCELLED
-        # Taken out of the running ones here and now. If it finishes in this same
-        # instant, too late to be stopped, `_finished_late` finds it gone and drops its
-        # result: the gem is told "Cancelled." either way, and that has to stay true.
-        call = state.running.pop(call_id, None)
-        if call is None or call.running is None:
-            return NOTHING_RUNNING
-        call.running.cancel()
-        return CANCELLED
 
 
 def _teller(
@@ -597,21 +551,6 @@ def _teller(
             await deliver(ChatEvent(type=type_, gem=gem_id, text=said))
 
     return tell
-
-
-def _stop(calls: Sequence[ToolCall]) -> None:
-    for call in calls:
-        if call.running is not None:
-            call.running.cancel()
-
-
-def _stubs(history: Sequence[Item]) -> dict[str, str]:
-    """The stubs in a conversation: each stub's call id to the call it delivered for."""
-    return {
-        item["call_id"]: original
-        for item in history
-        if "type" in item and item["type"] == "function_call" and (original := delivers(item))
-    }
 
 
 def _named(arguments: str) -> str | None:

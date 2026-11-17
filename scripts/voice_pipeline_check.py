@@ -407,7 +407,7 @@ async def scenario_6(llm, par, replies):
     await asyncio.sleep(1.5)
     note(
         "cancel: model stops the unwanted search",
-        bool(cancels) and not t.c._outliving and not t.c._late and not t.errors(),
+        bool(cancels) and not t.c._late.pending and not t.errors(),
         f"cancel calls {cancels}; reply {a!r}; model calls after that: {len(t.llm.requests)}",
     )
     await t.close()

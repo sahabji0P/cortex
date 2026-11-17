@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.entities.late_results import LateResults
+from app.entities.loop import ToolCall
 from app.entities.model import Item, ToolSpec, model_for
 from app.entities.tools import Tool, Toolbox
 from app.entities.written_ent import WrittenConversation, WrittenEvent
@@ -110,7 +112,11 @@ def _with_tools(
 ) -> WrittenConversation:
     model = model_for(llm, "6 Luna", tools.specs)
     return WrittenConversation(
-        model=model, tools=tools, instructions="Be brief.", history=history or []
+        model=model,
+        tools=tools,
+        instructions="Be brief.",
+        late=LateResults(lambda: None),
+        history=history or [],
     )
 
 
@@ -520,16 +526,27 @@ async def test_a_reply_with_no_message_cut_before_it_begins_adds_nothing() -> No
     assert conversation.added == []
 
 
-async def test_whether_to_think_is_asked_at_the_start_of_every_round() -> None:
+async def test_the_model_thinks_a_little_while_a_call_of_an_earlier_reply_has_no_result() -> None:
+    # A call an earlier reply left running, which the first round's tool call ends.
+    late = LateResults(lambda: None)
+    earlier = ToolCall(
+        "call_0", "look_up", "{}", running=asyncio.create_task(asyncio.Event().wait())
+    )
+    late.settle(earlier)
+
+    async def ends_it(arguments: str) -> str:
+        late.stop()
+        return "Found it."
+
+    spec = _LookUp().tools().specs[0]
+    tools = Toolbox([Tool(spec, ends_it)])
     call = _call("Pune weather")
     llm = _LLM([_starts(call), _completed(call)], _said("Sunny."))
-    pending = [True]
-    tools = _LookUp().tools()
     conversation = WrittenConversation(
         model=model_for(llm, "6 Luna", tools.specs),
         tools=tools,
         instructions="Be brief.",
-        think=lambda: pending.pop(0) if pending else False,
+        late=late,
     )
 
     await _read(conversation, "weather?")

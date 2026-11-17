@@ -19,18 +19,19 @@ handed, ending in "…". Nothing is made up to mark the cut: a reply cut before 
 it was handed over leaves no reply at all, as a call's does, and one cut while a tool
 ran keeps the text before the call whole.
 
-A tool call still running at a cut is not stopped, as in a call. Its result in the
-history is the placeholder a call uses, and the call is handed to the caller
-(`left_running`), whose job it is to deliver its result later (see `late_results.py`).
+A tool call still running at a cut is not stopped, as in a call. It is left to the
+conversation's `LateResults`, given by the caller, which holds it until its result is
+told: telling it is the caller's job (see `late_results.py`). Its result in the history
+is the placeholder, and the calls this conversation left running are in `left_running`.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-from app.entities.late_results import PLACEHOLDER
+from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import Item, Model
 from app.entities.tools import Toolbox
@@ -134,22 +135,22 @@ class WrittenConversation:
         model: Model,
         tools: Toolbox,
         instructions: str,
+        late: LateResults,
         history: Sequence[Item] = (),
-        think: Callable[[], bool] = lambda: False,
     ) -> None:
         # `model` has to be told of exactly the tools in `tools`, and `instructions` are
-        # the whole instructions, with what the model needs already in them. `think` is
-        # asked at the start of every model round whether the model is to think a little
-        # first: the caller knows whether a search of an earlier reply has no result yet.
+        # the whole instructions, with what the model needs already in them. `late` holds
+        # the calls of this conversation that outlive their replies, those of earlier
+        # replies included.
         self._model = model
         self._tools = tools
         self._instructions = instructions
+        self._late = late
         self._history: list[Item] = list(history)
-        self._think = think
         # Everything added to the history since the conversation was made, in order.
         self.added: list[Added] = []
         # The tool calls left running at a cut, in order. Each has the placeholder as its
-        # result in the history, and its task still running.
+        # result in the history, and is held by `late` until its result is told.
         self.left_running: list[ToolCall] = []
         # The user's message whose reply is being written, until the reply is settled.
         self._open: Item | None = None
@@ -235,10 +236,10 @@ class WrittenConversation:
             out.put_nowait(None)
 
     def _next_round(self) -> RoundInput:
-        # As in a call: the least thinking the model allows, except while a search has
+        # As in a call: the least thinking the model allows, except while a tool call has
         # no result in the history yet. Whether writing wants more is not settled.
         return RoundInput(
-            [*self._history, *([self._open] if self._open else [])], think=self._think()
+            [*self._history, *([self._open] if self._open else [])], think=self._late.pending
         )
 
     async def _settle(self, reply: Reply, producing: asyncio.Task[None] | None) -> WrittenEvent:
@@ -252,18 +253,18 @@ class WrittenConversation:
                 producing.cancel()
                 await asyncio.gather(producing, return_exceptions=True)
             for call in reply.calls():
-                if _leave_running(call):
+                if self._late.settle(call):
                     self.left_running.append(call)
             delivered = reply.delivered(0.0)
             items = delivered.items
             whole = reply.finished and delivered.kept is None
             now = datetime.now(UTC)
-            shown_by = {call.call_id: shown(call) for call in reply.calls()}
+            calls = {call.call_id: call for call in reply.calls()}
             if self._open is not None:
                 self._add(Added(self._open, self._open_at))
             for item in items:
                 if "type" in item and item["type"] == "function_call":
-                    self._add(Added(item, now, shown_by.get(item["call_id"])))
+                    self._add(Added(item, now, shown=shown(calls[item["call_id"]])))
                 else:
                     self._add(Added(item, now))
             kept = " ".join(item["content"] for item in items if "role" in item)
@@ -293,20 +294,3 @@ def shown(call: ToolCall) -> str | None:
         return call.tool.shown(call.arguments)
     except Exception:
         return None  # arguments that cannot be read send no event
-
-
-def _leave_running(call: ToolCall) -> bool:
-    """Give a call of a cut reply its result. Return whether it was left running.
-
-    A call still running is not stopped, as in a call: its result is the placeholder,
-    and the real one is delivered later by whoever holds the conversation.
-    """
-    running = call.running
-    if call.output is not None or running is None:
-        return False
-    if running.done():
-        # It finished in the instant before the cut: nothing is late.
-        call.output = running.result() if not running.cancelled() else ""
-        return False
-    call.output = PLACEHOLDER.format(call_id=call.call_id)
-    return True

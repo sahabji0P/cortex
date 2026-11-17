@@ -1183,7 +1183,7 @@ async def test_two_searches_in_one_round_are_each_given_their_own_kind_of_result
     }
     assert "Norris won in Las Vegas." in outputs["call_q"]
     assert "Still running" in outputs["call_s"]
-    assert list(f.conversation._outliving) == ["call_s"]
+    assert f.conversation._late.holds("call_s") and not f.conversation._late.holds("call_q")
     await f.conversation.close()
 
 
@@ -1217,7 +1217,7 @@ async def test_speaking_during_a_search_leaves_a_placeholder_and_the_search_runn
     assert "cancel_tool_call" in sent[2]["output"]
     # The search was not stopped: it is still waiting.
     assert search.queries == ["weather in Pune"]
-    assert f.conversation._outliving["call_1"].running.done() is False
+    assert f.conversation._late.holds("call_1")
     await f.conversation.close()
 
 
@@ -1264,7 +1264,6 @@ async def test_a_late_result_is_given_to_the_model_once_nothing_is_being_said() 
     assert json.loads(stub["arguments"]) == {"deferred_result_for": "call_1"}
     assert stub["call_id"] == result["call_id"] != "call_1"
     assert "Norris won in Las Vegas." in result["output"]
-    assert f.conversation._stubs == {stub["call_id"]: "call_1"}
     await f.conversation.close()
 
 
@@ -1655,7 +1654,7 @@ async def test_the_model_can_cancel_a_search_that_is_still_running() -> None:
     f.clock.advance(60)
     await asyncio.sleep(0.25)
     assert len(llm.requests) == 3
-    assert f.conversation._outliving == {}
+    assert not f.conversation._late.pending
     await f.conversation.close()
 
 
@@ -1714,7 +1713,51 @@ async def test_the_model_can_cancel_a_result_that_is_waiting_to_be_delivered() -
     f.clock.advance(60)
     await asyncio.sleep(0.25)
     assert len(llm.requests) == 3
-    assert f.conversation._late == []
+    assert not f.conversation._late.pending
+    await f.conversation.close()
+
+
+class _SetsThenGoes(asyncio.Event):
+    """A step of a scripted reply that sets another event and does not wait."""
+
+    def __init__(self, other: asyncio.Event) -> None:
+        super().__init__()
+        self._other = other
+
+    async def wait(self) -> bool:
+        self._other.set()
+        return True
+
+
+async def test_a_search_cancelled_in_the_instant_it_finishes_is_not_told() -> None:
+    # The search finishes in the same step the model cancels it in, too late to be
+    # stopped. The model has been told "Cancelled.", so its result is dropped all the same.
+    cancel = _Item(
+        type="function_call",
+        call_id="call_2",
+        name="cancel_tool_call",
+        arguments=json.dumps({"call_id": "call_1"}),
+    )
+    finish = asyncio.Event()
+    llm, _ = _slow_search_then(
+        [_SetsThenGoes(finish), _starts(cancel), _completed(cancel)],
+        [_delta("Stopped."), _completed(_message("Stopped."))],
+    )
+    search = _Search(gate=finish)
+    f = _conversation(llm, search)
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("never mind, stop that")
+    await _read_until(f.conversation, "assistant.done")
+
+    assert llm.requests[2]["input"][-1]["output"] == "Cancelled."
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+    # It did finish: it was not stopped. It is never told all the same.
+    assert search.queries == ["weather in Pune"]
+    assert len(llm.requests) == 3
+    assert not f.conversation._late.pending
     await f.conversation.close()
 
 
@@ -1780,7 +1823,8 @@ async def test_closing_stops_a_search_that_outlived_its_reply() -> None:
     await _read_until(f.conversation, "tool.call")
     f.stt.say("hello?")
     await _read_until(f.conversation, "assistant.done")
-    search_task = f.conversation._outliving["call_1"].running
+    [call] = [part for part in f.conversation._late._running.values()]
+    search_task = call.running
     await f.conversation.close()
 
     assert search_task.cancelled()
