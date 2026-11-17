@@ -1,4 +1,4 @@
-from collections.abc import Iterable, MutableMapping
+from collections.abc import Iterable, MutableMapping, Sequence
 from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
@@ -71,6 +71,14 @@ class DocDBAdapterClass:
             data.model_dump(by_alias=True)
         )
         return data
+
+    async def insert_many(self, data: Sequence[_T]) -> list[_T]:
+        """Insert documents of one collection, in order, in one request."""
+        if data:
+            await self.db.get_collection(_collection_name(data[0].__class__)).insert_many(
+                [item.model_dump(by_alias=True) for item in data]
+            )
+        return list(data)
 
     async def update(
         self,

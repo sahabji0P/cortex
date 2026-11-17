@@ -1,4 +1,5 @@
 from app.adapters import AdapterRegistry
+from app.entities.chat_store import ChatItem, ChatStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.user_ent import User, UserEntityClass
@@ -12,12 +13,17 @@ class EntitiesRegistry:
         await adapter.DocDB.create_index(User, [("email", 1)], unique=True)
         # The gem list is shown with the most recently changed first.
         await adapter.DocDB.create_index(GemConfig, [("updated_at", -1)], name="gems_updated")
+        # A gem's written conversation is read whole, in order.
+        await adapter.DocDB.create_index(
+            ChatItem, [("gem_id", 1), ("place", 1)], unique=True, name="chat_items_in_order"
+        )
         cls.Users = UserEntityClass(
             docdb=adapter.DocDB,
             cache=adapter.Cache,
         )
         cls.Gems = GemEntityClass(docdb=adapter.DocDB)
         cls.Darbar = DarbarEntityClass(docdb=adapter.DocDB)
+        cls.ChatStore = ChatStoreClass(docdb=adapter.DocDB)
         cls.Voice = VoiceEntityClass(
             stt=adapter.CartesiaSTT,
             tts=adapter.CartesiaTTS,

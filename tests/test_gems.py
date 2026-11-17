@@ -79,6 +79,13 @@ class _DocDBFake:
     async def delete(self, _collection: type[BaseModel], filters: MutableMapping[str, Any]) -> int:
         return 1 if self.documents.pop(self._id(filters), None) else 0
 
+    async def delete_many(
+        self, _collection: type[BaseModel], _filters: MutableMapping[str, Any]
+    ) -> int:
+        # Only a gem's written conversation is deleted this way, and this fake keeps
+        # none. Those are tested in `test_chat.py`.
+        return 0
+
 
 def _gems() -> tuple[GemEntityClass, _DocDBFake]:
     docdb = _DocDBFake()
