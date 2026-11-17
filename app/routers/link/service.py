@@ -152,6 +152,13 @@ class LinkServiceV1Class:
                 await websocket.close()
 
 
+class _ClientGone(Exception):
+    """A frame of the call could not be sent: the client has gone or stopped reading.
+
+    That ends the call like any failure, but is not a fault of ours, so it is not logged.
+    """
+
+
 class _Call:
     """One call on a standing socket, from its `call.start` to its last frame.
 
@@ -222,7 +229,7 @@ class _Call:
             conversation = self._conversation
             if conversation is None or self._hung_up.is_set():
                 return  # hung up while it opened: `call.ended`
-            await self._send(LinkModels.V1.Output.CallReady())
+            await self._out(LinkModels.V1.Output.CallReady())
             relays = [
                 asyncio.create_task(self._pump(conversation)),
                 asyncio.create_task(self._forward(conversation)),
@@ -240,7 +247,8 @@ class _Call:
             # Otherwise it was hung up, or the conversation ended by itself: `call.ended`.
         except Exception as exc:
             # A relay failed, or `call.ready` could not be sent.
-            _log.warning("a call on the link broke", exc_info=exc)
+            if not isinstance(exc, _ClientGone):
+                _log.warning("a call on the link broke", exc_info=exc)
             said = str(exc)
             last = LinkModels.V1.Output.CallFailed(
                 text=f"the call broke: {said}" if said else "the call broke"
@@ -301,14 +309,23 @@ class _Call:
     async def _forward(self, conversation: VoiceConversation) -> None:
         """Send the conversation's speech and events, in order, until it ends."""
         async for output in conversation.outputs():
-            if isinstance(output, bytes):
-                await self._send_audio(output)
-            else:
-                await self._send(
-                    LinkModels.V1.Output.CallEvent.model_validate(
-                        {"type": f"call.{output.type}", "text": output.text}
-                    )
+            await self._out(
+                output
+                if isinstance(output, bytes)
+                else LinkModels.V1.Output.CallEvent.model_validate(
+                    {"type": f"call.{output.type}", "text": output.text}
                 )
+            )
+
+    async def _out(self, frame: BaseModel | bytes) -> None:
+        """Send one frame of the call. A failure to send is the client's, not a fault."""
+        try:
+            if isinstance(frame, bytes):
+                await self._send_audio(frame)
+            else:
+                await self._send(frame)
+        except Exception as exc:
+            raise _ClientGone(str(exc)) from exc
 
 
 def _reason(exc: ValidationError) -> str:
