@@ -17,7 +17,7 @@ async def create_gem(
 
 @router.get("")
 async def list_gems(service: GemsServiceRegistry.V1) -> list[GemsModels.V1.Output.Gem]:
-    """Every gem, the one changed most recently first."""
+    """Every gem, in the order they were made."""
     return await service.list_gems()
 
 

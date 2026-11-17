@@ -28,10 +28,14 @@ class GemsServiceV1Class:
             id=str(gem.id),
             version=gem.version,
             name=gem.name,
+            description=gem.description,
+            image=gem.image,
             instructions=gem.instructions,
             model=gem.model,
             speaks_first=gem.speaks_first,
             tools=gem.tools,
+            voice=gem.voice,
+            speech_speed=gem.speech_speed,
             created_at=gem.created_at,
             updated_at=gem.updated_at,
         )
@@ -39,10 +43,14 @@ class GemsServiceV1Class:
     async def create_gem(self, payload: GemsModels.V1.Input.CreateGem) -> GemsModels.V1.Output.Gem:
         gem = await self.gems.create(
             name=payload.name,
+            description=payload.description,
+            image=payload.image,
             instructions=payload.instructions,
             model=payload.model,
             speaks_first=payload.speaks_first,
             tools=payload.tools,
+            voice=payload.voice,
+            speech_speed=payload.speech_speed,
         )
         return self._gem_out(gem)
 

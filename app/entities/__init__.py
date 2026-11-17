@@ -12,8 +12,8 @@ class EntitiesRegistry:
     async def initialize(cls, adapter: AdapterRegistry) -> None:
         """Initialize application entities."""
         await adapter.DocDB.create_index(User, [("email", 1)], unique=True)
-        # The gem list is shown with the most recently changed first.
-        await adapter.DocDB.create_index(GemConfig, [("updated_at", -1)], name="gems_updated")
+        # The gem list is shown in the order the gems were made.
+        await adapter.DocDB.create_index(GemConfig, [("created_at", 1)], name="gems_created")
         # A gem's written conversation is read whole, in order.
         await adapter.DocDB.create_index(
             ChatItem, [("gem_id", 1), ("place", 1)], unique=True, name="chat_items_in_order"
