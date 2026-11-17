@@ -24,10 +24,8 @@ joins the history once it has been heard in full or cut off. A reply that is cut
 stored as the words that were heard, ending in "…". The rest is never sent back.
 
 Nothing the model has been sent is changed afterwards, so each request starts with the
-whole of the one before it. There are two exceptions. The user's open turn, always the
-last item, can gain a line (see below). And once several search results have piled up,
-all but the newest are replaced by a short marker in one go, when the user's turn ends:
-a deliberate break of the prompt cache, made rarely, to keep the context small.
+whole of the one before it. The one exception is the user's open turn, always the last
+item, which can gain a line (see below).
 
 A user turn stays open until some of the reply to it has been heard. Words that arrive
 before that join the same turn on a new line: speech recognition often splits one
@@ -67,7 +65,6 @@ from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, 
 from app.entities.model import (
     LLM,
     MODELS,
-    CallResult,
     Item,
     ModelInfo,
     ModelName,
@@ -78,12 +75,6 @@ from app.entities.tools import Tool, Toolbox, web_search_tool
 from app.entities.voice_speech import Clock, Playback, Speech, Standby
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
-
-# Search results are long. Once more than this many are in the history in full, all but
-# the newest few are replaced by the marker below, in one go.
-_FULL_RESULTS_ALLOWED = 6
-_FULL_RESULTS_KEPT = 2
-_CLEARED = "[Cleared to save context. Search again if this is still needed.]"
 
 # Opens the history of a conversation in which the assistant is to speak first. The
 # model's own words never come first: its opening line is an answer to this.
@@ -223,10 +214,6 @@ class VoiceConversation:
         # The calls in the history that we wrote to carry a late result: stub call id to
         # the id of the call the model really made.
         self._stubs: dict[str, str] = {}
-        # Every real search result in the history, oldest first, and how many of them
-        # the model has been sent. Only those may be cleared.
-        self._results: list[CallResult] = []
-        self._results_sent = 0
         self._closed = False
         # The speech connection for the next reply, opened before it is needed.
         self._standby = Standby(tts, clock)
@@ -332,11 +319,6 @@ class VoiceConversation:
             self._history.append({"role": "user", "content": "\n".join(self._turn)})
             self._turn = []
         self._history.extend(heard.items)
-        for call in reply.calls():
-            if (result := call.clearable_result) is not None:
-                self._results.append(result)
-                if call.seen:
-                    self._results_sent = len(self._results)
         return heard
 
     def _outlive(self, call: ToolCall) -> None:
@@ -347,7 +329,6 @@ class VoiceConversation:
             call.output = running.result() if running and not running.cancelled() else ""
             return
         call.output = _PLACEHOLDER.format(call_id=call.call_id)
-        call.placeholder = True
         self._outliving[call.call_id] = call
         running.add_done_callback(lambda finished: self._finished_late(call, finished))
 
@@ -420,8 +401,6 @@ class VoiceConversation:
             )
             self._stubs[stub.call_id] = call.call_id
             self._history.extend(stub.items())
-            if (result := stub.clearable_result) is not None:
-                self._results.append(result)
         self._late.clear()
 
     async def _start_reply(self, transcript: str) -> None:
@@ -449,7 +428,6 @@ class VoiceConversation:
         if said:
             # The result is in front of the model along with what the user now says.
             self._results_owed = False
-            self._clear_old_results()
             self._turn.append(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
@@ -487,7 +465,6 @@ class VoiceConversation:
 
     def _next_round(self) -> RoundInput:
         """What the reply's next model call is sent ahead of the reply's own items."""
-        self._results_sent = len(self._results)
         # No thinking before it speaks: in a conversation the wait is worse than the gain.
         # The exception is while the history ends in a search with no result yet: one
         # still running in the background, or finished and waiting to be delivered.
@@ -506,23 +483,6 @@ class VoiceConversation:
             self._turn_began_at - self._said_at <= _STRAY_WINDOW_SECONDS
         )
         return trailing and _is_stray(transcript, self._said, self._user_scripts)
-
-    def _clear_old_results(self) -> None:
-        """Replace all but the newest search results with a marker, once enough pile up.
-
-        This rewrites items the model has already been sent, which breaks a prompt cache
-        from the first one onward. So it is done only between turns, never while a reply
-        is being made, and for a whole batch at a time.
-
-        Only real search results count, and only ones the model has been sent: not a
-        placeholder, not the answer to a cancel, and not a result it has yet to see.
-        """
-        full = [
-            result for result in self._results[: self._results_sent] if result["output"] != _CLEARED
-        ]
-        if len(full) > _FULL_RESULTS_ALLOWED:
-            for result in full[:-_FULL_RESULTS_KEPT]:
-                result["output"] = _CLEARED
 
     def _open_turn(self) -> list[Item]:
         """The user's unanswered turn as one message, for a model call."""

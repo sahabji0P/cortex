@@ -309,5 +309,4 @@ def _leave_running(call: ToolCall) -> bool:
         call.output = running.result() if not running.cancelled() else ""
         return False
     call.output = PLACEHOLDER.format(call_id=call.call_id)
-    call.placeholder = True
     return True

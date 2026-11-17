@@ -476,20 +476,19 @@ async def scenario_9(llm, par, replies):
 
 
 async def scenario_10(llm, par, replies):
-    """many searches: clearing, and whether the provider reuses the request's unchanged start"""
+    """many searches: the conversation stays coherent, and the provider reuses the request's
+    unchanged start"""
     t = Talk(llm, par)
     cities = ["Oslo", "Lima", "Cairo", "Rome", "Seoul", "Delhi", "Tokyo", "Paris", "Quito"]
     for city in cities:
         replies.append(await t.ask(f"Search the web: what is the population of {city}?"))
     a = await t.ask("Which city did I ask about first, and what did you tell me about it?")
     replies.append(a)
-    last = t.llm.requests[-1]
-    cleared = sum(1 for i in last["input"] if i.get("output") == voice_ent._CLEARED)
     usage = [r["usage"] for r in t.llm.requests if r["usage"]]
     note(
-        "clearing: old results cleared, conversation still coherent",
-        cleared >= 5 and "Oslo" in a and not t.errors(),
-        f"{cleared} results cleared, {t.search.count} searches; model said {a[:110]!r}",
+        "many searches: every result kept, conversation still coherent",
+        "Oslo" in a and not t.errors(),
+        f"{t.search.count} searches; model said {a[:110]!r}",
     )
     cached_share = sum(c for _, c in usage[-8:]) / max(1, sum(i for i, _ in usage[-8:]))
     note(

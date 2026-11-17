@@ -152,10 +152,8 @@ async def test_a_search_without_a_query_fails_without_being_shown_or_run() -> No
     assert search.searches == []
 
 
-def test_search_results_may_be_cleared_and_the_spec_is_strict() -> None:
+def test_the_search_spec_is_strict() -> None:
     tool = web_search_tool(cast("ParallelAdapterClass", _Search()))
 
     assert tool.name == "web_search"
-    assert tool.clearable
     assert tool.spec.parameters["additionalProperties"] is False
-    assert not _tool("a").clearable

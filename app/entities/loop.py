@@ -30,7 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NamedTuple, Protocol
 
-from app.entities.model import CallResult, Item, Model, RoundDone, TextDelta
+from app.entities.model import Item, Model, RoundDone, TextDelta
 from app.entities.tools import Tool, Toolbox
 
 __all__ = [
@@ -90,20 +90,8 @@ class ToolCall:
     tool: Tool | None = None
     output: str | None = None  # None while the tool is still running
     running: asyncio.Task[str] | None = None
-    # Whether `output` is a placeholder standing in for a result that comes later.
-    placeholder: bool = False
-    # Whether the result has been sent back to the model, in a later call of its reply.
-    seen: bool = False
-    # The result item most recently built by `items()`: the one in the history, once
-    # this call is there.
-    result_item: CallResult | None = None
 
     def items(self) -> list[Item]:
-        self.result_item = {
-            "type": "function_call_output",
-            "call_id": self.call_id,
-            "output": self.output or "",
-        }
         return [
             {
                 "type": "function_call",
@@ -111,14 +99,8 @@ class ToolCall:
                 "name": self.name,
                 "arguments": self.arguments,
             },
-            self.result_item,
+            {"type": "function_call_output", "call_id": self.call_id, "output": self.output or ""},
         ]
-
-    @property
-    def clearable_result(self) -> CallResult | None:
-        """The item holding this call's result, if it is a real one that may be cleared."""
-        clearable = self.tool is not None and self.tool.clearable
-        return self.result_item if clearable and not self.placeholder else None
 
 
 @dataclass(slots=True)
@@ -159,7 +141,6 @@ class Reply:
         items: list[Item] = []
         for part in self._parts:
             if isinstance(part, ToolCall):
-                part.seen = True
                 items.extend(part.items())
             elif text := part.text.strip():
                 items.append({"role": "assistant", "content": text})

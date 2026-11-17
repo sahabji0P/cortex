@@ -2,8 +2,8 @@
 Tools a conversation's model may call, one small object each.
 
 A `Tool` holds everything a conversation needs to know of one tool: what the model is
-told of it (its `ToolSpec`), how to run a call of it, how such a call is shown to the
-client, and whether its results are bulky ones that may be cleared once enough pile up.
+told of it (its `ToolSpec`), how to run a call of it, and how such a call is shown to the
+client.
 
 A `Toolbox` holds the tools one conversation can use. Which those are is decided when
 the conversation opens, and the list is not changed after that: it is part of the start
@@ -40,9 +40,6 @@ class Tool:
     # None to send no event. It is worked out just before the call runs, and may raise
     # the same way.
     shown: Callable[[str], str | None] = _not_shown
-    # Whether its results are long enough to be worth clearing. Once enough of them are
-    # in the history, all but the newest are replaced by a short marker.
-    clearable: bool = False
 
     @property
     def name(self) -> str:
@@ -94,7 +91,7 @@ def web_search_tool(search: ParallelAdapterClass) -> Tool:
         found = await search.search(objective=query, queries=[query], mode="turbo")
         return _format_search(found)
 
-    return Tool(_WEB_SEARCH, run, shown=_query, clearable=True)
+    return Tool(_WEB_SEARCH, run, shown=_query)
 
 
 def _query(arguments: str) -> str:
