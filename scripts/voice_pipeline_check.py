@@ -266,7 +266,7 @@ class Talk:
         return [t for k, t in self.events if k == "error"]
 
     def history(self):
-        return [*self.c._history, *self.c._open_turn()]
+        return [*self.c._history, *self.c._turn.items()]
 
     async def close(self):
         if self in OPEN:
