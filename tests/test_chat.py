@@ -20,7 +20,7 @@ from app.core.errors import NotFoundError
 from app.entities import chat_ent, late_results
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
-from app.entities.chat_store import ChatItem, ChatStoreClass
+from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig, GemEntityClass
 from app.entities.instructions import instructions
@@ -149,7 +149,7 @@ class _DocDB:
             if self.breaks_after is not None and written == self.breaks_after:
                 raise ConnectionError("the database went away part-way")
             document = self._stored(item)
-            if isinstance(item, ChatItem) and any(
+            if isinstance(item, ConversationItem) and any(
                 (d["gem_id"], d["place"]) == (document["gem_id"], document["place"])
                 for d in documents
             ):
@@ -196,8 +196,8 @@ def _docdb() -> tuple[_DocDB, "DocDBAdapterClass"]:
     return docdb, cast("DocDBAdapterClass", docdb)
 
 
-def _item(gem_id: ObjectId, place: int, text: str, **fields: Any) -> ChatItem:
-    return ChatItem(
+def _item(gem_id: ObjectId, place: int, text: str, **fields: Any) -> ConversationItem:
+    return ConversationItem(
         gem_id=gem_id,
         place=place,
         at=_NOW,
@@ -208,7 +208,7 @@ def _item(gem_id: ObjectId, place: int, text: str, **fields: Any) -> ChatItem:
 
 async def test_a_conversation_is_read_back_in_order_with_its_times_in_utc() -> None:
     docdb, adapter = _docdb()
-    store = ChatStoreClass(adapter)
+    store = ConversationStoreClass(adapter)
     gem_id, other = ObjectId(), ObjectId()
 
     await store.add([_item(gem_id, 1, "second"), _item(gem_id, 2, "third")])
@@ -228,7 +228,7 @@ async def test_a_conversation_is_read_back_in_order_with_its_times_in_utc() -> N
 
 async def test_every_shape_of_item_is_stored_as_it_was_given() -> None:
     _, adapter = _docdb()
-    store = ChatStoreClass(adapter)
+    store = ConversationStoreClass(adapter)
     gem_id = ObjectId()
     items: list[Any] = [
         {"role": "user", "content": "weather?"},
@@ -239,7 +239,7 @@ async def test_every_shape_of_item_is_stored_as_it_was_given() -> None:
 
     await store.add(
         [
-            ChatItem(gem_id=gem_id, place=place, at=_NOW, item=item, shown=None)
+            ConversationItem(gem_id=gem_id, place=place, at=_NOW, item=item, shown=None)
             for place, item in enumerate(items)
         ]
     )
@@ -249,7 +249,7 @@ async def test_every_shape_of_item_is_stored_as_it_was_given() -> None:
 
 async def test_deleting_a_gem_deletes_its_conversation() -> None:
     docdb, adapter = _docdb()
-    gems, store = GemEntityClass(adapter), ChatStoreClass(adapter)
+    gems, store = GemEntityClass(adapter), ConversationStoreClass(adapter)
     gem, other = await gems.create(name="Gem One"), await gems.create(name="Gem Two")
     await store.add([_item(gem.id, 0, "hello"), _item(gem.id, 1, "again")])
     await store.add([_item(other.id, 0, "hello")])
@@ -366,7 +366,7 @@ class _Socket:
 class _Chat(SimpleNamespace):
     docdb: _DocDB
     gems: GemEntityClass
-    store: ChatStoreClass
+    store: ConversationStoreClass
     llm: _LLM
     search: Any
     chat: ChatEntityClass
@@ -403,7 +403,7 @@ class _Chat(SimpleNamespace):
 
 async def _chat(*rounds: list[Any], search: Any = None, **gem: Any) -> _Chat:
     docdb, adapter = _docdb()
-    gems, store = GemEntityClass(adapter), ChatStoreClass(adapter)
+    gems, store = GemEntityClass(adapter), ConversationStoreClass(adapter)
     llm = _LLM(*rounds)
     search = _Search() if search is None else search
     chat = ChatEntityClass(
@@ -710,13 +710,13 @@ async def test_a_reply_that_cannot_be_stored_ends_in_chat_error() -> None:
 class _BlindStore:
     """A store that does not see what another process wrote."""
 
-    def __init__(self, store: ChatStoreClass) -> None:
+    def __init__(self, store: ConversationStoreClass) -> None:
         self._store = store
 
-    async def load(self, gem_id: ObjectId) -> list[ChatItem]:
+    async def load(self, gem_id: ObjectId) -> list[ConversationItem]:
         return []
 
-    async def add(self, items: Sequence[ChatItem]) -> None:
+    async def add(self, items: Sequence[ConversationItem]) -> None:
         await self._store.add(items)
 
 
@@ -851,7 +851,7 @@ async def test_the_history_is_shown_oldest_first_with_times_in_utc() -> None:
     await setup.store.add(
         [
             _item(setup.gem.id, 0, "what is my balance?"),
-            ChatItem(
+            ConversationItem(
                 gem_id=setup.gem.id,
                 place=1,
                 at=_NOW,
@@ -863,13 +863,13 @@ async def test_the_history_is_shown_oldest_first_with_times_in_utc() -> None:
                 },
                 shown="current balance of the savings account",
             ),
-            ChatItem(
+            ConversationItem(
                 gem_id=setup.gem.id,
                 place=2,
                 at=_NOW,
                 item={"type": "function_call_output", "call_id": "c", "output": "40,000"},
             ),
-            ChatItem(
+            ConversationItem(
                 gem_id=setup.gem.id,
                 place=3,
                 at=_NOW,
@@ -1850,7 +1850,7 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
     # And a search lost to a restart, closed before a message.
     await setup.store.add(
         [
-            ChatItem(gem_id=setup.gem.id, place=place, at=_NOW, item=item, mark=mark)
+            ConversationItem(gem_id=setup.gem.id, place=place, at=_NOW, item=item, mark=mark)
             for place, (item, mark) in enumerate(
                 [
                     ({"role": "user", "content": "and Delhi?"}, None),

@@ -47,7 +47,7 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.core.errors import NotFoundError
-from app.entities.chat_store import ChatItem, ChatStoreClass
+from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.instructions import instructions
@@ -161,7 +161,7 @@ class ChatEntityClass:
         *,
         gems: GemEntityClass,
         darbar: DarbarEntityClass,
-        store: ChatStoreClass,
+        store: ConversationStoreClass,
         openai: OpenAIAdapterClass,
         anthropic: AnthropicAdapterClass,
         search: ParallelAdapterClass,
@@ -340,7 +340,7 @@ class ChatEntityClass:
         try:
             await self._store.add(
                 [
-                    ChatItem(
+                    ConversationItem(
                         gem_id=gem.id,
                         place=len(history) + offset,
                         at=added.at,
@@ -488,14 +488,14 @@ class ChatEntityClass:
         now = datetime.now(UTC)
         await self._store.add(
             [
-                ChatItem(gem_id=gem_id, place=len(history) + offset, at=now, item=item)
+                ConversationItem(gem_id=gem_id, place=len(history) + offset, at=now, item=item)
                 for offset, item in enumerate(items)
             ]
         )
         return items
 
     def _lost(
-        self, key: str, stored: Sequence[ChatItem], *, told: Sequence[LateResult] = ()
+        self, key: str, stored: Sequence[ConversationItem], *, told: Sequence[LateResult] = ()
     ) -> list[ToolCall]:
         """A stub for each call lost to a restart, closing its placeholder.
 
