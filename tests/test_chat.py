@@ -1933,3 +1933,199 @@ def _a_valid_anthropic_request(messages: list[Any]) -> None:
         if used:
             answer = messages[index + 1]["content"]
             assert [b["tool_use_id"] for b in answer[: len(used)]] == used
+
+
+# ---- found in review
+
+
+class _SetsThenGoes(asyncio.Event):
+    """A step of a scripted reply that sets another event and does not wait."""
+
+    def __init__(self, other: asyncio.Event) -> None:
+        super().__init__()
+        self._other = other
+
+    async def wait(self) -> bool:
+        self._other.set()
+        return True
+
+
+async def test_a_search_cancelled_in_the_instant_it_finishes_is_not_told() -> None:
+    # The search finishes in the same step the gem cancels it in, too late to be
+    # stopped. The gem has been told "Cancelled.", so its result is dropped all the same.
+    finish = asyncio.Event()
+
+    class _FinishesWhenTold(_Searches):
+        async def search(self, *, objective: str, queries: list[str], mode: str) -> Any:
+            await finish.wait()
+            return await super().search(objective=objective, queries=queries, mode=mode)
+
+    searches = _FinishesWhenTold()
+    cancel = _cancel_call("call_9", "call_1")
+    setup = await _chat(
+        _looks(),
+        [_SetsThenGoes(finish), _starts(cancel), _completed(cancel)],
+        _said("Okay, I stopped it."),
+        _said("By the way, it is sunny in Pune."),
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+
+    await _cut_while_searching(setup, socket, "never mind the weather")
+    await _settle()
+
+    assert searches.finished == [_WEATHER] and searches.cancelled == []
+    assert socket.chat()[-1] == ("chat.done", "Okay, I stopped it.")
+    assert "chat.result" not in [type_ for type_, _ in socket.chat()]
+    stored = await grows.check()
+    _a_valid_chain(stored)
+    assert stored[6] == {
+        "type": "function_call_output",
+        "call_id": "call_9",
+        "output": "Cancelled.",
+    }
+    assert not any(item.get("call_id", "").startswith("late_") for item in stored)
+    assert len(setup.llm.requests) == 3
+    await _close(socket, linked)
+
+
+class _FlakyGems:
+    """The gems, with `exists` failing as many times as `fails` says."""
+
+    def __init__(self, gems: GemEntityClass) -> None:
+        self._gems = gems
+        self.fails = 0
+
+    async def get(self, gem_id: str) -> GemConfig:
+        return await self._gems.get(gem_id)
+
+    async def exists(self, gem_id: str) -> bool:
+        if self.fails:
+            self.fails -= 1
+            raise ConnectionError("the database blinked")
+        return await self._gems.exists(gem_id)
+
+
+async def test_a_search_left_running_is_kept_track_of_even_if_the_next_step_fails() -> None:
+    # Its placeholder is stored by then, so its result has to be taken when it comes:
+    # not thrown away, and not written off as lost.
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), _said("Also, it is sunny."), search=searches)
+    gems = _FlakyGems(setup.gems)
+    setup.chat = ChatEntityClass(
+        gems=cast("Any", gems),
+        darbar=DarbarEntityClass(cast("Any", setup.docdb)),
+        store=setup.store,
+        openai=cast("Any", setup.llm),
+        anthropic=cast("Any", _NoKey()),
+        search=setup.search,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+
+    gems.fails = 1  # the look that follows storing the cut reply
+    socket.send(setup.gem.id, "and the time?")
+    await socket.until("chat.done")
+    searches.gates[_WEATHER].set()
+    await socket.until("chat.done", 2)
+
+    stored = await grows.check()
+    _a_valid_chain(stored)
+    assert not any(item.get("output") == _LOST for item in stored)
+    assert _stub_of(stored[6]) == "call_1"
+    assert stored[7]["output"] == searches.found(_WEATHER)
+    assert socket.chat()[-3:] == [
+        ("chat.result", _WEATHER),
+        ("chat.text", "Also, it is sunny."),
+        ("chat.done", "Also, it is sunny."),
+    ]
+    await _close(socket, linked)
+
+
+async def test_a_reply_about_a_late_result_is_cut_when_its_client_goes() -> None:
+    # Nobody sent a message for it, so the socket holds no turn to cut: chat is told the
+    # client has gone, and cuts it. It is stored as what that client was sent.
+    searches = _Searches(_WEATHER)
+    held = asyncio.Event()
+    setup = await _chat(
+        _looks(),
+        _said("Noon."),
+        [_delta("It is "), held, _delta("sunny in Pune."), _completed()],
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    searches.gates[_WEATHER].set()
+    await socket.until("chat.text", 3)
+
+    await _close(socket, linked)
+    stored = await _until_stored(setup, 9)
+
+    await grows.check()
+    assert stored[8] == {"role": "assistant", "content": "It is…"}
+    # The gem is free again, though the reply was never let finish.
+    assert not held.is_set()
+    other, other_linked = await _open(setup.again().service())
+    await _close(other, other_linked)
+
+
+async def test_nothing_is_kept_for_an_id_that_names_no_gem_or_a_client_that_has_gone() -> None:
+    setup = await _chat(_said("Hi."))
+    socket, linked = await _open(setup.service())
+
+    for _ in range(3):
+        socket.send(ObjectId(), "hello")
+    socket.send("not-an-id", "hello")
+    await socket.until("chat.error", 4)
+    assert setup.chat._outliving == {}
+
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done")
+    assert list(setup.chat._outliving) == [str(setup.gem.id)]
+    await _close(socket, linked)
+    assert setup.chat._outliving == {}
+
+
+async def test_a_search_running_when_its_reply_cannot_be_stored_is_stopped() -> None:
+    # Its call is in no stored conversation, so nothing could take its result.
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), search=searches)
+    # Another process took the conversation's next place first.
+    await setup.store.add([_item(setup.gem.id, 0, "from elsewhere")])
+    setup.chat = ChatEntityClass(
+        gems=setup.gems,
+        darbar=DarbarEntityClass(cast("Any", setup.docdb)),
+        store=cast("Any", _BlindStore(setup.store)),
+        openai=cast("Any", setup.llm),
+        anthropic=cast("Any", _NoKey()),
+        search=setup.search,
+    )
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+
+    await _close(socket, linked)
+    await _settle()
+
+    assert searches.cancelled == [_WEATHER]
+    assert setup.chat._outliving == {}
+
+
+async def test_a_search_running_when_its_gem_is_deleted_is_stopped() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), search=searches)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+
+    await setup.gems.delete(str(setup.gem.id))
+    await _close(socket, linked)
+    await _settle()
+
+    assert searches.cancelled == [_WEATHER]
+    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert setup.chat._outliving == {}
