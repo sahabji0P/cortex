@@ -173,10 +173,6 @@ class VoiceModel(Protocol):
         """
         ...
 
-    async def label(self, text: str, *, instructions: str) -> str:
-        """Answer one short, separate request: a few words about `text`."""
-        ...
-
 
 def voice_model(llm: VoiceLLM, name: VoiceModelName, tools: Sequence[ToolSpec]) -> VoiceModel:
     """The model called `name`, reached through `llm`, which must be its provider's adapter."""
@@ -258,16 +254,6 @@ class _OpenAIVoiceModel:
                 for item in output
                 if item.type == "function_call"
             ]
-        )
-
-    async def label(self, text: str, *, instructions: str) -> str:
-        # Always the small model: this is a few words, wanted quickly.
-        return await self._llm.text_response(
-            model="6 Luna",
-            reasoning={"effort": "none"},
-            input=text,
-            instructions=instructions,
-            max_output_tokens=30,
         )
 
 
@@ -376,16 +362,6 @@ class _AnthropicVoiceModel:
                 for block in message.content
                 if block.type == "tool_use"
             ]
-        )
-
-    async def label(self, text: str, *, instructions: str) -> str:
-        # Always the small model: this is a few words, wanted quickly.
-        return await self._llm.text_response(
-            model="Haiku 5.5",
-            thinking={"type": "disabled"},
-            messages=text,
-            system=instructions,
-            max_tokens=30,
         )
 
 
