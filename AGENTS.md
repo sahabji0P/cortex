@@ -37,6 +37,11 @@ What that means in practice:
 - **A gem's config lives here.** The app shows and saves all of it: name, description,
   picture, instructions, model, whether it speaks first, and its tools. Its voice and
   speed are kept but no call uses them yet, so the app shows them as "coming soon".
+  A gem made with blank instructions is given the default ones (how to talk in a call
+  and how to write), and the app shows what comes back.
+- **What a gem is told is two parts, the same in a call and in writing.** The Darbar
+  text, which by default says how things are here (calls, writing, a cut reply, a late
+  tool result), and the gem's own instructions. Both are the user's to change.
 - **A call is always with a gem.** `call.start` names the gem, and may say who speaks
   first. The gem's config says which model answers: a call cannot ask for another.
 - **The app expects more than this backend sends.** It has screens for cost (it looks

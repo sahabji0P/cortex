@@ -8,7 +8,10 @@ The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
 
 ## Plain HTTP
 
-- Gems: `/v1/gems`, and a gem's written conversation, `GET /v1/gems/{gem_id}/chat`.
+- Gems: `/v1/gems`, and a gem's written conversation, `GET /v1/gems/{gem_id}/chat`. A
+  gem's fields are in the README. Its config is version 3. A gem made with
+  `instructions` blank or left out is given the default instructions, which come back in
+  the answer; a change stores `instructions` as sent, so blank means none.
 - The Darbar text: `/v1/darbar`.
 - The models a call can be held with: `GET /v1/voice/models`.
 
@@ -223,11 +226,13 @@ Deleting a gem deletes its written conversation.
 ## The Darbar text: `/v1/darbar`
 
 The Darbar text is the first thing every gem is told, ahead of its own name and
-instructions: what is true for every gem. The user can change it. It applies to every
-conversation opened after the change.
+instructions: how things are here, the same for every gem, in a call and in writing. By
+default it is a built-in text that says what a call and writing are, what a reply ending
+in "…" means, and what a late tool result is. The user can change it, and a text they
+write takes its place whole. It applies to every conversation opened after the change.
 
 | Route | Does |
 | --- | --- |
-| `GET /v1/darbar` | `{"text": "...", "is_default": true}`. `is_default` says whether it is the built-in text |
+| `GET /v1/darbar` | `{"text": "...", "is_default": true}`. `is_default` says whether it is the built-in text. The built-in text is several paragraphs, about 1,700 characters |
 | `PUT /v1/darbar` | Body `{"text": "..."}`, at most 4,000 characters. An empty text means gems are told nothing here. Answers like `GET` |
 | `DELETE /v1/darbar` | Goes back to the built-in text. Answers like `GET` |
