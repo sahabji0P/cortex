@@ -6,15 +6,19 @@ constants, so any change to what the model reads shows up as a failing test.
 
 import re
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, cast
 
 import pytest
+from bson import ObjectId
+from pydantic import ValidationError
 
 from app.entities import voice_ent
-from app.entities.gem_ent import GemConfig
+from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig
 from app.entities.instructions import instruction_layers, instructions
 from app.entities.model import ModelName, model_for
 from app.entities.voice_ent import VoiceConversation
-from tests.test_gems import _stored
+from app.routers.voice.service import VoiceServiceV1Class
+from tests.test_gems import _DocDBFake, _gems, _stored
 from tests.test_model import _adapters, _entity
 from tests.test_voice_conversation import (
     _LLM,
@@ -30,6 +34,11 @@ from tests.test_voice_conversation import (
     _Search,
     _search_call,
 )
+
+if TYPE_CHECKING:
+    from fastapi import WebSocket
+
+    from app.entities.voice_ent import VoiceEntityClass
 
 _NOW = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 
@@ -292,3 +301,125 @@ async def test_a_conversation_takes_its_model_and_who_speaks_first_from_the_gem_
     [kwargs] = opened
     assert (kwargs["model"], kwargs["speaks_first"]) == used
     assert kwargs["gem"] is config
+
+
+# ---- the WebSocket names a gem
+
+
+class _ServiceSocket:
+    """A client that opens with a query string and hangs up at once."""
+
+    def __init__(self, query: dict[str, str]) -> None:
+        self.query_params = query
+        self.accepted = False
+        self.closed: tuple[int, str] | None = None
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def receive(self) -> dict:
+        return {"type": "websocket.disconnect"}
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        if self.closed is None:
+            self.closed = (code, reason)
+
+
+class _Opened:
+    """A conversation that says nothing and ends."""
+
+    async def outputs(self):
+        return
+        yield
+
+    async def close(self) -> None:
+        pass
+
+
+class _Voice:
+    """Records what each conversation was opened with."""
+
+    def __init__(self) -> None:
+        self.opened: list[tuple[object, object, object]] = []
+
+    async def open_conversation(self, model=None, *, speaks_first=None, gem=None) -> _Opened:
+        self.opened.append((model, speaks_first, gem))
+        return _Opened()
+
+
+async def _service_with_a_gem() -> tuple[VoiceServiceV1Class, _Voice, GemConfig]:
+    service, voice, gem, _ = await _service_and_store()
+    return service, voice, gem
+
+
+async def _service_and_store() -> tuple[VoiceServiceV1Class, _Voice, GemConfig, _DocDBFake]:
+    gems, docdb = _gems()
+    gem = await gems.create(name="Kuber", model="Sonnet 5.5", speaks_first=True)
+    voice = _Voice()
+    return VoiceServiceV1Class(cast("VoiceEntityClass", voice), gems), voice, gem, docdb
+
+
+@pytest.mark.parametrize(
+    ("query", "opened"),
+    [
+        # Without a gem: the model and who speaks first as asked, or left to the defaults.
+        ({}, (None, None)),
+        ({"model": "Haiku 5.5"}, ("Haiku 5.5", None)),
+        ({"first": "user"}, (None, False)),
+        ({"first": "assistant"}, (None, True)),
+        ({"model": "6.1 Sol", "first": "assistant"}, ("6.1 Sol", True)),
+    ],
+)
+async def test_a_call_without_a_gem_opens_as_asked(
+    query: dict[str, str], opened: tuple[object, object]
+) -> None:
+    service, voice, _ = await _service_with_a_gem()
+
+    await service.converse(cast("WebSocket", _ServiceSocket(query)))
+
+    assert voice.opened == [(*opened, None)]
+
+
+@pytest.mark.parametrize(
+    ("query", "opened"),
+    [
+        # Left out, each is the gem's to say. Sent, each wins for this call.
+        ({}, (None, None)),
+        ({"model": "6.1 Terra"}, ("6.1 Terra", None)),
+        ({"first": "user"}, (None, False)),
+        ({"first": "assistant"}, (None, True)),
+        ({"model": "Haiku 5.5", "first": "user"}, ("Haiku 5.5", False)),
+    ],
+)
+async def test_a_call_with_a_gem_opens_with_its_config_and_what_the_query_overrides(
+    query: dict[str, str], opened: tuple[object, object]
+) -> None:
+    service, voice, gem = await _service_with_a_gem()
+
+    await service.converse(cast("WebSocket", _ServiceSocket({"gem": str(gem.id), **query})))
+
+    assert voice.opened == [(*opened, gem)]
+
+
+@pytest.mark.parametrize("gem_id", [str(ObjectId()), "not-an-id", ""])
+async def test_a_gem_that_is_not_there_closes_the_socket_with_1008(gem_id: str) -> None:
+    service, voice, _ = await _service_with_a_gem()
+    socket = _ServiceSocket({"gem": gem_id})
+
+    await service.converse(cast("WebSocket", socket))
+
+    assert socket.accepted
+    assert socket.closed == (1008, "unknown gem")
+    assert voice.opened == []
+
+
+async def test_a_gem_whose_config_cannot_be_read_closes_the_socket_with_1011() -> None:
+    service, voice, gem, docdb = await _service_and_store()
+    docdb.documents[gem.id]["version"] = GEM_CONFIG_VERSION + 1
+    socket = _ServiceSocket({"gem": str(gem.id)})
+
+    with pytest.raises(ValidationError, match="newer"):
+        await service.converse(cast("WebSocket", socket))
+
+    assert socket.closed == (1011, "the gem's config cannot be read")
+    assert voice.opened == []

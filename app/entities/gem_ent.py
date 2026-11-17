@@ -5,7 +5,7 @@ It is stored in the database but treated like a config file. It holds only what 
 can honour today. Anything new is added by raising `GEM_CONFIG_VERSION` and writing one
 step in `upgrade_gem_document` that brings older documents up to the new shape.
 
-A call does not read this yet. The voice WebSocket still takes `?model=` and `?first=`.
+A call is held with a gem when the voice WebSocket names it with `?gem=`.
 """
 
 from collections.abc import Callable, Mapping
