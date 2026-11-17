@@ -1,8 +1,8 @@
 """The old call socket, now that it opens its call through the call entity.
 
 How it reads `?gem=`, `?model=` and `?first=` is in `test_voice_gem.py`. These are the
-two other ways an opening can go: a refusal closes the socket with 1008 and the reason,
-and a fault closes it with 1011 and is raised.
+other ways an opening can go: a refusal closes the socket with 1008 and the reason, and a
+fault closes it with 1011 and what could not be read or reached, and is raised.
 """
 
 from typing import TYPE_CHECKING, cast
@@ -12,11 +12,12 @@ import pytest
 from app.routers.voice.service import VoiceServiceV1Class
 from tests.test_darbar import _darbar
 from tests.test_gems import _gems
-from tests.test_voice_gem import _ServiceSocket
+from tests.test_voice_gem import _service_with_a_gem, _ServiceSocket
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
 
+    from app.entities.darbar_ent import DarbarEntityClass
     from app.entities.voice_ent import VoiceEntityClass
 
 
@@ -50,3 +51,22 @@ async def test_speech_services_that_cannot_be_reached_close_the_socket_with_1011
         await _service(ConnectionError("no route")).converse(cast("WebSocket", socket))
 
     assert socket.closed == (1011, "speech services unavailable")
+
+
+class _NoDarbar:
+    async def read(self) -> None:
+        raise ConnectionError("the database is out of reach")
+
+
+async def test_a_darbar_text_that_cannot_be_read_closes_the_socket_with_1011() -> None:
+    service, voice, gem = await _service_with_a_gem()
+    service = VoiceServiceV1Class(
+        service.voice, service.gems, cast("DarbarEntityClass", _NoDarbar())
+    )
+    socket = _ServiceSocket({"gem": str(gem.id)})
+
+    with pytest.raises(ConnectionError, match="out of reach"):
+        await service.converse(cast("WebSocket", socket))
+
+    assert socket.closed == (1011, "the Darbar text could not be read")
+    assert voice.opened == []

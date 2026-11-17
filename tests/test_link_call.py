@@ -37,11 +37,26 @@ class _Conversation:
         self.audio: list[bytes] = []
         self.delays: list[float] = []
         self.audio_fails: Exception | None = None
+        # With `audio_waits`, feeding audio in waits until it is set, as when speech
+        # recognition takes none. `feeding` is how many frames are being fed in now.
+        self.audio_waits: asyncio.Event | None = None
+        self.feeding = 0
         self.closed = 0
+        # Called as `close()` starts. With `close_waits`, closing then waits until it is
+        # set, and with `close_fails` it raises once it has closed.
+        self.closing: Callable[[], None] | None = None
+        self.close_waits: asyncio.Event | None = None
+        self.close_fails: Exception | None = None
 
     async def send_audio(self, pcm: bytes) -> None:
         if self.audio_fails is not None:
             raise self.audio_fails
+        self.feeding += 1
+        try:
+            if self.audio_waits is not None:
+                await self.audio_waits.wait()
+        finally:
+            self.feeding -= 1
         self.audio.append(pcm)
 
     def set_output_delay(self, seconds: float) -> None:
@@ -54,7 +69,13 @@ class _Conversation:
             yield item
 
     async def close(self) -> None:
+        if self.closing is not None:
+            self.closing()
+        if self.close_waits is not None:
+            await self.close_waits.wait()
         self.closed += 1
+        if self.close_fails is not None:
+            raise self.close_fails
 
 
 class _Voice:
@@ -787,3 +808,166 @@ async def test_a_call_that_does_not_open_does_not_disturb_a_chat_reply(gem: str 
     assert socket.frame("chat.done")["text"] == "Once upon a time."
     assert not linked.done()
     await _close(socket, linked)
+
+
+# ---- found in review
+
+
+async def test_the_conversation_is_closed_before_the_call_s_last_frame() -> None:
+    # So that when the app sees that frame, the speech connections are already released.
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    sent_by_then: list[list[str]] = []
+    conversation.closing = lambda: sent_by_then.append(socket.types())
+
+    socket.send(type="call.end")
+    await socket.until("call.ended")
+
+    assert sent_by_then == [["link.ready", "call.ready"]]
+    await _close(socket, linked)
+
+
+async def test_nothing_is_being_fed_into_the_conversation_when_it_is_closed() -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    conversation.audio_waits = asyncio.Event()
+    feeding_by_then: list[int] = []
+    conversation.closing = lambda: feeding_by_then.append(conversation.feeding)
+    socket.mic(b"\x01")
+    await _eventually(lambda: conversation.feeding == 1)
+
+    socket.send(type="call.end")
+    await socket.until("call.ended")
+
+    assert feeding_by_then == [0]
+    assert conversation.closed == 1
+    await _close(socket, linked)
+
+
+async def test_a_call_hung_up_while_it_opens_gets_call_ended_even_if_the_opening_is_refused() -> (
+    None
+):
+    setup = await _setup()
+    setup.voice.gate = asyncio.Event()
+    setup.voice.finishes_anyway = True  # the opening runs on past the hang-up
+    setup.voice.fails = LookupError("no OpenAI key is set, so 6 Luna cannot be used")
+    socket, linked = await _open(setup)
+    socket.send(type="call.start")
+    await _eventually(lambda: len(setup.voice.asked) == 1)
+
+    socket.send(type="call.end")
+    await socket.until("call.ended")
+
+    assert socket.types() == ["link.ready", "call.ended"]
+    await _close(socket, linked)
+
+
+async def test_a_refused_start_hung_up_behind_an_ending_call_gets_call_ended() -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    conversation.close_waits = asyncio.Event()
+
+    socket.send(type="call.end")
+    socket.send(type="call.start", model="no such model")
+    socket.send(type="call.end")
+    await _settle()
+    assert socket.types() == ["link.ready", "call.ready"]  # the first call is still closing
+    conversation.close_waits.set()
+    await socket.until("call.ended", 2)
+
+    assert socket.types() == ["link.ready", "call.ready", "call.ended", "call.ended"]
+    assert len(setup.voice.made) == 1
+    await _close(socket, linked)
+
+
+async def test_a_conversation_that_fails_to_close_still_ends_the_call_and_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    conversation.close_fails = RuntimeError("the speech connection would not close")
+
+    socket.send(type="call.end")
+    await socket.until("call.ended")
+
+    assert conversation.closed == 1
+    assert "did not close cleanly" in caplog.text
+    assert "the speech connection would not close" in caplog.text
+    # The link is unharmed, and another call can be started.
+    socket.send(type="call.start")
+    await socket.until("call.ready", 2)
+    await _close(socket, linked)
+
+
+class _NoDarbar:
+    async def read(self) -> None:
+        raise ConnectionError("the database is out of reach")
+
+
+async def test_a_darbar_text_that_cannot_be_read_fails_the_call_and_says_so() -> None:
+    setup = await _setup()
+    calls = CallEntityClass(
+        gems=setup.chat.gems, darbar=cast("Any", _NoDarbar()), voice=cast("Any", setup.voice)
+    )
+    setup.service = LinkServiceV1Class(setup.chat.chat, calls)
+    socket, linked = await _open(setup)
+
+    socket.send(type="call.start", gem=str(setup.gem.id))
+    await socket.until("call.failed")
+
+    assert socket.frame("call.failed")["text"] == "the Darbar text could not be read"
+    assert setup.voice.asked == []
+    await _close(socket, linked)
+
+
+async def test_mic_audio_that_is_not_taken_fails_the_call_once_too_much_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.routers.link.service._MIC_FRAMES_WAITING", 3)
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    conversation.audio_waits = asyncio.Event()
+
+    socket.mic(b"\x01")
+    await _eventually(lambda: conversation.feeding == 1)  # one is being fed in, and waits
+    for frame in (b"\x02", b"\x03", b"\x04"):
+        socket.mic(frame)  # three more wait their turn: as many as may
+    await _settle()
+    assert "call.failed" not in socket.types()
+    socket.mic(b"\x05")
+    await socket.until("call.failed")
+
+    assert socket.frame("call.failed")["text"] == (
+        "the call broke: speech recognition is not taking the audio"
+    )
+    assert conversation.closed == 1
+    assert not linked.done()
+    await _close(socket, linked)
+    assert conversation.closed == 1
+
+
+async def test_frames_read_after_the_client_stopped_reading_are_not_acted_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A client can have sent frames before it stopped reading. They are handed over
+    # after the socket was closed on it, and a `call.start` among them opens nothing.
+    monkeypatch.setattr("app.routers.link.service._SEND_SECONDS", 0.05)
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    socket.stalls.add("bytes")
+    conversation.out.put_nowait(b"\x01")
+    await _eventually(lambda: conversation.closed == 1)
+    assert socket.gone
+
+    socket.send(type="call.start")
+    async with asyncio.timeout(_WAIT):
+        await linked
+
+    assert len(setup.voice.made) == 1
+    assert conversation.closed == 1
