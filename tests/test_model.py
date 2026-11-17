@@ -1,4 +1,4 @@
-"""The model behind a voice conversation: choosing a provider, and the Anthropic side.
+"""The model behind a conversation: choosing a provider, and the Anthropic side.
 
 The OpenAI side is covered by `test_voice_conversation`, which runs every scenario
 through it.

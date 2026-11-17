@@ -1,7 +1,8 @@
 """
-The model behind a voice conversation: OpenAI or Anthropic, behind one interface.
+The model behind a conversation: OpenAI or Anthropic, behind one interface.
 
-The conversation keeps one history whichever provider answers. Each item in it is a
+Nothing here is particular to a spoken conversation: history in, text and tool calls
+out. A conversation keeps one history whichever provider answers. Each item in it is a
 plain dict in one of three shapes (`Message`, `Call`, `CallResult`), and a `Model`
 turns that history into its provider's request and the provider's stream back into
 three kinds of event.
@@ -208,8 +209,9 @@ def model_for(
 
 
 # How much each model thinks before it speaks: normally, and when asked to think a
-# little (`think`). Normally that is not at all: in a conversation the wait is worse
-# than the gain. 6.1 Sol cannot run without thinking, so for it the two are the same.
+# little (`think`). Normally that is the least this model can think, which is what a
+# call wants: there the wait is worse than the gain. For most that is not at all;
+# 6.1 Sol cannot run without thinking, so for it the two are the same.
 _OPENAI_EFFORT: dict[_OpenAIModelName, tuple[Literal["none", "low"], Literal["low"]]] = {
     "6 Luna": ("none", "low"),
     "6.1 Terra": ("none", "low"),
@@ -296,6 +298,7 @@ class _AnthropicSettings(NamedTuple):
     output_config: OutputConfigParam | Omit
 
 
+# The least each model can think, which is what a call wants.
 _ANTHROPIC_SETTINGS: dict[_AnthropicModelName, _AnthropicSettings] = {
     "Haiku 5.5": _AnthropicSettings({"type": "disabled"}, omit),
     # Sonnet 5.5 rejects `disabled`.
