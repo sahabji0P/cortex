@@ -9,19 +9,26 @@ from datetime import UTC, datetime
 
 import pytest
 
+from app.entities import voice_ent
 from app.entities.gem_ent import GemConfig
 from app.entities.instructions import instruction_layers, instructions
-from app.entities.model import model_for
+from app.entities.model import ModelName, model_for
+from app.entities.voice_ent import VoiceConversation
 from tests.test_gems import _stored
-from tests.test_model import _adapters
+from tests.test_model import _adapters, _entity
 from tests.test_voice_conversation import (
     _LLM,
+    _STT,
+    _TTS,
+    _Clock,
     _completed,
     _conversation,
     _delta,
+    _Fixture,
     _message,
     _read_until,
     _Search,
+    _search_call,
 )
 
 _NOW = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
@@ -169,3 +176,119 @@ def test_a_gem_s_instructions_are_sent_as_stored_without_the_space_around_them()
 
     assert text.startswith(f"You are Kuber.\n\n{own}\n\n{_GEM_OPENING}\n")
     assert "\n\n\n" not in text
+
+
+# ---- a conversation held with a gem
+
+
+_KUBER_WITH_SEARCH = (
+    "You are Kuber.\n"
+    "\n"
+    "You look after the user's personal finances.\n"
+    "\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _SEARCH_RULES + _DATE
+)
+
+
+def _with_gem(llm: _LLM, gem: GemConfig, search: _Search | None = None) -> _Fixture:
+    stt, tts, clock = _STT(), _TTS(), _Clock()
+    conversation = VoiceConversation(
+        stt=stt, tts=tts, llm=llm, search=search or _Search(), gem=gem, clock=clock
+    )
+    return _Fixture(conversation=conversation, stt=stt, tts=tts, llm=llm, clock=clock)
+
+
+async def test_a_gem_is_sent_the_same_instructions_and_tools_on_every_request() -> None:
+    llm = _LLM(
+        [_completed(_search_call("my balance"))],
+        [_delta("Here."), _completed(_message("Here."))],
+        [_delta("Bye."), _completed(_message("Bye."))],
+    )
+    gem = _gem(name="Kuber", instructions="You look after the user's personal finances.")
+    f = _with_gem(llm, gem)
+
+    f.stt.say("what is my balance")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(5)
+    f.stt.say("thanks")
+    await _read_until(f.conversation, "assistant.done")
+
+    assert len(llm.requests) == 3
+    # The start of every request is identical, so a prompt cache keeps working.
+    assert {request["instructions"] for request in llm.requests} == {
+        llm.requests[0]["instructions"]
+    }
+    assert all(request["tools"] == llm.requests[0]["tools"] for request in llm.requests)
+    assert _dated(llm.requests[0]["instructions"]) == _KUBER_WITH_SEARCH
+    assert [tool["name"] for tool in llm.requests[0]["tools"]] == [
+        "web_search",
+        "cancel_tool_call",
+    ]
+    await f.conversation.close()
+
+
+@pytest.mark.parametrize("tools", [[], ["weather"]])
+async def test_a_gem_without_web_search_is_offered_no_tools_even_with_the_key(
+    tools: list[str],
+) -> None:
+    # "weather" is not a tool there is. A config that names it still opens a call.
+    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
+    f = _with_gem(llm, _gem(name="Kuber", tools=tools), _Search(configured=True))
+
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+
+    assert llm.requests[0]["tools"] == []
+    assert _dated(llm.requests[0]["instructions"]) == (
+        "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+    )
+    await f.conversation.close()
+
+
+async def test_a_gem_with_web_search_is_offered_nothing_without_the_key() -> None:
+    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
+    f = _with_gem(llm, _gem(name="Kuber"), _Search(configured=False))
+
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+
+    assert llm.requests[0]["tools"] == []
+    assert "web_search" not in llm.requests[0]["instructions"]
+    await f.conversation.close()
+
+
+# ---- which model, and who speaks first, when a conversation opens
+
+
+@pytest.mark.parametrize(
+    ("model", "speaks_first", "gem", "used"),
+    [
+        # Without a gem, as before: what was asked for, or the configured model.
+        (None, None, None, ("6 Luna", False)),
+        ("Haiku 5.5", True, None, ("Haiku 5.5", True)),
+        (None, False, None, ("6 Luna", False)),
+        # With a gem: what the gem says, unless the call asks for something else.
+        (None, None, {"model": "Sonnet 5.5", "speaks_first": True}, ("Sonnet 5.5", True)),
+        (None, None, {"model": None, "speaks_first": False}, ("6 Luna", False)),
+        ("6.1 Terra", None, {"model": "Sonnet 5.5", "speaks_first": True}, ("6.1 Terra", True)),
+        (None, False, {"model": "Sonnet 5.5", "speaks_first": True}, ("Sonnet 5.5", False)),
+        (None, True, {"model": None, "speaks_first": False}, ("6 Luna", True)),
+    ],
+)
+async def test_a_conversation_takes_its_model_and_who_speaks_first_from_the_gem_unless_asked(
+    monkeypatch: pytest.MonkeyPatch,
+    model: ModelName | None,
+    speaks_first: bool | None,
+    gem: dict[str, object] | None,
+    used: tuple[str, bool],
+) -> None:
+    opened: list[dict[str, object]] = []
+    monkeypatch.setattr(voice_ent, "VoiceConversation", lambda **kwargs: opened.append(kwargs))
+    monkeypatch.setattr(voice_ent.settings, "voice_model", "6 Luna")
+    entity = _entity(_adapters(openai_key=True, anthropic_key=True))
+    config = None if gem is None else _gem(**gem)
+
+    await entity.open_conversation(model, speaks_first=speaks_first, gem=config)
+
+    [kwargs] = opened
+    assert (kwargs["model"], kwargs["speaks_first"]) == used
+    assert kwargs["gem"] is config

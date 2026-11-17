@@ -61,6 +61,7 @@ from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
+from app.entities.gem_ent import GemConfig
 from app.entities.instructions import instructions
 from app.entities.model import (
     LLM,
@@ -306,6 +307,7 @@ class VoiceConversation:
         search: ParallelAdapterClass,
         model: ModelName = "6 Luna",
         speaks_first: bool = False,
+        gem: GemConfig | None = None,
         clock: Clock = time.monotonic,
     ) -> None:
         self._stt = stt
@@ -330,9 +332,12 @@ class VoiceConversation:
         self._user_scripts: set[str] = set()
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
         # `llm` has to be the adapter of the provider that `model` belongs to.
+        # A gem is offered only the tools its config names. A name with no tool behind it
+        # here is passed over, so a config saved before a tool went still opens a call.
+        offers_search = search.configured and (gem is None or "web_search" in gem.tools)
         self._tools = Toolbox(
             [web_search_tool(search), Tool(_CANCEL_TOOL, self._cancel_call)]
-            if search.configured
+            if offers_search
             else []
         )
         self._model = model_for(llm, model, self._tools.specs)
@@ -340,8 +345,8 @@ class VoiceConversation:
         # fixed for the whole conversation: a prompt cache only helps while that start
         # stays the same. How they are put together is in `instructions.py`.
         self._instructions = instructions(
-            gem=None,
-            search=search.configured,
+            gem=gem,
+            search=offers_search,
             model_needs=self._model.own_instructions,
         )
         # The task producing a reply, while one is being produced.
@@ -798,16 +803,24 @@ class VoiceEntityClass:
         return [(info, ready[info.provider], info.name == settings.voice_model) for info in MODELS]
 
     async def open_conversation(
-        self, model: ModelName | None = None, *, speaks_first: bool = False
+        self,
+        model: ModelName | None = None,
+        *,
+        speaks_first: bool | None = None,
+        gem: GemConfig | None = None,
     ) -> VoiceConversation:
         """Start listening. The caller owns the conversation and must `close()` it.
 
-        `model` is the model to hold it with; left out, it is the configured one. With
-        `speaks_first` the assistant greets the user as soon as the conversation opens;
-        without it, it waits for them to speak. Raises `LookupError` if the model's
-        provider has no key.
+        `model` is the model to hold it with; left out, it is the gem's, and without a
+        gem or a model of the gem's, the configured one. With `speaks_first` the
+        assistant greets the user as soon as the conversation opens; left out, it does
+        if the gem says so, and otherwise waits for the user to speak. The gem also says
+        who the assistant is and which tools it may use. Raises `LookupError` if the
+        model's provider has no key.
         """
-        model = model or settings.voice_model
+        model = model or (gem.model if gem is not None else None) or settings.voice_model
+        if speaks_first is None:
+            speaks_first = gem is not None and gem.speaks_first
         llm: LLM = self._openai if is_openai(model) else self._anthropic
         if not llm.configured:
             # Said now, not as a failed reply after the user has spoken.
@@ -821,6 +834,7 @@ class VoiceEntityClass:
             search=self._search,
             model=model,
             speaks_first=speaks_first,
+            gem=gem,
         )
 
 
