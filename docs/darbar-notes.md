@@ -35,7 +35,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - There is no other Darbar text: it is the environment instruction, and it stays editable.
 - The instructions do not depend on call or chat, or on the tools offered.
 - A new gem's instructions come filled in with the call and writing style rules. The user may change or remove them.
-- A line says where the mode changes: before a call's first turn after writing, and before the first written turn after a call. Written when the next turn needs it.
+- A line says when a call starts and when it ends: before the first turn of every call, and before the first written turn after a call. Written when the next turn needs it.
 - Every stored item says its mode, call or chat. Old items have none and are read as chat.
 - One rule for the user's turn, in a call and in writing: what comes before a reply gets through joins it.
 - One writer for a gem at a time, a call or a written reply. Chat to a gem in a call gets an error.
@@ -77,7 +77,6 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Old text code (Project, Session, SessionTurn, the Agent SDK pipeline): keep or remove.
 - Which mode each message was in, in the history route's answer: on hold.
 - A user's turn that never gets a reply is lost: it is kept in memory only, never stored.
-- Two calls in a row: no line between them, so the gem is not told one ended.
 - A long conversation is sent whole at the start of every call. Trimming comes with Gyan Kosh.
 
 ## Learned from Docker Agent (read 2026-11-16, config version 16)

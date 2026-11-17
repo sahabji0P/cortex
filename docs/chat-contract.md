@@ -153,8 +153,8 @@ The events from `call.user.partial` to `call.error` are the conversation's
   frames back). A call and chat are one conversation with the gem (see
   [What a gem remembers](#what-a-gem-remembers)): while a call holds a gem, a
   `chat.send` to it gets `chat.error`, and a `call.start` cuts a reply being written to
-  it. A call holds the gem from when its speech services are connected until its last
-  frame.
+  it. A call holds the gem from when its speech services are connected until what it
+  added is stored, just before its last frame.
 
 A `call.start` that names no gem, or whose `first` is not offered, gets `call.refused`
 with "no gem, or an unknown setting", not `error`. A `call.playback` that cannot be read, such as one with a
@@ -206,8 +206,8 @@ A call starts from the conversation as it is kept, and what is said in it is add
 is settled: the user's turns, and the gem's replies as they were heard, a reply cut off
 ending in "…". The user's words that no reply has been heard to yet are not kept. All of
 it is kept by the time the call's last frame is sent. A call in which nothing was said
-adds nothing. The gem is told where the conversation changes from writing to a call and
-back, by a line the app does not see.
+adds nothing. The gem is told when a call starts and when the conversation goes back to
+writing, by a line the app does not see.
 
 A search cut off while it runs is kept with a result saying it is still running. When it
 comes back, its real result is added after everything else, as a second call that names

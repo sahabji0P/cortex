@@ -397,8 +397,6 @@ A fourth, added on 16 November 2026:
   call ended, or one no reply to was heard, is not stored, and neither is a greeting the
   user did not hear. The model was sent them, so the next request does not start with
   the whole of the one before it.
-- **Two calls in a row have no line between them.** The model is not told that one call
-  ended and another began.
 - **A long history is sent whole.** A call now starts from everything stored, so its
   first request is as long as the gem's whole conversation. Nothing is trimmed.
 - **One context with both speaking and writing in it has no recorded live run.** Whether

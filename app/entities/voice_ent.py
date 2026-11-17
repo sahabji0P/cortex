@@ -228,8 +228,8 @@ class VoiceConversation:
         # The speech connection for the next reply, opened before it is needed.
         self._standby = Standby(tts, clock)
         self._standby.ready()
-        # The instructions say a line in the conversation marks when a call starts. It
-        # goes after a conversation that ended in writing, or opens an empty one.
+        # The instructions say a line in the conversation marks when a call starts. Every
+        # call opens with it, whatever the conversation held before.
         self._add(*mode_line("call", last_mode))
         self._listening = asyncio.create_task(self._listen())
         if speaks_first:

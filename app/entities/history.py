@@ -17,13 +17,13 @@ Everything else is added to the history once it is final, and is added with what
 kept beside it (`Added`): when it was added, what a tool call showed, and what a call's
 result stands for.
 
-The conversation is one, whether the user calls the gem or writes to it. Where it
-changes from one to the other, a line of ours says so (`mode_line`): before the first
-turn of a call that follows writing, and before the first written turn that follows a
-call. An empty conversation counts as written. Nothing is written when a call ends: the
-line is written when the next turn needs it. A line of ours is stored together with the
-first item that follows it (`settled`), so a call in which nothing was said stores
-nothing.
+The conversation is one, whether the user calls the gem or writes to it. A line of ours
+says when a call starts and when it ends (`mode_line`): before the first turn of every
+call, and before the first written turn that follows a call. An empty conversation
+counts as written. Nothing is written when a call ends: the line is written when the
+next turn needs it, and a call that follows a call is marked by its own opening line.
+A line of ours is stored together with the first item that follows it (`settled`), so a
+call in which nothing was said stores nothing.
 """
 
 from collections.abc import Iterable, Sequence
@@ -94,12 +94,16 @@ class UserTurn:
         """The turn as one user item, for a request, or nothing if no turn is open."""
         return [{"role": "user", "content": "\n".join(self._pieces)}] if self._pieces else []
 
+    def added(self) -> list[Added]:
+        """The turn as it would join the history now. It stays open."""
+        return [Added(item, self._at or datetime.now(UTC)) for item in self.items()]
+
     def close(self) -> list[Added]:
         """Take the turn out as it stands, to join the history, where it is final.
 
         Whatever is added next follows it, and what the user says next is a new turn.
         """
-        added = [Added(item, self._at or datetime.now(UTC)) for item in self.items()]
+        added = self.added()
         self._pieces, self._at = [], None
         return added
 
@@ -120,9 +124,12 @@ def line(text: str) -> Added:
 def mode_line(mode: Mode, before: Mode) -> list[Added]:
     """The line that goes before a turn in `mode` after a conversation in `before`, if any.
 
-    `before` is the mode of the conversation's last item, or "chat" if it is empty.
+    `before` is the mode of the conversation's last item, or "chat" if it is empty. A
+    call always opens with its line, also straight after another call: each call is
+    something that happened, and the second line says the first call is over. Writing
+    gets its line only after a call.
     """
-    return [] if mode == before else [line(_MODE_LINES[mode])]
+    return [line(_MODE_LINES[mode])] if mode == "call" or mode != before else []
 
 
 def settled(added: Sequence[Added]) -> int:

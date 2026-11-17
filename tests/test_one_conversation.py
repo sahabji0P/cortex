@@ -14,7 +14,7 @@ from typing import Any, cast
 
 import pytest
 
-from app.entities.call_ent import CallEntityClass, OpenCall
+from app.entities.call_ent import CallEntityClass, CallFault, OpenCall
 from app.entities.chat_ent import ChatEntityClass, ChatEvent
 from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
@@ -540,6 +540,28 @@ async def test_a_search_lost_to_a_restart_is_closed_before_the_call_s_first_repl
     assert (await world.modes())[:5] == ["chat"] * 5
 
 
+async def test_a_call_straight_after_a_call_opens_with_its_own_line() -> None:
+    # Without it the gem could not tell two calls, perhaps hours apart, from one.
+    world = await _world(_spoken("Hi there."), _spoken("Hello again."))
+
+    call, f, keeping = await world.call()
+    await _said_and_heard(f, "hello")
+    await _hang_up(call, keeping)
+    first = await world.stored()
+    call, f, keeping = await world.call()
+    await _said_and_heard(f, "it's me again")
+    await _hang_up(call, keeping)
+
+    assert first == [_CALLED, _user("hello"), _gem_said("Hi there.")]
+    assert world.llm.requests[-1]["input"] == [*first, _CALLED, _user("it's me again")]
+    assert await world.stored() == [
+        *first,
+        _CALLED,
+        _user("it's me again"),
+        _gem_said("Hello again."),
+    ]
+
+
 # ---- one writer at a time
 
 
@@ -566,3 +588,35 @@ async def test_a_written_turn_left_open_is_closed_before_a_call() -> None:
         _user("hello"),
         _gem_said("Hello."),
     ]
+
+
+async def test_a_written_turn_left_open_stays_open_when_the_call_cannot_store_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The message was sent to the model. If the call that was to follow it does not
+    # open, it must still be there for the next message to join, or the next request
+    # would not start with the one before it.
+    pause = asyncio.Event()
+    world = await _world([pause, _delta("Never said.")], _said("Here I am."))
+    client = _Client()
+    world.chat.send(str(world.gem.id), "are you there?", client.deliver)
+    async with asyncio.timeout(2):
+        while True:
+            if world.llm.requests:
+                break
+            await asyncio.sleep(0)
+
+    async def out_of_reach(items: Sequence[ConversationItem]) -> None:
+        raise ConnectionError("the database is out of reach")
+
+    monkeypatch.setattr(world.store, "add", out_of_reach)
+    with pytest.raises(CallFault, match="could not be stored"):
+        await world.calls.open(str(world.gem.id))
+    monkeypatch.undo()  # the database is back
+
+    again = await world.write("hello?")
+
+    assert client.frames == [("chat.cut", "…")]
+    assert again.frames[-1] == ("chat.done", "Here I am.")
+    assert world.llm.requests[-1]["input"] == [_user("are you there?\nhello?")]
+    assert await world.stored() == [_user("are you there?\nhello?"), _gem_said("Here I am.")]

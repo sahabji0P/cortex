@@ -262,11 +262,14 @@ class CallEntityClass:
                 raise CallFault("the conversation could not be read", exc) from exc
             if kept.turn.open:
                 # A written turn left open has been sent to the model: the call follows it.
-                added = [*mode_line("chat", stored.mode), *kept.turn.close()]
+                added = [*mode_line("chat", stored.mode), *kept.turn.added()]
                 try:
                     stored = await self._conversations.add(gem_id, stored, added, "chat")
                 except Exception as exc:
                     raise CallFault("the conversation could not be stored", exc) from exc
+                # Closed only now that it is stored. Until then it is still open: if the
+                # call does not open after all, the next message joins it.
+                kept.turn.close()
             # Nothing is awaited after this, so a caller that cancels the opening either
             # gets the call back, to close, or none was made.
             conversation = line.open(
