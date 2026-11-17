@@ -202,7 +202,6 @@ async def test_a_round_is_sent_as_a_messages_request_and_read_back_as_events() -
             [{"role": "user", "content": "Who won?"}],
             instructions="Be brief.\n",
             think=True,
-            must_answer=False,
         )
     ]
 
@@ -231,21 +230,6 @@ async def test_a_round_is_sent_as_a_messages_request_and_read_back_as_events() -
     assert llm.streams[0].closed
 
 
-async def test_a_round_that_must_answer_forbids_tools_without_changing_the_list() -> None:
-    llm = _Claude([_text("Paris."), _final()], [_text("Paris."), _final()])
-    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
-    history: list[Item] = [{"role": "user", "content": "Capital of France?"}]
-
-    for must_answer in (False, True):
-        async for _ in model.round(history, instructions="", think=False, must_answer=must_answer):
-            pass
-
-    free, forced = llm.requests
-    assert forced["tool_choice"] == {"type": "none"}
-    assert forced["tools"] == free["tools"]
-    assert forced["thinking"] == {"type": "disabled"}
-
-
 async def test_the_ceiling_on_a_reply_suits_a_call_unless_another_is_given() -> None:
     llm = _Claude([_text("Paris."), _final()], [_text("Paris."), _final()])
     history: list[Item] = [{"role": "user", "content": "Capital of France?"}]
@@ -255,7 +239,7 @@ async def test_the_ceiling_on_a_reply_suits_a_call_unless_another_is_given() -> 
         model_for(adapter, "Haiku 5.5", [_SEARCH]),
         model_for(adapter, "Haiku 5.5", [_SEARCH], max_reply_tokens=32000),
     ):
-        async for _ in model.round(history, instructions="", think=False, must_answer=False):
+        async for _ in model.round(history, instructions="", think=False):
             pass
 
     assert [request["max_tokens"] for request in llm.requests] == [8192, 32000]
@@ -282,7 +266,7 @@ async def test_a_round_that_is_refused_or_cut_off_raises(
 
     with pytest.raises(RuntimeError, match=message):
         async for _ in model.round(
-            [{"role": "user", "content": "hi"}], instructions="", think=False, must_answer=False
+            [{"role": "user", "content": "hi"}], instructions="", think=False
         ):
             pass
 
@@ -320,9 +304,7 @@ async def test_each_anthropic_model_is_asked_to_think_as_little_as_it_can(
     llm = _Claude([_text("Paris."), _final()])
     model = model_for(cast("AnthropicAdapterClass", llm), name, [_SEARCH])
 
-    async for _ in model.round(
-        [{"role": "user", "content": "hi"}], instructions="", think=True, must_answer=False
-    ):
+    async for _ in model.round([{"role": "user", "content": "hi"}], instructions="", think=True):
         pass
 
     (request,) = llm.requests
@@ -364,7 +346,7 @@ async def test_each_openai_model_is_called_by_name_and_thinks_only_as_much_as_it
 
     for think in (False, True):
         async for _ in model.round(
-            [{"role": "user", "content": "hi"}], instructions="", think=think, must_answer=False
+            [{"role": "user", "content": "hi"}], instructions="", think=think
         ):
             pass
 
@@ -545,9 +527,7 @@ async def test_cutting_off_an_openai_reply_closes_its_connection_there_and_then(
     speaking = asyncio.Event()
 
     async def reply() -> None:
-        events = model.round(
-            [{"role": "user", "content": "hi"}], instructions="", think=False, must_answer=False
-        )
+        events = model.round([{"role": "user", "content": "hi"}], instructions="", think=False)
         async with contextlib.aclosing(events):
             async for _ in events:
                 speaking.set()
