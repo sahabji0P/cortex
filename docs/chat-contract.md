@@ -57,7 +57,14 @@ under a line saying a search came back.
 That reply goes to the socket that sent the latest message to that gem, and nowhere
 else. If that socket has closed, nothing is sent and no reply is written: the result is
 only stored, and the gem brings it up when it next answers. A new message cuts that
-reply like any other, and is answered once it is stored.
+reply like any other, and is answered once it is stored. So does that socket closing
+while it is being written: it is kept as what was sent, ending in "…".
+
+How the app tells such a reply from the reply to a message: it always begins with
+`chat.result`, and everything for that gem from there to the next `chat.done`,
+`chat.cut` or `chat.error` belongs to it, even if the app has sent a message in the
+meantime. That message's own frames follow that last frame. A `chat.result` is never
+sent in the middle of a reply.
 
 A reply's text comes in stretches. What a gem writes before it uses a tool is one
 stretch, and what it writes after is another: start a new line after a `chat.tool`. The
