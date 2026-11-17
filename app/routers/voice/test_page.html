@@ -71,7 +71,8 @@ const toggle = document.getElementById("toggle");
 const statusEl = document.getElementById("status");
 const log = document.getElementById("log");
 const first = document.getElementById("first");
-first.checked = new URLSearchParams(location.search).get("first") === "assistant";
+const pageQuery = new URLSearchParams(location.search);
+first.checked = pageQuery.get("first") === "assistant";
 
 // The models come from the server, so this page never lists one it cannot open.
 const providerEl = document.getElementById("provider");
@@ -102,7 +103,17 @@ async function loadModels() {
 providerEl.onchange = () => showModels();
 loadModels().catch((error) => { statusEl.textContent = `could not load the models: ${error.message}`; });
 
-let socket = null, mic = null, audio = null;
+// The page's one socket to the backend, opened as the page loads, as the app keeps one
+// open. The call and the chat box below both go over it.
+const link = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/link`);
+link.binaryType = "arraybuffer";
+let onChatFrame = null;     // set by the chat box, when the address names a gem
+let calling = false;        // whether this page is in a call: from Start until it ends
+// Calls this page hung up whose last frame has not come yet. Their frames are dropped,
+// up to and including that last frame, so the end of one call never plays into the next.
+let stale = 0;
+const LAST_FRAMES = new Set(["call.ended", "call.refused", "call.failed"]);
+let mic = null, audio = null;
 let playAt = 0;             // when the next speech chunk should start
 let playing = new Set();    // speech chunks scheduled or playing
 let leftover = null;        // a stray byte when a chunk splits a 16-bit sample
@@ -143,9 +154,9 @@ function play(buffer) {
 let reportedDelay = -1;
 function reportDelay() {
   const delay = (audio?.outputLatency || 0) + (audio?.baseLatency || 0);
-  if (socket?.readyState !== WebSocket.OPEN || Math.abs(delay - reportedDelay) < 0.01) return;
+  if (!calling || link.readyState !== WebSocket.OPEN || Math.abs(delay - reportedDelay) < 0.01) return;
   reportedDelay = delay;
-  socket.send(JSON.stringify({ type: "playback", delay }));
+  link.send(JSON.stringify({ type: "call.playback", delay }));
 }
 
 // The whole of "interruption" on this side: silence everything queued, right now.
@@ -157,20 +168,20 @@ function stopSpeaking() {
 }
 
 function onEvent(event) {
-  if (event.type === "user.partial") {
+  if (event.type === "call.user.partial") {
     partial ??= line("you", "You");
     partial.textContent = event.text;
-  } else if (event.type === "user.final") {
+  } else if (event.type === "call.user.final") {
     (partial ?? line("you", "You")).textContent = event.text;
     partial = null; reply = null;
-  } else if (event.type === "assistant.delta") {
+  } else if (event.type === "call.assistant.delta") {
     reply ??= lastReply = line("cortex", "Cortex");
     reply.textContent += event.text;
-  } else if (event.type === "assistant.done") {
+  } else if (event.type === "call.assistant.done") {
     reply = null;
-  } else if (event.type === "tool.call") {
+  } else if (event.type === "call.tool.call") {
     line("meta").textContent = `searching the web: ${event.text}`;
-  } else if (event.type === "interrupt") {
+  } else if (event.type === "call.interrupt") {
     // `text` is what the server worked out we had played of the reply, which is all
     // the model will remember of it. Show that instead of everything it generated.
     if (event.text && lastReply) {
@@ -179,12 +190,48 @@ function onEvent(event) {
     }
     stopSpeaking();
     reply = lastReply = null;
-  } else if (event.type === "error") {
+  } else if (event.type === "call.error") {
     line("meta").textContent = `error: ${event.text}`;
   }
 }
 
+// A frame of the call. Those of a call already hung up, or of none, are dropped.
+function onCallFrame(frame) {
+  if (stale) { if (LAST_FRAMES.has(frame.type)) stale--; return; }
+  if (!calling) return;
+  if (frame.type === "call.ready") {
+    statusEl.textContent = "listening"; reportedDelay = -1; reportDelay();
+  } else if (frame.type === "call.ended") {
+    stop(false);
+  } else if (frame.type === "call.refused" || frame.type === "call.failed") {
+    // A refused model or setting, or a fault on the backend's side, with the reason in words.
+    line("meta").textContent = `${frame.type === "call.refused" ? "refused" : "failed"}: ${frame.text}`;
+    stop(false);
+  } else {
+    onEvent(frame);
+  }
+}
+
+link.onmessage = (message) => {
+  if (typeof message.data !== "string") {
+    // Speech of the call. None is played once the call is hung up here.
+    if (calling && !stale && audio) play(message.data);
+    return;
+  }
+  const frame = JSON.parse(message.data);
+  if (frame.type.startsWith("call.")) onCallFrame(frame);
+  else if (onChatFrame) onChatFrame(frame);
+  else if (frame.type === "error") line("meta").textContent = `error: ${frame.text}`;
+};
+link.addEventListener("close", () => {
+  if (calling) { line("meta").textContent = "the link closed: reload the page to open it again"; stop(false); }
+  toggle.disabled = true;
+});
+
 async function start() {
+  if (link.readyState !== WebSocket.OPEN) {
+    throw new Error(link.readyState === WebSocket.CONNECTING ? "the link is still opening: try again" : "the link closed: reload the page");
+  }
   const stream = await navigator.mediaDevices.getUserMedia({
     // Echo cancellation keeps the speakers from being heard as the user talking.
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
@@ -195,28 +242,30 @@ async function start() {
   audio.createMediaStreamSource(stream).connect(worklet);
   mic = stream;
 
-  // The page's own query string is passed on (`?model=`), and the checkbox adds to it.
-  const query = new URLSearchParams(location.search);
-  query.delete("first");
-  if (first.checked) query.set("first", "assistant");
-  if (modelEl.value) query.set("model", modelEl.value);
-  const asked = query.size ? `?${query}` : "";
-  socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/voice/converse${asked}`);
-  socket.binaryType = "arraybuffer";
-  socket.onopen = () => { statusEl.textContent = "listening"; reportedDelay = -1; reportDelay(); };
-  socket.onmessage = (message) => typeof message.data === "string" ? onEvent(JSON.parse(message.data)) : play(message.data);
-  // A refused model or setting closes the socket with the reason in words.
-  socket.onclose = (event) => { if (event.reason) line("meta").textContent = `closed: ${event.reason}`; stop(); };
-  worklet.port.onmessage = (message) => { if (socket?.readyState === WebSocket.OPEN) socket.send(message.data); };
+  // The gem named in the page's address, the picked model, and `first` only when the box
+  // is ticked: left out, each is the gem's to say.
+  const asked = { type: "call.start" };
+  if (pageQuery.has("gem")) asked.gem = pageQuery.get("gem");
+  if (modelEl.value) asked.model = modelEl.value;
+  if (first.checked) asked.first = "assistant";
+  link.send(JSON.stringify(asked));
+  calling = true;
+  // Mic audio sent before `call.ready` is kept by the backend, so it is sent at once.
+  worklet.port.onmessage = (message) => { if (calling && link.readyState === WebSocket.OPEN) link.send(message.data); };
   toggle.textContent = "Stop";
   statusEl.textContent = "connecting";
   providerEl.disabled = modelEl.disabled = first.disabled = true;
   if (modelEl.value) line("meta").textContent = `talking to ${modelEl.selectedOptions[0].text}`;
 }
 
-function stop() {
+// `hangUp`: whether to tell the backend. Not when the call ended on the backend's side.
+function stop(hangUp = true) {
+  if (hangUp && calling && link.readyState === WebSocket.OPEN) {
+    link.send(JSON.stringify({ type: "call.end" }));
+    stale++;  // its last frame, `call.ended`, is still to come
+  }
+  calling = false;
   stopSpeaking();
-  socket?.close(); socket = null;
   mic?.getTracks().forEach((track) => track.stop()); mic = null;
   audio?.close(); audio = null;
   partial = reply = null;
@@ -225,12 +274,12 @@ function stop() {
   providerEl.disabled = modelEl.disabled = first.disabled = false;
 }
 
-toggle.onclick = () => (socket ? stop() : start().catch((error) => { line("meta").textContent = `error: ${error.message}`; stop(); }));
+toggle.onclick = () => (calling ? stop() : start().catch((error) => { line("meta").textContent = `error: ${error.message}`; stop(); }));
 </script>
 
 <script>
-// Written chat with the gem named in the address (?gem=<id>), over the standing socket.
-// It has nothing to do with the call above, which also talks to that gem.
+// Written chat with the gem named in the address (?gem=<id>), over the page's one socket,
+// which the call above, with that gem, goes over too.
 const chatGem = new URLSearchParams(location.search).get("gem");
 if (chatGem) openChat(chatGem);
 
@@ -240,7 +289,6 @@ function openChat(gem) {
   document.getElementById("chat").hidden = false;
   let name = "Gem";
   let writing = null;  // the line the reply being written goes into
-  let link = null;
 
   function say(cls, label, text) {
     const el = document.createElement("div");
@@ -292,15 +340,14 @@ function openChat(gem) {
       else if (message.role === "gem") say("cortex", name, message.text);
       else say("meta", "", `used a tool: ${message.text}`);
     }
-    link = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/link`);
-    link.onmessage = (message) => onFrame(JSON.parse(message.data));
-    link.onclose = () => { say("meta", "", "the chat socket closed: reload the page to open it again"); link = null; };
+    onChatFrame = onFrame;
+    link.addEventListener("close", () => say("meta", "", "the socket closed: reload the page to open it again"));
   }
 
   document.getElementById("chatForm").onsubmit = (event) => {
     event.preventDefault();
     const text = chatText.value;
-    if (!text.trim() || link?.readyState !== WebSocket.OPEN) return;
+    if (!text.trim() || onChatFrame === null || link.readyState !== WebSocket.OPEN) return;
     // `writing` is kept: if a reply is being written, its `chat.cut` comes next.
     say("you", "You", text);
     link.send(JSON.stringify({ type: "chat.send", gem, text }));
