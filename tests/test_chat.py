@@ -35,11 +35,11 @@ if TYPE_CHECKING:
 
 _NOW = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 
-_KUBER_IN_WRITING = (
+_GEM_IN_WRITING = (
     "The user keeps a few assistants of their own, which they call gems. Each gem has its "
     "own name and its own work. The place they share is called the Darbar.\n"
     "\n"
-    "You are Kuber.\n"
+    "You are Gem One.\n"
     "\n"
     "You look after the user's personal finances.\n"
     "\n"
@@ -71,10 +71,10 @@ _WRITTEN_SEARCH_RULES = (
 _TODAY = "\nToday is Tuesday, 17 November 2026.\n"
 
 
-def _kuber(**fields: object) -> GemConfig:
+def _a_gem(**fields: object) -> GemConfig:
     return GemConfig.model_validate(
         {
-            "name": "Kuber",
+            "name": "Gem One",
             "instructions": "You look after the user's personal finances.",
             "created_at": _NOW,
             "updated_at": _NOW,
@@ -89,13 +89,13 @@ def _kuber(**fields: object) -> GemConfig:
 @pytest.mark.parametrize(
     ("search", "expected"),
     [
-        (True, _KUBER_IN_WRITING + _WRITTEN_SEARCH_RULES + "- A need of the model's.\n" + _TODAY),
-        (False, _KUBER_IN_WRITING + "- A need of the model's.\n" + _TODAY),
+        (True, _GEM_IN_WRITING + _WRITTEN_SEARCH_RULES + "- A need of the model's.\n" + _TODAY),
+        (False, _GEM_IN_WRITING + "- A need of the model's.\n" + _TODAY),
     ],
 )
 def test_a_gem_in_writing_is_told_the_written_rules(search: bool, expected: str) -> None:
     told = instructions(
-        gem=_kuber(),
+        gem=_a_gem(),
         search=search,
         written=True,
         model_needs="- A need of the model's.\n",
@@ -105,7 +105,7 @@ def test_a_gem_in_writing_is_told_the_written_rules(search: bool, expected: str)
 
 
 def test_the_written_layers_take_the_place_of_the_spoken_ones() -> None:
-    layers = instruction_layers(gem=_kuber(), search=True, written=True, model_needs="", now=_NOW)
+    layers = instruction_layers(gem=_a_gem(), search=True, written=True, model_needs="", now=_NOW)
     assert [layer.name for layer in layers] == [
         "darbar",
         "gem",
@@ -313,7 +313,7 @@ async def test_every_shape_of_item_is_stored_as_it_was_given() -> None:
 async def test_deleting_a_gem_deletes_its_conversation() -> None:
     docdb, adapter = _docdb()
     gems, store = GemEntityClass(adapter), ChatStoreClass(adapter)
-    gem, other = await gems.create(name="Kuber"), await gems.create(name="Lata")
+    gem, other = await gems.create(name="Gem One"), await gems.create(name="Gem Two")
     await store.add([_item(gem.id, 0, "hello"), _item(gem.id, 1, "again")])
     await store.add([_item(other.id, 0, "hello")])
 
@@ -479,7 +479,7 @@ async def _chat(*rounds: list[Any], search: Any = None, **gem: Any) -> _Chat:
     )
     made = await gems.create(
         **{
-            "name": "Kuber",
+            "name": "Gem One",
             "instructions": "You look after the user's personal finances.",
             "model": "6 Luna",
             **gem,
@@ -522,7 +522,7 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     [request] = setup.llm.requests
     today = datetime.now(UTC).strftime("%A, %d %B %Y")
     assert request["instructions"] == (
-        _KUBER_IN_WRITING + _WRITTEN_SEARCH_RULES + f"\nToday is {today}.\n"
+        _GEM_IN_WRITING + _WRITTEN_SEARCH_RULES + f"\nToday is {today}.\n"
     )
     # Search, and as in a call, a way to stop one that carries on in the background.
     assert _tool_names(request) == ["web_search", "cancel_tool_call"]
@@ -870,17 +870,17 @@ async def test_a_changed_gem_applies_from_the_next_message() -> None:
 
     await setup.gems.update(
         str(setup.gem.id),
-        {"name": "Lakshmi", "instructions": "You keep the household accounts.", "tools": []},
+        {"name": "Gem Four", "instructions": "You keep the household accounts.", "tools": []},
     )
     socket.send(setup.gem.id, "hello again")
     await socket.until("chat.done", 2)
 
     first, second = setup.llm.requests
     assert (
-        "You are Kuber.\n\nYou look after the user's personal finances.\n\n"
+        "You are Gem One.\n\nYou look after the user's personal finances.\n\n"
         in (first["instructions"])
     )
-    assert "You are Lakshmi.\n\nYou keep the household accounts.\n\n" in second["instructions"]
+    assert "You are Gem Four.\n\nYou keep the household accounts.\n\n" in second["instructions"]
     assert "search" not in second["instructions"]
     assert _tool_names(first) == ["web_search", "cancel_tool_call"]
     assert _tool_names(second) == []
@@ -994,9 +994,9 @@ async def test_a_changed_darbar_text_applies_from_the_next_message() -> None:
     first, second, third = (request["instructions"] for request in setup.llm.requests)
     # Until the user writes their own, it is the built-in text.
     assert first.startswith("The user keeps a few assistants of their own")
-    assert second.startswith("Every gem answers to the user alone.\n\nYou are Kuber.\n")
+    assert second.startswith("Every gem answers to the user alone.\n\nYou are Gem One.\n")
     # An empty one tells the gem nothing there.
-    assert third.startswith("You are Kuber.\n")
+    assert third.startswith("You are Gem One.\n")
     await _close(socket, linked)
 
 

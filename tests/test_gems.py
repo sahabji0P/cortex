@@ -97,7 +97,7 @@ def _stored(**fields: Any) -> dict[str, Any]:
     now = datetime(2026, 11, 17, tzinfo=UTC)
     return {
         "_id": ObjectId(),
-        "name": "Lata",
+        "name": "Gem Two",
         "instructions": "",
         "model": None,
         "speaks_first": False,
@@ -112,7 +112,7 @@ async def test_a_gem_is_stored_and_read_back_as_it_was_made() -> None:
     gems, docdb = _gems()
 
     made = await gems.create(
-        name="  Lata  ",
+        name="  Gem Two  ",
         instructions="A patient tutor.",
         model="Sonnet 5.5",
         speaks_first=True,
@@ -121,7 +121,7 @@ async def test_a_gem_is_stored_and_read_back_as_it_was_made() -> None:
     read = await gems.get(str(made.id))
 
     assert read == made
-    assert read.name == "Lata"
+    assert read.name == "Gem Two"
     assert read.model == "Sonnet 5.5"
     assert read.speaks_first is True
     assert read.tools == []
@@ -131,7 +131,7 @@ async def test_a_gem_is_stored_and_read_back_as_it_was_made() -> None:
 async def test_a_new_gem_has_the_defaults() -> None:
     gems, _ = _gems()
 
-    gem = await gems.create(name="Lata")
+    gem = await gems.create(name="Gem Two")
 
     assert gem.version == GEM_CONFIG_VERSION
     assert gem.instructions == ""
@@ -154,17 +154,17 @@ async def test_a_tool_cannot_be_named_twice() -> None:
     gems, _ = _gems()
 
     with pytest.raises(ValidationError, match="more than once"):
-        await gems.create(name="Lata", tools=["web_search", " web_search"])
+        await gems.create(name="Gem Two", tools=["web_search", " web_search"])
 
 
 async def test_a_gem_can_only_be_given_a_tool_there_is() -> None:
     gems, docdb = _gems()
 
     with pytest.raises(ValidationError, match="cannot be given these tools: weather"):
-        await gems.create(name="Lata", tools=["web_search", "weather"])
+        await gems.create(name="Gem Two", tools=["web_search", "weather"])
     assert docdb.documents == {}
 
-    made = await gems.create(name="Lata", tools=[" web_search "])
+    made = await gems.create(name="Gem Two", tools=[" web_search "])
     assert made.tools == ["web_search"]
     with pytest.raises(ValidationError, match="cannot be given these tools: weather"):
         await gems.update(str(made.id), {"tools": ["weather"]})
@@ -184,10 +184,10 @@ async def test_a_stored_gem_with_a_tool_that_has_gone_still_loads_and_can_be_cha
     docdb.documents[document["_id"]] = document
 
     read = await gems.get(str(document["_id"]))
-    changed = await gems.update(str(document["_id"]), {"name": "Asha"})
+    changed = await gems.update(str(document["_id"]), {"name": "Gem Three"})
 
     assert read.tools == ["web_search", "weather"]
-    assert changed.name == "Asha"
+    assert changed.name == "Gem Three"
     assert changed.tools == ["web_search", "weather"]
 
 
@@ -195,10 +195,10 @@ async def test_a_gem_cannot_be_given_a_model_that_does_not_exist() -> None:
     gems, docdb = _gems()
 
     with pytest.raises(ValidationError):
-        await gems.create(name="Lata", model=cast("Any", "GPT-2"))
+        await gems.create(name="Gem Two", model=cast("Any", "GPT-2"))
     assert docdb.documents == {}
 
-    made = await gems.create(name="Lata", model="Opus 5.5")
+    made = await gems.create(name="Gem Two", model="Opus 5.5")
     with pytest.raises(ValidationError):
         await gems.update(str(made.id), {"model": "GPT-2"})
     assert (await gems.get(str(made.id))).model == "Opus 5.5"
@@ -219,23 +219,23 @@ async def test_a_stored_gem_whose_model_has_gone_is_answered_by_the_default() ->
 
 async def test_an_update_changes_only_the_fields_given() -> None:
     gems, docdb = _gems()
-    made = await gems.create(name="Lata", instructions="A patient tutor.", model="Opus 5.5")
+    made = await gems.create(name="Gem Two", instructions="A patient tutor.", model="Opus 5.5")
 
-    changed = await gems.update(str(made.id), {"name": " Asha ", "model": None})
+    changed = await gems.update(str(made.id), {"name": " Gem Three ", "model": None})
 
-    assert changed.name == "Asha"
+    assert changed.name == "Gem Three"
     assert changed.model is None
     assert changed.instructions == "A patient tutor."
     assert changed.tools == ["web_search"]
     assert changed.created_at == made.created_at
     assert changed.updated_at > made.updated_at
     assert await gems.get(str(made.id)) == changed
-    assert docdb.documents[made.id]["name"] == "Asha"
+    assert docdb.documents[made.id]["name"] == "Gem Three"
 
 
 async def test_an_update_is_checked_like_a_new_gem() -> None:
     gems, _ = _gems()
-    made = await gems.create(name="Lata")
+    made = await gems.create(name="Gem Two")
 
     with pytest.raises(ValidationError):
         await gems.update(str(made.id), {"name": "  "})
@@ -243,7 +243,7 @@ async def test_an_update_is_checked_like_a_new_gem() -> None:
         await gems.update(str(made.id), {"name": None})
     with pytest.raises(ValueError, match="cannot be changed"):
         await gems.update(str(made.id), {"created_at": datetime.now(UTC)})
-    assert (await gems.get(str(made.id))).name == "Lata"
+    assert (await gems.get(str(made.id))).name == "Gem Two"
 
 
 async def test_gems_are_listed_in_the_order_they_were_made_whatever_was_changed_since() -> None:
@@ -261,7 +261,7 @@ async def test_gems_are_listed_in_the_order_they_were_made_whatever_was_changed_
 
 async def test_a_deleted_gem_is_gone() -> None:
     gems, _ = _gems()
-    made = await gems.create(name="Lata")
+    made = await gems.create(name="Gem Two")
 
     await gems.delete(str(made.id))
 
@@ -278,7 +278,7 @@ async def test_a_missing_or_malformed_id_is_not_found(gem_id: str) -> None:
     with pytest.raises(NotFoundError):
         await gems.get(gem_id)
     with pytest.raises(NotFoundError):
-        await gems.update(gem_id, {"name": "Asha"})
+        await gems.update(gem_id, {"name": "Gem Three"})
     with pytest.raises(NotFoundError):
         await gems.delete(gem_id)
 
@@ -315,14 +315,18 @@ def test_a_config_without_a_version_is_read_as_version_1_and_brought_up_to_date(
 
 
 def test_a_version_1_config_gains_what_version_2_added_with_nothing_chosen() -> None:
-    document = _stored(version=1, name="Lata", instructions="A patient tutor.")
+    document = _stored(version=1, name="Gem Two", instructions="A patient tutor.")
 
     gem = GemConfig.model_validate(document)
 
     assert gem.version == 2
     assert (gem.description, gem.image, gem.voice, gem.speech_speed) == ("", None, None, 1.0)
     # What it already held is as it was.
-    assert (gem.name, gem.instructions, gem.tools) == ("Lata", "A patient tutor.", ["web_search"])
+    assert (gem.name, gem.instructions, gem.tools) == (
+        "Gem Two",
+        "A patient tutor.",
+        ["web_search"],
+    )
 
 
 async def test_a_version_1_config_is_stored_in_the_new_shape_once_it_is_changed() -> None:
@@ -342,10 +346,10 @@ async def test_a_gem_keeps_what_the_app_shows_of_it_and_how_it_is_to_be_spoken()
     gems, _ = _gems()
 
     made = await gems.create(
-        name="Kuber",
+        name="Gem One",
         description="Looks after my money.",
         image="owl#6aa9ff",
-        voice="Asha",
+        voice="Voice One",
         speech_speed=1.25,
     )
     read = await gems.get(str(made.id))
@@ -353,7 +357,7 @@ async def test_a_gem_keeps_what_the_app_shows_of_it_and_how_it_is_to_be_spoken()
     assert (read.description, read.image, read.voice, read.speech_speed) == (
         "Looks after my money.",
         "owl#6aa9ff",
-        "Asha",
+        "Voice One",
         1.25,
     )
     # The picture and the voice can be taken away again. The rest cannot be null.
@@ -377,7 +381,7 @@ async def test_a_gem_s_new_fields_keep_to_their_limits(fields: dict[str, Any]) -
     gems, docdb = _gems()
 
     with pytest.raises(ValidationError):
-        await gems.create(name="Kuber", **fields)
+        await gems.create(name="Gem One", **fields)
     assert docdb.documents == {}
 
 
@@ -416,7 +420,9 @@ def test_the_routes_are_the_ones_a_client_expects() -> None:
 async def test_the_service_hands_out_a_gem_with_its_id_as_text_and_its_version() -> None:
     service = _service()
 
-    made = await service.create_gem(GemsModels.V1.Input.CreateGem(name="Lata", model="Haiku 5.5"))
+    made = await service.create_gem(
+        GemsModels.V1.Input.CreateGem(name="Gem Two", model="Haiku 5.5")
+    )
     read = await service.get_gem(made.id)
 
     assert read == made
@@ -429,20 +435,20 @@ async def test_the_service_hands_out_a_gem_with_its_id_as_text_and_its_version()
 async def test_the_service_changes_only_what_a_patch_sends() -> None:
     service = _service()
     made = await service.create_gem(
-        GemsModels.V1.Input.CreateGem(name="Lata", model="Opus 5.5", speaks_first=True)
+        GemsModels.V1.Input.CreateGem(name="Gem Two", model="Opus 5.5", speaks_first=True)
     )
 
     patch = GemsModels.V1.Input.UpdateGem.model_validate({"model": None})
     changed = await service.update_gem(made.id, patch)
 
     assert changed.model is None
-    assert changed.name == "Lata"
+    assert changed.name == "Gem Two"
     assert changed.speaks_first is True
 
 
 async def test_the_service_deletes_and_then_cannot_find_a_gem() -> None:
     service = _service()
-    made = await service.create_gem(GemsModels.V1.Input.CreateGem(name="Lata"))
+    made = await service.create_gem(GemsModels.V1.Input.CreateGem(name="Gem Two"))
 
     await service.delete_gem(made.id)
 
@@ -456,10 +462,10 @@ async def test_the_service_deletes_and_then_cannot_find_a_gem() -> None:
     "body",
     [
         {"name": "  "},
-        {"name": "Lata", "model": "GPT-2"},
-        {"name": "Lata", "tools": ["web_search", "web_search"]},
-        {"name": "Lata", "tools": ["weather"]},
-        {"name": "Lata", "instructions": "x" * 20_001},
+        {"name": "Gem Two", "model": "GPT-2"},
+        {"name": "Gem Two", "tools": ["web_search", "web_search"]},
+        {"name": "Gem Two", "tools": ["weather"]},
+        {"name": "Gem Two", "instructions": "x" * 20_001},
     ],
 )
 def test_a_new_gem_that_breaks_a_rule_is_refused(body: dict[str, Any]) -> None:
@@ -479,7 +485,7 @@ def test_a_patch_cannot_give_a_tool_there_is_not() -> None:
 
 
 def test_a_patch_keeps_only_the_fields_sent_and_a_null_model() -> None:
-    patch = GemsModels.V1.Input.UpdateGem.model_validate({"name": " Asha ", "model": None})
+    patch = GemsModels.V1.Input.UpdateGem.model_validate({"name": " Gem Three ", "model": None})
 
-    assert patch.changes() == {"name": "Asha", "model": None}
+    assert patch.changes() == {"name": "Gem Three", "model": None}
     assert GemsModels.V1.Input.UpdateGem().changes() == {}
