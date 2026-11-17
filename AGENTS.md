@@ -45,4 +45,7 @@ what is still to be tried out. Read it before designing anything new, and use it
 When something new comes up or is put off, add one line there. Keep it to simple lines,
 no long paragraphs.
 
-`docs/voice-context.excalidraw` is a diagram of what the model is sent during a call.
+`docs/voice-spec.md` says in plain words what a call does and what the model is sent:
+the pipeline, interruption, tool calls, the instructions in full, and the known gaps.
+`docs/voice-context.excalidraw` is the same thing as a picture. When how a call behaves
+changes, change both.

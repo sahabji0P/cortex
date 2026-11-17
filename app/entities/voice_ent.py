@@ -37,9 +37,6 @@ What the user said is answered first. The real result is then added at the next 
 moment, even if it came in long before, as a call written by us (a stub that names the
 original call) followed by that result, and the model tells the user about it in a
 reply of its own, without waiting to be asked.
-
-When a cut leaves a lot unheard, the history also gets a short note naming what the
-unheard part was about. It names the subject only, never what was said.
 """
 
 import asyncio
@@ -108,25 +105,6 @@ _GREETING_NOTE = (
 # instructions. Something has to stand there, because the history would otherwise end
 # with the model's own words, and an Anthropic model takes no request that ends that way.
 _NO_WORDS_NOTE = "The user made a sound there, with no words in it."
-
-# Added after a reply that was cut with a lot left unheard.
-_REMAINDER_NOTE = (
-    "You were interrupted there. The user did not hear the rest of that reply, which "
-    "was about: {topic}. They do not know any of it yet."
-)
-# A cut that leaves fewer unheard words than this gets no such note.
-_REMAINDER_MIN_WORDS = 12
-# How long the end of the user's turn may wait for the note's wording. It is asked for
-# when the user starts speaking, so it is normally ready before they finish.
-_LABEL_WAIT_SECONDS = 0.4
-_LABEL_INSTRUCTIONS = """\
-You are given the part of a spoken reply that the listener did not hear. Say what kind \
-of thing it was, as a generic heading of two to six words that gives nothing away: for \
-example "the rest of the story", "the remaining steps and the recommendation", "the \
-answer and its source", "the rest of the explanation". The heading must fit any text of \
-that kind. Do not mention anyone or anything from the text: no names, characters, \
-places, events, facts, numbers, choices or outcomes. No full stop.
-"""
 
 # A trailing fragment longer than this many words is never treated as noise.
 _STRAY_MAX_WORDS = 2
@@ -217,7 +195,6 @@ class _Heard:
     items: list[Item]  # what joins the history
     spoke: bool  # whether the user heard any of the reply's speech
     kept: str | None  # the text kept of a reply that was cut short; None if heard in full
-    unheard: str  # the text that was dropped
 
 
 class _Reply:
@@ -270,7 +247,6 @@ class _Reply:
         """
         items: list[Item] = []
         spoken: list[str] = []
-        unheard: list[str] = []
         cut = False
         heard_any = False
         for index, part in enumerate(self._parts):
@@ -279,20 +255,18 @@ class _Reply:
                 continue
             said = part.text.strip()
             if cut and index >= self._sent_back:
-                unheard.append(said)  # generated after the user stopped listening
-                continue
+                continue  # generated after the user stopped listening
             text, whole = part.heard(at)
             heard_any = heard_any or bool(text)
             if index < self._sent_back:
                 text = said
             elif not whole:
-                unheard.append(said[len(text) :].strip())
                 text = f"{text}{_CUT_MARK}" if text else ""
             cut = cut or not whole
             if text:
                 spoken.append(text)
                 items.append({"role": "assistant", "content": text})
-        return _Heard(items, heard_any, " ".join(spoken) if cut else None, " ".join(unheard))
+        return _Heard(items, heard_any, " ".join(spoken) if cut else None)
 
 
 class VoiceConversation:
@@ -371,9 +345,6 @@ class VoiceConversation:
         # the model has been sent. Only those may be cleared.
         self._results: list[CallResult] = []
         self._results_sent = 0
-        # Working out what the unheard part of a cut reply was about, while the user
-        # who cut it is still speaking.
-        self._labelling: asyncio.Task[str] | None = None
         self._closed = False
         # The speech connection for the next reply, opened before it is needed.
         self._standby = Standby(tts, clock)
@@ -407,8 +378,6 @@ class VoiceConversation:
         ]
         calls = [*self._outliving.values(), *(self._reply.calls() if self._reply else [])]
         others = [call.running for call in calls if call.running is not None]
-        if self._labelling is not None:
-            others.append(self._labelling)
         for task in (*tasks, *others):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -441,7 +410,7 @@ class VoiceConversation:
         finally:
             self._out.put_nowait(None)
 
-    async def _interrupt(self, *, time_for_a_note: bool = True) -> None:
+    async def _interrupt(self) -> None:
         """The user is speaking: stop the reply, and record how much of it they heard."""
         producing, self._producing = self._producing, None
         if self._announcing is not None:
@@ -458,13 +427,6 @@ class VoiceConversation:
         # empty only when no reply was cut, so a reply cut before its first word shows
         # as the bare mark.
         self._emit("interrupt", "" if kept is None else kept or _CUT_MARK)
-        if (
-            time_for_a_note
-            and heard is not None
-            and heard.items
-            and len(heard.unheard.split()) >= _REMAINDER_MIN_WORDS
-        ):
-            self._labelling = asyncio.create_task(self._label(heard.unheard))
         if producing is not None:
             await asyncio.gather(producing, return_exceptions=True)
 
@@ -483,12 +445,6 @@ class VoiceConversation:
             # user has been told. (One that was cut off or failed before it said
             # anything also has nothing "cut", but has told them nothing.)
             self._results_owed = False
-        if heard.items and self._labelling is not None:
-            # Some of this reply was heard, so a note still being worded for the reply
-            # before it is out of date. (A reply cut before any of it was heard changes
-            # nothing, and that note stays wanted.)
-            self._labelling.cancel()
-            self._labelling = None
         if heard.items and self._turn:
             # Some of the reply got through, so the turn it answers is closed.
             self._history.append({"role": "user", "content": "\n".join(self._turn)})
@@ -500,33 +456,6 @@ class VoiceConversation:
                 if call.seen:
                     self._results_sent = len(self._results)
         return heard
-
-    async def _label(self, unheard: str) -> str:
-        """Name what an unheard stretch of a reply was about, without saying what it said."""
-        try:
-            label = await self._model.label(unheard, instructions=_LABEL_INSTRUCTIONS)
-        except Exception:
-            return ""
-        return " ".join(label.split()).rstrip(".")
-
-    async def _note_the_remainder(self) -> None:
-        """Add the note about a cut reply's unheard part, if its wording is ready in time.
-
-        The note has to be in the history before the next request, like everything else,
-        so the wait is short and a late label is thrown away.
-        """
-        labelling = self._labelling
-        if labelling is None:
-            return
-        try:
-            await asyncio.wait({labelling}, timeout=_LABEL_WAIT_SECONDS)
-            if labelling.done() and not labelling.cancelled() and (topic := labelling.result()):
-                self._history.append(
-                    {"role": "developer", "content": _REMAINDER_NOTE.format(topic=topic)}
-                )
-        finally:
-            labelling.cancel()
-            self._labelling = None
 
     def _outlive(self, call: _ToolCall) -> None:
         """Let a call that is still running carry on without the reply that made it."""
@@ -621,17 +550,12 @@ class VoiceConversation:
             self._turn_began_at = self._clock()
             if self._producing is not None or self._reply is not None:
                 self._user_speaking = True
-                # A note asked for only now could not be worded before it is needed.
-                await self._interrupt(time_for_a_note=False)
+                await self._interrupt()
         # The user holds the floor until it is settled what follows their turn, so that a
         # late result cannot start a reply of its own in the middle of this.
         self._user_speaking = True
         transcript = _without_stray_tail(transcript, self._user_scripts)
         said = bool(transcript) and not self._is_noise(transcript)
-        if said:
-            # Not after a turn with no words: there the reply is picked up again, and a
-            # note still being worded is kept for when the user does say something.
-            await self._note_the_remainder()
         self._user_speaking = False
         # The reply that was to tell the user of a late result, cut off unheard, is not
         # "picked up where it stopped": it is made again, by the same path as before.
