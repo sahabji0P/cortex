@@ -79,7 +79,7 @@ text frames like the rest.
 | `call.user.partial`, `call.user.final`, `call.assistant.delta`, `call.assistant.done`, `call.tool.call`, `call.interrupt`, `call.error` (JSON) | `text` | Each is a `VoiceEvent` with `call.` put before its type; `text` is unchanged. `call.error` is something that failed inside a call that carries on, as `error` was |
 | `call.ended` (JSON) | `text` | The call is over: the app hung up, or the conversation ended by itself. `text` is empty |
 | `call.refused` (JSON) | `text` (the reason) | The call was not opened because of what was asked. This replaces close code 1008: unknown gem, an id that is not an id, a model or setting that is not offered, a model whose provider has no key. Same reasons in words as today |
-| `call.failed` (JSON) | `text` (the reason) | The call could not be opened, or broke, through a fault on the backend's side. This replaces close code 1011: the gem's config cannot be read, speech services unavailable, a relay failure mid-call |
+| `call.failed` (JSON) | `text` (the reason) | The call could not be opened, or broke, through a fault on the backend's side. This replaces close code 1011: the gem's config or the Darbar text cannot be read, speech services unavailable, a failure mid-call, or mic audio that is not being taken (see the rules) |
 
 What each event means is in the README, under the old socket's contract. On
 `call.interrupt`, stop playback and drop any audio not yet played.
@@ -103,6 +103,11 @@ What each event means is in the README, under the old socket's contract. On
   is accepted, and its frames come after the first call's `call.ended`.
 - A `call.end` while the call is still opening stops the opening and gets `call.ended`.
 - The link closing ends its call, as it cuts its chat replies.
+- Mic audio is fed into the call in the order it came. If speech recognition stops
+  taking it and about half a minute of it is waiting, the call is failed with
+  `call.failed`. The old socket made the app wait instead.
+- A client that stops reading its frames for ten seconds counts as gone: the socket is
+  closed on it, which ends its call and cuts its replies.
 - Chat frames (`chat.send` and the `chat.*` frames back) are unchanged.
 
 A `call.start` whose `model` or `first` is not offered gets `call.refused` with "unknown
