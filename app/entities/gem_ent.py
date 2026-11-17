@@ -14,7 +14,7 @@ from typing import Annotated, Any, ClassVar, cast
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
@@ -22,6 +22,7 @@ from app.core.errors import NotFoundError
 
 # The one place the model names are imported. Everything else uses `GemModelName`.
 from app.entities.model import ModelName
+from app.entities.tools import GEM_TOOL_NAMES
 
 __all__ = [
     "DEFAULT_GEM_TOOLS",
@@ -32,6 +33,7 @@ __all__ = [
     "GemModelName",
     "GemName",
     "GemTools",
+    "GemToolsToSave",
     "GemVersionError",
     "upgrade_gem_document",
 ]
@@ -42,7 +44,7 @@ GEM_CONFIG_VERSION = 1
 # The models a gem can be answered by: the same names a call accepts.
 type GemModelName = ModelName
 
-# The tools a new gem may use. Web search is the only tool there is today.
+# The tools a new gem may use, when it is not told which.
 DEFAULT_GEM_TOOLS: tuple[str, ...] = ("web_search",)
 
 _NAME_MAX_LENGTH = 100
@@ -71,6 +73,15 @@ def _check_tools(value: list[str]) -> list[str]:
     return names
 
 
+def _check_known_tools(value: list[str]) -> list[str]:
+    if unknown := [name for name in value if name not in GEM_TOOL_NAMES]:
+        raise ValueError(
+            f"A gem cannot be given these tools: {', '.join(unknown)}. "
+            f"The tools there are: {', '.join(GEM_TOOL_NAMES)}"
+        )
+    return value
+
+
 # The rules for each field, shared by the stored config and the routes' input.
 type GemName = Annotated[str, AfterValidator(_check_name)]
 type GemInstructions = Annotated[str, Field(max_length=_INSTRUCTIONS_MAX_LENGTH)]
@@ -79,6 +90,10 @@ type GemTools = Annotated[
     Field(max_length=_TOOLS_MAX),
     AfterValidator(_check_tools),
 ]
+# Checked when a gem is made or changed, never when one is read. A stored config that
+# names a tool which has since gone must still load: that tool is just not offered.
+type GemToolsToSave = Annotated[GemTools, AfterValidator(_check_known_tools)]
+_TOOLS_TO_SAVE: TypeAdapter[list[str]] = TypeAdapter(GemToolsToSave)
 
 
 class GemVersionError(ValueError):
@@ -177,7 +192,9 @@ class GemEntityClass:
                 "instructions": instructions,
                 "model": model,
                 "speaks_first": speaks_first,
-                "tools": list(DEFAULT_GEM_TOOLS) if tools is None else tools,
+                "tools": _TOOLS_TO_SAVE.validate_python(
+                    list(DEFAULT_GEM_TOOLS) if tools is None else tools
+                ),
                 "created_at": now,
                 "updated_at": now,
             }
@@ -198,6 +215,8 @@ class GemEntityClass:
         """Change only the fields given. `updated_at` moves even when nothing else does."""
         if unknown := set(changes) - _EDITABLE:
             raise ValueError(f"These fields of a gem cannot be changed: {sorted(unknown)}")
+        if "tools" in changes:
+            changes = {**changes, "tools": _TOOLS_TO_SAVE.validate_python(changes["tools"])}
         current = await self.get(gem_id)
         # Checked as a whole, so a change can never leave a config that would not load.
         updated = GemConfig.model_validate(

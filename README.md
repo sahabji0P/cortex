@@ -116,9 +116,9 @@ A gem is one of the user's assistants. Each has one config, kept in the `Gems` c
 | `instructions` | plain text saying who the gem is and how it behaves. May be empty; at most 20,000 characters |
 | `model` | a `name` from `GET /v1/voice/models`, or null for the configured default |
 | `speaks_first` | whether the gem greets the user when a call connects. Default false |
-| `tools` | the names of the tools it may use, no name twice. Default `["web_search"]` |
+| `tools` | the names of the tools it may use, no name twice. Default `["web_search"]`, the only tool there is today. Any other name is refused when a gem is made or changed |
 
-Something new (a voice, skills, looks) is added by raising the version and writing one step that brings older configs up to the new shape (`upgrade_gem_document` in [`app/entities/gem_ent.py`](app/entities/gem_ent.py)). A config from a newer version than the code knows is refused. One with no version is read as version 1, the first shape.
+Something new (a voice, skills, looks) is added by raising the version and writing one step that brings older configs up to the new shape (`upgrade_gem_document` in [`app/entities/gem_ent.py`](app/entities/gem_ent.py)). A config from a newer version than the code knows is refused. One with no version is read as version 1, the first shape. A stored config that names a tool which has since gone still loads: a call just does not offer that tool.
 
 A call does not take a gem yet: the WebSocket still takes `?model=` and `?first=`.
 

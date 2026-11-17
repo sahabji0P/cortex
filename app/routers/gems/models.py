@@ -7,7 +7,7 @@ from app.entities.gem_ent import (
     GemInstructions,
     GemModelName,
     GemName,
-    GemTools,
+    GemToolsToSave,
 )
 
 
@@ -20,7 +20,7 @@ class GemsModels:
                 # A name from `GET /v1/voice/models`, or none for the configured default.
                 model: GemModelName | None = None
                 speaks_first: bool = False
-                tools: GemTools = Field(default_factory=lambda: list(DEFAULT_GEM_TOOLS))
+                tools: GemToolsToSave = Field(default_factory=lambda: list(DEFAULT_GEM_TOOLS))
 
             class UpdateGem(BaseModel):
                 """A partial change. A field left out keeps its value.
@@ -32,7 +32,7 @@ class GemsModels:
                 instructions: GemInstructions | None = None
                 model: GemModelName | None = None
                 speaks_first: bool | None = None
-                tools: GemTools | None = None
+                tools: GemToolsToSave | None = None
 
                 @model_validator(mode="after")
                 def _refuse_null(self) -> "GemsModels.V1.Input.UpdateGem":
