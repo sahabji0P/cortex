@@ -14,7 +14,9 @@ One `VoiceConversation` per client. The speech-to-text service also detects turn
 
 The model may call `web_search` (Parallel) before it answers. Which model it is is chosen
 when the conversation opens, and everything here is the same for either provider: what
-differs between them is in `model.py`.
+differs between them is in `model.py`. Running a reply's model calls and its searches
+is not particular to a call either: that loop is in `loop.py`, and speech is the surface
+the call's replies are delivered on.
 
 The history is what the model is sent on every call, and it holds what the user heard,
 not what was generated. Speech is generated much faster than it plays, so a reply only
@@ -62,7 +64,7 @@ from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
 from app.entities.instructions import instructions
-from app.entities.loop import CUT_MARK, Delivered, Reply, ToolCall
+from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import (
     LLM,
     MODELS,
@@ -70,8 +72,6 @@ from app.entities.model import (
     Item,
     ModelInfo,
     ModelName,
-    RoundDone,
-    TextDelta,
     ToolSpec,
     is_openai,
     model_for,
@@ -547,23 +547,22 @@ class VoiceConversation:
         reply = _Reply(speech, brings_results=brings_results)
         self._reply = reply
         try:
-            # The model calls what it needs: there is no cap on how many rounds of tool
-            # calls one reply may make. It ends with a round that makes none.
-            while await self._model_round(reply):
-                pass
-            await reply.speech.finish()
-        except asyncio.CancelledError:
-            await reply.speech.stop()
-            raise
+            await run_reply(
+                reply,
+                self._model,
+                self._tools,
+                instructions=self._instructions,
+                next_round=self._next_round,
+                said=lambda text: self._emit("assistant.delta", text),
+                show=self._show_call,
+            )
         except Exception as exc:
-            await reply.speech.stop()
             self._emit("error", f"reply failed: {exc}")
         else:
-            reply.finished = True
             self._emit("assistant.done", reply.speech.text.strip())
 
-    async def _model_round(self, reply: _Reply) -> bool:
-        """Run one model call, speaking its text. Return True if it searched (so: call again)."""
+    def _next_round(self) -> RoundInput:
+        """What the reply's next model call is sent ahead of the reply's own items."""
         self._results_sent = len(self._results)
         # No thinking before it speaks: in a conversation the wait is worse than the gain.
         # The exception is while the history ends in a search with no result yet: one
@@ -573,42 +572,9 @@ class VoiceConversation:
         # little thinking it was about one in twenty. That costs about half a second at
         # the median and 1.5 s for the slowest tenth, on every request made while this
         # holds. An Anthropic model is not asked to: see `model.py`.
-        events = self._model.round(
-            [*self._history, *self._open_turn(), *reply.send_back()],
-            instructions=self._instructions,
-            think=bool(self._outliving or self._late),
+        return RoundInput(
+            [*self._history, *self._open_turn()], think=bool(self._outliving or self._late)
         )
-        calls: list[ToolCall] = []
-        # Closed on the way out whatever happens, so the model call never outlives this.
-        async with contextlib.aclosing(events):
-            async for event in events:
-                if isinstance(event, TextDelta):
-                    await reply.say(event.text)
-                    self._emit("assistant.delta", event.text)
-                elif isinstance(event, RoundDone):
-                    calls = [
-                        ToolCall(
-                            call.call_id,
-                            call.name,
-                            call.arguments,
-                            tool=self._tools.get(call.name),
-                        )
-                        for call in event.calls
-                    ]
-        if not calls:
-            return False
-        # Whatever was said before searching ("Let me check") is complete as it stands.
-        await reply.speech.end_part()
-        # Each call runs as its own task, so that interrupting the reply does not stop it.
-        for call in calls:
-            reply.add_call(call)
-            call.running = asyncio.create_task(
-                self._tools.run(call.name, call.arguments, show=self._show_call)
-            )
-        for call in calls:
-            if call.running is not None:
-                call.output = await asyncio.shield(call.running)
-        return True
 
     def _is_noise(self, transcript: str) -> bool:
         """Whether a turn's words are a stray fragment trailing the user's last sentence."""

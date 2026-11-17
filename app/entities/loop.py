@@ -25,13 +25,24 @@ tool events go are the conversation's own. It hands them over at the start of ea
 """
 
 import asyncio
+import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
-from app.entities.model import CallResult, Item
-from app.entities.tools import Tool
+from app.entities.model import CallResult, Item, Model, RoundDone, TextDelta
+from app.entities.tools import Tool, Toolbox
 
-__all__ = ["CUT_MARK", "Delivered", "Part", "Reply", "Surface", "ToolCall"]
+__all__ = [
+    "CUT_MARK",
+    "Delivered",
+    "Part",
+    "Reply",
+    "RoundInput",
+    "Surface",
+    "ToolCall",
+    "run_reply",
+]
 
 # Ends the stored text of a reply that was cut off.
 CUT_MARK = "…"
@@ -191,3 +202,81 @@ class Reply:
                 kept.append(text)
                 items.append({"role": "assistant", "content": text})
         return Delivered(items, any_text, " ".join(kept) if cut else None, " ".join(undelivered))
+
+
+class RoundInput(NamedTuple):
+    """What a conversation gives one model round, read when the round starts."""
+
+    items: list[Item]  # everything before this reply, as it stands now
+    think: bool  # whether the model is asked to think a little first
+
+
+async def run_reply(
+    reply: Reply,
+    model: Model,
+    tools: Toolbox,
+    *,
+    instructions: str,
+    next_round: Callable[[], RoundInput],
+    said: Callable[[str], None],
+    show: Callable[[str], None],
+) -> None:
+    """Produce one reply: model rounds, with tool calls in between, delivered as they stream.
+
+    `next_round` is asked at the start of every round, not once per reply: what it
+    returns can change while tools run. `said` is given each piece of text once the
+    surface has taken it, and `show` the text of each tool call's `tool.call` event.
+
+    The surface is finished when the reply is, and stopped if it is cut off or fails.
+    A failure is raised once the surface has stopped.
+    """
+    try:
+        # The model calls what it needs: there is no cap on how many rounds of tool
+        # calls one reply may make. It ends with a round that makes none.
+        while await _model_round(reply, model, tools, instructions, next_round, said, show):
+            pass
+        await reply.surface.finish()
+    except (asyncio.CancelledError, Exception):
+        await reply.surface.stop()
+        raise
+    reply.finished = True
+
+
+async def _model_round(
+    reply: Reply,
+    model: Model,
+    tools: Toolbox,
+    instructions: str,
+    next_round: Callable[[], RoundInput],
+    said: Callable[[str], None],
+    show: Callable[[str], None],
+) -> bool:
+    """Run one model call, delivering its text. Return True if it called tools (so: again)."""
+    before = next_round()
+    events = model.round(
+        [*before.items, *reply.send_back()], instructions=instructions, think=before.think
+    )
+    calls: list[ToolCall] = []
+    # Closed on the way out whatever happens, so the model call never outlives this.
+    async with contextlib.aclosing(events):
+        async for event in events:
+            if isinstance(event, TextDelta):
+                await reply.say(event.text)
+                said(event.text)
+            elif isinstance(event, RoundDone):
+                calls = [
+                    ToolCall(call.call_id, call.name, call.arguments, tool=tools.get(call.name))
+                    for call in event.calls
+                ]
+    if not calls:
+        return False
+    # Whatever was said before calling tools ("Let me check") is complete as it stands.
+    await reply.surface.end_part()
+    # Each call runs as its own task, so that cutting the reply off does not stop it.
+    for call in calls:
+        reply.add_call(call)
+        call.running = asyncio.create_task(tools.run(call.name, call.arguments, show=show))
+    for call in calls:
+        if call.running is not None:
+            call.output = await asyncio.shield(call.running)
+    return True
