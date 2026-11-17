@@ -63,8 +63,9 @@ mic ─▶ speech to text ─▶ conversation ─▶ model ─▶ text to speech
 - **A line says the user has called.** (Enforced) The instructions are the same in a
   call and in writing, so a line in the history is what tells the model the conversation
   is spoken. It follows the stored conversation when that ends in writing (or opens an
-  empty one). After a call ended in a call, there is no new line. The first written turn
-  after a call has a line of its own, saying the call has ended.
+  empty one). A stored conversation that ends in a call, as when one call follows
+  another, gets no new line. The first written turn after a call has a line of its own,
+  saying the call has ended.
 - **One writer at a time.** (Enforced) While a call holds the gem, nothing is written to
   it: a message gets `chat.error`, and another `call.start` for the gem is refused. A
   reply being written when the call starts is cut, and the call opens once it is stored.
