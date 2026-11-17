@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-from app.entities.history import Added, UserTurn, added_reply
+from app.entities.history import Added, Mode, UserTurn, added_reply, mode_line
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import Item, Model
@@ -132,12 +132,14 @@ class WrittenConversation:
         instructions: str,
         late: LateResults,
         history: Sequence[Item] = (),
+        last_mode: Mode = "chat",
         turn: UserTurn | None = None,
     ) -> None:
         # `model` has to be told of exactly the tools in `tools`, and `instructions` are
         # the whole instructions, with what the model needs already in them. `late` holds
         # the calls of this conversation that outlive their replies, those of earlier
-        # replies included. `turn` is the user's turn no reply has got through to yet, if
+        # replies included. `last_mode` is the mode of the last item of `history`, "chat"
+        # if it is empty. `turn` is the user's turn no reply has got through to yet, if
         # one is open: the next message joins it.
         self._model = model
         self._tools = tools
@@ -150,6 +152,10 @@ class WrittenConversation:
         # result in the history, and is held by `late` until its result is told.
         self.left_running: list[ToolCall] = []
         self._turn = UserTurn() if turn is None else turn
+        # After a call, a line says the conversation is written from here on. It is
+        # stored with the first item that follows it (see `history.py`).
+        for added in mode_line("chat", last_mode):
+            self._add(added)
         self._writing = False
         self._cut = False
         self._out: asyncio.Queue[_Handed] | None = None

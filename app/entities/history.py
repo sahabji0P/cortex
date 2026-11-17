@@ -16,16 +16,47 @@ afterwards: it can gain a line. So it is never stored while it is open.
 Everything else is added to the history once it is final, and is added with what is
 kept beside it (`Added`): when it was added, what a tool call showed, and what a call's
 result stands for.
+
+The conversation is one, whether the user calls the gem or writes to it. Where it
+changes from one to the other, a line of ours says so (`mode_line`): before the first
+turn of a call that follows writing, and before the first written turn that follows a
+call. An empty conversation counts as written. Nothing is written when a call ends: the
+line is written when the next turn needs it. A line of ours is stored together with the
+first item that follows it (`settled`), so a call in which nothing was said stores
+nothing.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 from app.entities.loop import ResultMark, ToolCall
 from app.entities.model import Item
 
-__all__ = ["Added", "UserTurn", "added_reply", "shown"]
+__all__ = [
+    "Added",
+    "Mode",
+    "UserTurn",
+    "added_reply",
+    "line",
+    "mode_line",
+    "settled",
+    "shown",
+    "stubs",
+]
+
+# How the conversation is held: spoken in a call, or written.
+type Mode = Literal["call", "chat"]
+
+# The line of ours that goes before the first turn in each mode, after a turn in the
+# other. The gem is told one instruction text however it is reached, and that text says
+# a line in the conversation marks when a call starts and when it ends: these are those
+# lines.
+_MODE_LINES: dict[Mode, str] = {
+    "call": "The user has called you. From here on the conversation is spoken.",
+    "chat": "The call has ended. From here on the conversation is written.",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +110,38 @@ class UserTurn:
         goes before it. If it left nothing, the turn stays open.
         """
         return self.close() if items else []
+
+
+def line(text: str) -> Added:
+    """A line of ours: an item that records what happened, in the history's own voice."""
+    return Added({"role": "developer", "content": text}, datetime.now(UTC))
+
+
+def mode_line(mode: Mode, before: Mode) -> list[Added]:
+    """The line that goes before a turn in `mode` after a conversation in `before`, if any.
+
+    `before` is the mode of the conversation's last item, or "chat" if it is empty.
+    """
+    return [] if mode == before else [line(_MODE_LINES[mode])]
+
+
+def settled(added: Sequence[Added]) -> int:
+    """How many of `added`, from the first, may be stored now.
+
+    All of them up to the last that is not a line of ours: a line is stored together
+    with the first item that follows it, and not at all if nothing does.
+    """
+    for count in range(len(added), 0, -1):
+        item = added[count - 1].item
+        if "role" not in item or item["role"] != "developer":
+            return count
+    return 0
+
+
+def stubs(calls: Iterable[ToolCall]) -> list[Added]:
+    """Stub calls and their results, as they are added. A stub shows nothing."""
+    now = datetime.now(UTC)
+    return [Added(item, now) for call in calls for item in call.items()]
 
 
 def added_reply(items: Sequence[Item], calls: Sequence[ToolCall], at: datetime) -> list[Added]:

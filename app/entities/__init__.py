@@ -43,7 +43,9 @@ class EntitiesRegistry:
             anthropic=adapter.Anthropic,
             search=adapter.Parallel,
         )
-        cls.Call = CallEntityClass(gems=cls.Gems, darbar=cls.Darbar, voice=cls.Voice)
+        cls.Call = CallEntityClass(
+            gems=cls.Gems, darbar=cls.Darbar, voice=cls.Voice, conversations=cls.Conversations
+        )
 
 
 __all__ = ["EntitiesRegistry"]

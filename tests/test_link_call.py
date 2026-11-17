@@ -34,6 +34,10 @@ class _Conversation:
     def __init__(self) -> None:
         # What `outputs()` yields, in order. None ends it; an exception is raised.
         self.out: asyncio.Queue[VoiceEvent | bytes | Exception | None] = asyncio.Queue()
+        # What it adds to the gem's conversation: nothing, unless a test adds to it.
+        self.added: list[Any] = []
+        self.grew = asyncio.Event()
+        self.left_running: list[Any] = []
         self.audio: list[bytes] = []
         self.delays: list[float] = []
         self.audio_fails: Exception | None = None
@@ -62,6 +66,9 @@ class _Conversation:
     def set_output_delay(self, seconds: float) -> None:
         self.delays.append(seconds)
 
+    def results_came(self) -> None:
+        pass
+
     async def outputs(self) -> AsyncIterator[VoiceEvent | bytes]:
         while (item := await self.out.get()) is not None:
             if isinstance(item, Exception):
@@ -79,11 +86,12 @@ class _Conversation:
 
 
 class _Voice:
-    """The voice entity. Records what each conversation was opened with.
+    """The voice entity. Records what each call was connected with, and the Darbar text
+    its conversation was opened with (None until it is opened).
 
-    With `gate`, opening waits until it is set. With `finishes_anyway`, an opening that
-    is cancelled returns its conversation all the same, as one does that had finished in
-    the same moment the cancel came.
+    With `gate`, connecting waits until it is set. With `finishes_anyway`, a connecting
+    that is cancelled returns its line all the same, as one does that had finished in the
+    same moment the cancel came. A line that is closed unopened is counted in `hung_up`.
     """
 
     def __init__(self) -> None:
@@ -92,9 +100,11 @@ class _Voice:
         self.gate: asyncio.Event | None = None
         self.finishes_anyway = False
         self.fails: Exception | None = None
+        self.hung_up = 0
 
-    async def open_conversation(self, gem, *, speaks_first=None, darbar=None) -> _Conversation:
-        self.asked.append((speaks_first, gem, darbar))
+    async def connect(self, gem: object, *, speaks_first: bool | None = None) -> "_Line":
+        self.asked.append((speaks_first, gem, None))
+        asked = len(self.asked) - 1
         try:
             if self.gate is not None:
                 await self.gate.wait()
@@ -104,9 +114,23 @@ class _Voice:
                 raise
         if self.fails is not None:
             raise self.fails
+        return _Line(self, asked)
+
+
+class _Line:
+    def __init__(self, voice: _Voice, asked: int) -> None:
+        self._voice = voice
+        self._asked = asked
+
+    def open(self, *, darbar: str | None = None, **_: object) -> _Conversation:
+        speaks_first, gem, _ = self._voice.asked[self._asked]
+        self._voice.asked[self._asked] = (speaks_first, gem, darbar)
         conversation = _Conversation()
-        self.made.append(conversation)
+        self._voice.made.append(conversation)
         return conversation
+
+    async def close(self) -> None:
+        self._voice.hung_up += 1
 
 
 class _Socket:
@@ -199,6 +223,7 @@ class _Setup:
             gems=chat.gems,
             darbar=DarbarEntityClass(cast("Any", chat.docdb)),
             voice=cast("Any", voice),
+            conversations=chat.conversations,
         )
         self.service = LinkServiceV1Class(chat.chat, calls)
 
@@ -666,11 +691,12 @@ async def test_a_client_that_stops_reading_chat_ends_its_call_even_if_nothing_wa
     monkeypatch.setattr("app.routers.link.service._SEND_SECONDS", 0.05)
     never = asyncio.Event()
     setup = await _setup([_delta("Once upon "), never])
+    other = await setup.chat.gems.create(name="Gem Two", model="6 Luna")
     socket, linked = await _in_call(setup)
     [conversation] = setup.voice.made
     socket.stalls.add("chat.text")
 
-    socket.send(type="chat.send", gem=str(setup.gem.id), text="a story")
+    socket.send(type="chat.send", gem=str(other.id), text="a story")
     await _eventually(lambda: conversation.closed == 1)
 
     assert socket.gone
@@ -740,9 +766,11 @@ async def test_a_call_hung_up_while_it_waits_for_the_one_before_it_never_opens()
 
 async def test_chat_is_read_and_answered_while_a_call_opens_and_runs() -> None:
     setup = await _setup(_said("Hi."), _said("Again."))
+    other = await setup.chat.gems.create(name="Gem Two", model="6 Luna")
     setup.voice.gate = asyncio.Event()
     socket, linked = await _open(setup)
 
+    # While speech is connecting, the call does not hold the gem yet: it is written to.
     setup.start(socket)
     socket.send(type="chat.send", gem=str(setup.gem.id), text="hello")
     await socket.until("chat.done")
@@ -750,14 +778,48 @@ async def test_chat_is_read_and_answered_while_a_call_opens_and_runs() -> None:
     await socket.until("call.ready")
     [conversation] = setup.voice.made
     conversation.out.put_nowait(_event("user.final", "are you there"))
-    socket.send(type="chat.send", gem=str(setup.gem.id), text="hello again")
+    # Another gem is written to while the call runs.
+    socket.send(type="chat.send", gem=str(other.id), text="hello again")
     await socket.until("chat.done", 2)
     await socket.until("call.user.final")
 
-    assert socket.frame("chat.done")["text"] == "Hi."
+    assert [
+        f["text"] for f in socket.frames if isinstance(f, dict) and f["type"] == "chat.done"
+    ] == [
+        "Hi.",
+        "Again.",
+    ]
     assert conversation.closed == 0
     await _close(socket, linked)
     assert conversation.closed == 1
+
+
+@pytest.mark.parametrize("same_socket", [True, False])
+async def test_a_message_to_a_gem_in_a_call_gets_chat_error_and_the_call_carries_on(
+    same_socket: bool,
+) -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    writer, writer_linked = (socket, linked) if same_socket else await _open(setup)
+
+    writer.send(type="chat.send", gem=str(setup.gem.id), text="hello")
+    await writer.until("chat.error")
+    conversation.out.put_nowait(b"\x01")
+    await socket.until("bytes")
+
+    assert writer.frame("chat.error") == {
+        "type": "chat.error",
+        "gem": str(setup.gem.id),
+        "text": "the gem is in a call",
+    }
+    assert await setup.chat.stored() == []
+    assert setup.chat.llm.requests == []
+    assert conversation.closed == 0
+    assert "call.failed" not in socket.types()
+    if not same_socket:
+        await _close(writer, writer_linked)
+    await _close(socket, linked)
 
 
 async def test_a_failed_chat_reply_does_not_disturb_the_call() -> None:
@@ -901,7 +963,10 @@ class _NoDarbar:
 async def test_a_darbar_text_that_cannot_be_read_fails_the_call_and_says_so() -> None:
     setup = await _setup()
     calls = CallEntityClass(
-        gems=setup.chat.gems, darbar=cast("Any", _NoDarbar()), voice=cast("Any", setup.voice)
+        gems=setup.chat.gems,
+        darbar=cast("Any", _NoDarbar()),
+        voice=cast("Any", setup.voice),
+        conversations=setup.chat.conversations,
     )
     setup.service = LinkServiceV1Class(setup.chat.chat, calls)
     socket, linked = await _open(setup)

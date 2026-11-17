@@ -1,13 +1,17 @@
 """
 Conversation entity: each gem's one conversation, and who is adding to it.
 
-A gem is one entity with one conversation. The database is the truth (see
-`conversation_store.py`): every reply is made from what is stored, and what it adds is
-stored after it. What is kept in memory, for each gem, is a `GemConversation`:
+A gem is one entity with one conversation, whether the user calls it or writes to it.
+The database is the truth (see `conversation_store.py`): every written reply and every
+call starts from what is stored, and what each adds is stored after it, in order. What
+is kept in memory, for each gem, is a `GemConversation`:
 
-- who is adding to the conversation now: one writer at a time,
+- who is adding to the conversation now: one writer at a time, a reply being written or
+  a call. A call holds the gem from when it starts opening until what it added is
+  stored; while it does, nothing is written to the gem.
 - the gem's tool calls that outlived their replies, until their results are told (see
-  `late_results.py`): one `LateResults` for the gem, whoever made the call,
+  `late_results.py`): one `LateResults` for the gem, whoever made the call. A result is
+  told in the call if one holds the gem, and in writing otherwise,
 - the user's written turn that no reply has got through to yet (see `history.py`).
 
 A gem with none of these is not kept. Running calls live in this process's memory, so a
@@ -19,7 +23,7 @@ import asyncio
 import json
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal, Protocol
 
 from bson import ObjectId
@@ -27,18 +31,19 @@ from bson import ObjectId
 from app.core.errors import NotFoundError
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.gem_ent import GemEntityClass
-from app.entities.history import Added, UserTurn
+from app.entities.history import Added, Mode, UserTurn, stubs
 from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
 from app.entities.model import Item
 
 __all__ = [
+    "Caller",
     "ConversationEntityClass",
     "GemConversation",
     "Message",
+    "Stored",
     "Writer",
     "gem_key",
-    "stubs",
 ]
 
 # The result a call lost to a restart is given, so its placeholder does not promise a
@@ -69,15 +74,36 @@ class Writer(Protocol):
         ...
 
 
+class Caller(Protocol):
+    """A call with a gem, which holds the gem from its opening until it is stored."""
+
+    def results_came(self) -> None:
+        """A late result has come in, to be told in the call."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class Stored:
+    """A gem's conversation as it is stored: its items, and the mode of the last."""
+
+    items: list[Item]
+    # "chat" for an empty conversation: it counts as written.
+    mode: Mode = "chat"
+
+
 class GemConversation:
     """What is kept in memory of one gem's conversation."""
 
-    def __init__(self, results_came: Callable[[], None]) -> None:
-        # The gem's calls that outlived their replies, until their results are told.
-        # `results_came` is called when one comes in.
-        self.late = LateResults(results_came)
+    def __init__(self, written: Callable[[], None]) -> None:
+        # The gem's calls that outlived their replies, until their results are told. A
+        # result that comes in is told in the call that holds the gem, or else by
+        # `written`, in writing.
+        self.late = LateResults(self._results_came)
+        self._written = written
         # The reply being written to the gem, until it is stored: one at a time.
         self.writer: Writer | None = None
+        # The call that holds the gem, from its opening until it is stored.
+        self.call: Caller | None = None
         # Messages whose replies were cut or failed before they left anything in the
         # history. The next message joins them, and they are stored as one.
         self.turn = UserTurn()
@@ -85,7 +111,14 @@ class GemConversation:
     @property
     def idle(self) -> bool:
         """Whether nothing of it needs keeping."""
-        return self.writer is None and not self.late.pending and not self.turn.open
+        held = self.writer is not None or self.call is not None
+        return not held and not self.late.pending and not self.turn.open
+
+    def _results_came(self) -> None:
+        if self.call is not None:
+            self.call.results_came()
+        else:
+            self._written()
 
 
 class ConversationEntityClass:
@@ -123,6 +156,18 @@ class ConversationEntityClass:
         if kept is not None and kept.idle:
             del self._kept[key]
 
+    def call_ended(self, key: str, call: Caller) -> None:
+        """A call that held the gem has ended, and what it added is stored.
+
+        The gem may be written to again, and late results waiting are told in writing.
+        """
+        kept = self._kept.get(key)
+        if kept is None or kept.call is not call:
+            return
+        kept.call = None
+        self._quiet(key)
+        self.let_go(key)
+
     async def messages(self, gem_id: str) -> list[Message]:
         """A gem's conversation as it is shown, oldest first.
 
@@ -144,39 +189,53 @@ class ConversationEntityClass:
                 shown.append(Message("tool", stored.shown, stored.at))
         return shown
 
-    async def load(self, gem_id: ObjectId, *, told: Sequence[LateResult] = ()) -> list[Item]:
+    async def load(self, gem_id: ObjectId, *, told: Sequence[LateResult] = ()) -> Stored:
         """The gem's conversation as it is stored, with the calls lost to a restart closed.
 
-        Each lost call is closed with a stub, stored after the conversation. `told` are
-        late results about to be added, whose calls are not lost.
+        Each lost call is closed with a stub, stored after the conversation in the mode
+        of its last item: closing it changes nothing about how the user is talking.
+        `told` are late results about to be added, whose calls are not lost.
         """
-        stored = await self._store.load(gem_id)
-        history = [entry.item for entry in stored]
-        lost = self._lost(str(gem_id), stored, told)
-        return history + await self.add(gem_id, history, stubs(lost))
+        found = await self._store.load(gem_id)
+        stored = Stored([entry.item for entry in found], found[-1].mode if found else "chat")
+        lost = self._lost(str(gem_id), found, told)
+        return await self.add(gem_id, stored, stubs(lost), stored.mode)
 
     async def add(
-        self, gem_id: ObjectId, history: Sequence[Item], added: Sequence[Added]
-    ) -> list[Item]:
-        """Store items after the conversation `history`, all or none. Return them."""
+        self, gem_id: ObjectId, stored: Stored, added: Sequence[Added], mode: Mode
+    ) -> Stored:
+        """Store items after the conversation, all or none, as added in `mode`.
+
+        Returns the conversation with them.
+        """
+        if not added:
+            return stored
         await self._store.add(
             [
                 ConversationItem(
                     gem_id=gem_id,
-                    place=len(history) + offset,
+                    place=len(stored.items) + offset,
                     at=one.at,
                     item=one.item,
                     shown=one.shown,
                     mark=one.mark,
+                    mode=mode,
                 )
                 for offset, one in enumerate(added)
             ]
         )
-        return [one.item for one in added]
+        return Stored([*stored.items, *(one.item for one in added)], mode)
 
-    async def forget(self, gem_id: ObjectId) -> None:
-        """Forget a gem's stored conversation, as when the gem was deleted meanwhile."""
+    async def gone(self, gem_id: ObjectId) -> bool:
+        """Whether the gem has been deleted. If it has, what was stored since goes too.
+
+        A gem's conversation goes with it, so what was added while it was being deleted
+        would otherwise be left behind.
+        """
+        if await self._gems.exists(str(gem_id)):
+            return False
         await self._store.forget(gem_id)
+        return True
 
     def _lost(
         self, key: str, stored: Sequence[ConversationItem], told: Sequence[LateResult]
@@ -220,12 +279,6 @@ class ConversationEntityClass:
 def gem_key(gem_id: str) -> str:
     """The same gem by whichever spelling of its id. One that is not an id is kept as is."""
     return str(ObjectId(gem_id)) if ObjectId.is_valid(gem_id) else gem_id
-
-
-def stubs(calls: Iterable[ToolCall]) -> list[Added]:
-    """Stub calls and their results, as they are added. A stub shows nothing."""
-    now = datetime.now(UTC)
-    return [Added(item, now) for call in calls for item in call.items()]
 
 
 def _named(arguments: str) -> str | None:

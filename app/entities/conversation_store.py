@@ -14,7 +14,7 @@ A gem's conversation goes when the gem does (see `GemEntityClass.delete`).
 
 import contextlib
 from collections.abc import Sequence
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from bson import ObjectId
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,13 +22,11 @@ from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.core.times import UtcDatetime
+from app.entities.history import Mode
 from app.entities.loop import ResultMark
 from app.entities.model import Item
 
-__all__ = ["ConversationItem", "ConversationStoreClass", "Mode"]
-
-# How the conversation was held when an item was added: spoken in a call, or written.
-type Mode = Literal["call", "chat"]
+__all__ = ["ConversationItem", "ConversationStoreClass"]
 
 
 class ConversationItem(BaseModel):

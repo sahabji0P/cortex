@@ -9,9 +9,8 @@ from fastapi import Depends, WebSocket
 from pydantic import BaseModel, ValidationError
 
 from app.entities import EntitiesRegistry
-from app.entities.call_ent import CallEntityClass, CallFault, CallRefused
+from app.entities.call_ent import CallEntityClass, CallFault, CallRefused, OpenCall
 from app.entities.chat_ent import ChatEntityClass, ChatTurn
-from app.entities.voice_ent import VoiceConversation
 from app.routers.link.models import LinkModels
 
 # How long one frame may take to be taken by the client before the client counts as gone.
@@ -187,14 +186,16 @@ class _Call:
 
     It runs in a task of its own, so the socket's loop never waits on it. The call opens,
     sends `call.ready`, then feeds the mic audio it is handed into the conversation, in
-    order, and forwards the conversation's events and speech, in order. It ends with
-    exactly one last frame: `call.ended`, `call.refused` or `call.failed`.
+    order, forwards the conversation's events and speech, in order, and stores what the
+    call adds to the gem's conversation as it goes. It ends with exactly one last frame:
+    `call.ended`, `call.refused` or `call.failed`.
 
     The conversation holds speech connections open on the owner's paid account, so
     however the call ends it is closed, once, before that last frame: on `call.end`, on
-    the socket closing, on a failure feeding audio in or sending it out, when mic audio
-    piles up untaken, when the conversation ends by itself, when the opening is stopped
-    part-way, and when this task is cancelled.
+    the socket closing, on a failure feeding audio in, sending it out or storing what was
+    said, when mic audio piles up untaken, when the conversation ends by itself, when the
+    opening is stopped part-way, and when this task is cancelled. Closing it stores the
+    rest of what was said and lets the gem go.
     """
 
     def __init__(
@@ -216,8 +217,8 @@ class _Call:
         self._behind = False
         self._delay: float | None = None
         self._hung_up = asyncio.Event()
-        # The conversation, once there is one. Only `_run` closes it.
-        self._conversation: VoiceConversation | None = None
+        # The call, once it is open. Only `_run` closes it.
+        self._conversation: OpenCall | None = None
         # Set once the call's end is decided: it then takes no more audio, and the
         # socket may start another call, whose frames wait for this one's last frame.
         self.ending = False
@@ -265,6 +266,7 @@ class _Call:
             relays = [
                 asyncio.create_task(self._pump(conversation)),
                 asyncio.create_task(self._forward(conversation)),
+                asyncio.create_task(conversation.keep()),
             ]
             hung_up = asyncio.create_task(self._hung_up.wait())
             try:
@@ -277,6 +279,10 @@ class _Call:
                 if task in done and (failure := task.exception()) is not None:
                     raise failure
             # Otherwise it was hung up, or the conversation ended by itself: `call.ended`.
+        except CallFault as exc:
+            # What was said could not be stored: the call does not carry on unsaved.
+            _log.warning("a call on the link could not be kept", exc_info=exc.cause)
+            last = LinkModels.V1.Output.CallFailed(text=exc.reason)
         except Exception as exc:
             # A relay failed, or `call.ready` could not be sent.
             if not isinstance(exc, _ClientGone):
@@ -297,6 +303,10 @@ class _Call:
             if self._conversation is not None:
                 try:
                     await self._conversation.close()
+                except CallFault as exc:
+                    # What the call settled could not all be stored.
+                    _log.warning("a call on the link could not be kept", exc_info=exc.cause)
+                    last = LinkModels.V1.Output.CallFailed(text=exc.reason)
                 except Exception:
                     # Said, since a close that fails part-way can leave a speech
                     # connection open. The call still ends for the app.
@@ -345,12 +355,12 @@ class _Call:
             return LinkModels.V1.Output.CallFailed(text="the call could not be opened")
         return None
 
-    async def _pump(self, conversation: VoiceConversation) -> None:
+    async def _pump(self, conversation: OpenCall) -> None:
         """Feed the mic audio in, one frame at a time, in the order it came."""
         while True:
             await conversation.send_audio(await self._audio.get())
 
-    async def _forward(self, conversation: VoiceConversation) -> None:
+    async def _forward(self, conversation: OpenCall) -> None:
         """Send the conversation's speech and events, in order, until it ends."""
         async for output in conversation.outputs():
             await self._out(

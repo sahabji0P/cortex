@@ -16,6 +16,12 @@ their results can be told, and messages no reply has got through to yet. So a ch
 gem applies from the next message, two windows on one gem cannot drift apart, and a
 dropped connection loses nothing.
 
+A gem has one conversation, whether the user calls it or writes to it: a reply in
+writing is made from everything stored, a call's turns included. While a call holds the
+gem, nothing is written to it: a message is answered with `chat.error`. The first
+written turn after a call opens with a line that says the call has ended (see
+`history.py`).
+
 A tool call outlives a reply that is cut, as in a call, and by the same code (see
 `late_results.py`). Its call is stored with the placeholder as its result, and the new
 message is answered first. When the call finishes, at the next moment no reply is being
@@ -41,12 +47,12 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.core.errors import NotFoundError
-from app.entities.conversation_ent import ConversationEntityClass, Writer, gem_key, stubs
+from app.entities.conversation_ent import ConversationEntityClass, Stored, Writer, gem_key
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.history import shown
+from app.entities.history import mode_line, settled, shown, stubs
 from app.entities.instructions import instructions
-from app.entities.model import LLM, Item, ModelName, is_openai, model_for
+from app.entities.model import LLM, ModelName, is_openai, model_for
 from app.entities.tools import gem_toolbox
 from app.entities.written_ent import WrittenConversation, WrittenEvent
 
@@ -162,10 +168,17 @@ class ChatEntityClass:
 
         A reply that tells of a late search result is cut the same way. Later replies of
         that kind go to the client of the latest message.
+
+        While a call holds the gem, the message is answered with `chat.error` and kept
+        nowhere, and the call is not disturbed.
         """
         at = datetime.now(UTC)
         key = gem_key(gem_id)
         turn = ChatTurn()
+        held = self._conversations.find(key)
+        if held is not None and held.call is not None:
+            turn.task = asyncio.create_task(self._refuse(turn, gem_id, deliver))
+            return turn
         kept = self._conversations.gem(key)
         previous, kept.writer = kept.writer, turn
         if previous is not None:
@@ -210,6 +223,12 @@ class ChatEntityClass:
         finally:
             self._release(turn, key)
 
+    async def _refuse(self, turn: ChatTurn, gem_id: str, deliver: Deliver) -> None:
+        try:
+            await _teller(gem_id, deliver)("chat.error", "the gem is in a call")
+        finally:
+            turn.over.set()
+
     async def _ready(self, gem_id: str) -> _Ready | str:
         """The gem and the model to answer with, or why no reply can be made."""
         try:
@@ -231,7 +250,7 @@ class ChatEntityClass:
         turn: ChatTurn,
         key: str,
         ready: _Ready,
-        history: list[Item],
+        history: Stored,
         text: str | None,
         at: datetime,
         gem_id: str,
@@ -245,7 +264,7 @@ class ChatEntityClass:
         gem = ready.gem
         kept = self._conversations.gem(key)
         late = kept.late
-        tools = gem_toolbox(gem.tools, self._search, late.tool, history)
+        tools = gem_toolbox(gem.tools, self._search, late.tool, history.items)
         model = model_for(ready.llm, ready.name, tools.specs)
         # Read for every reply, so a change to it applies from the next message.
         darbar = (await self._darbar.read()).text
@@ -261,14 +280,17 @@ class ChatEntityClass:
             # conversation is sent to the model every time. Nothing is trimmed or
             # summed up, and old search results are not cleared, so the context
             # only grows, and quickly when searches are used.
-            history=history,
+            history=history.items,
+            last_mode=history.mode,
             late=late,
             turn=kept.turn,
         )
         turn.begin(conversation)
         ended, failure = await _read(conversation, text, at, gem_id, deliver)
         try:
-            await self._conversations.add(gem.id, history, conversation.added)
+            # A line of ours with nothing after it is not stored: the next turn writes it.
+            added = conversation.added
+            await self._conversations.add(gem.id, history, added[: settled(added)], "chat")
         except Exception as exc:
             # The calls left running are in no stored conversation: nothing could take
             # their results.
@@ -277,10 +299,9 @@ class ChatEntityClass:
             return
         # From here on their placeholders are stored, so their results have to be taken
         # when they come, whatever fails next.
-        if not await self._gems.exists(gem_id):
+        if await self._conversations.gone(gem.id):
             # The gem was deleted while its reply was being written. Its conversation
             # went with it, so what was just added goes too, and so do its calls.
-            await self._conversations.forget(gem.id)
             late.forget(conversation.left_running)
         if failure is not None:
             await tell("chat.error", f"reply failed: {failure}")
@@ -319,7 +340,9 @@ class ChatEntityClass:
         between them, so a message that arrives at that instant waits for this reply.
         """
         kept = self._conversations.find(key)
-        if kept is None or not kept.late.ready or kept.writer is not None:
+        if kept is None or not kept.late.ready:
+            return
+        if kept.writer is not None or kept.call is not None:
             return
         turn = ChatTurn()
         kept.writer = turn
@@ -346,12 +369,16 @@ class ChatEntityClass:
                 return  # the gem went, and its conversation with it: they are dropped
             gem_oid = ObjectId(key)
             history = await self._conversations.load(gem_oid, told=told)
-            # A turn left open has been sent to the model: the results follow it.
-            added = [*kept.turn.close(), *stubs(late.stub for late in told)]
-            history += await self._conversations.add(gem_oid, history, added)
-            if not await self._gems.exists(key):
-                await self._conversations.forget(gem_oid)  # deleted while they were stored
-                return
+            # They are told in writing: after a call, a line says so first. A turn left
+            # open has been sent to the model: the results follow it.
+            added = [
+                *mode_line("chat", history.mode),
+                *kept.turn.close(),
+                *stubs(late.stub for late in told),
+            ]
+            history = await self._conversations.add(gem_oid, history, added, "chat")
+            if await self._conversations.gone(gem_oid):
+                return  # deleted while they were stored
             latest = self._latest.get(key)
             if latest is None:
                 return  # nobody is there to read a reply: the results are only stored

@@ -387,6 +387,7 @@ class _Chat(SimpleNamespace):
             gems=self.gems,
             darbar=DarbarEntityClass(cast("Any", self.docdb)),
             voice=cast("Any", None),
+            conversations=self.conversations,
         )
         return LinkServiceV1Class(self.chat, call)
 
