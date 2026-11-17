@@ -6,22 +6,21 @@ constants, so any change to what the model reads shows up as a failing test.
 
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from bson import ObjectId
-from pydantic import ValidationError
 
 from app.entities import voice_ent
+from app.entities.call_ent import CallEntityClass, CallRefused
 from app.entities.darbar_ent import DarbarEntityClass
-from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig
+from app.entities.gem_ent import GemConfig
 from app.entities.instructions import instruction_layers, instructions
 from app.entities.model import ModelName, model_for
 from app.entities.voice_ent import VoiceConversation
-from app.routers.voice.service import VoiceServiceV1Class
 from tests.test_darbar import _darbar
 from tests.test_darbar import _DocDBFake as _DarbarDocDB
-from tests.test_gems import _DocDBFake, _gems, _stored
+from tests.test_gems import _gems, _stored
 from tests.test_model import _adapters, _entity
 from tests.test_voice_conversation import (
     _LLM,
@@ -39,8 +38,6 @@ from tests.test_voice_conversation import (
 )
 
 if TYPE_CHECKING:
-    from fastapi import WebSocket
-
     from app.entities.voice_ent import VoiceEntityClass
 
 _NOW = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
@@ -414,37 +411,7 @@ async def test_a_conversation_is_opened_with_the_darbar_text_it_is_handed(
     assert kwargs["darbar"] == darbar
 
 
-# ---- the WebSocket names a gem
-
-
-class _ServiceSocket:
-    """A client that opens with a query string and hangs up at once."""
-
-    def __init__(self, query: dict[str, str]) -> None:
-        self.query_params = query
-        self.accepted = False
-        self.closed: tuple[int, str] | None = None
-
-    async def accept(self) -> None:
-        self.accepted = True
-
-    async def receive(self) -> dict:
-        return {"type": "websocket.disconnect"}
-
-    async def close(self, code: int = 1000, reason: str = "") -> None:
-        if self.closed is None:
-            self.closed = (code, reason)
-
-
-class _Opened:
-    """A conversation that says nothing and ends."""
-
-    async def outputs(self):
-        return
-        yield
-
-    async def close(self) -> None:
-        pass
+# ---- opening a call reads the Darbar text once, and only for a gem
 
 
 class _Voice:
@@ -459,106 +426,27 @@ class _Voice:
 
     async def open_conversation(
         self, model=None, *, speaks_first=None, gem=None, darbar=None
-    ) -> _Opened:
+    ) -> object:
         self.opened.append((model, speaks_first, gem))
         self.darbars.append(darbar)
-        return _Opened()
+        return object()
 
 
-async def _service_with_a_gem() -> tuple[VoiceServiceV1Class, _Voice, GemConfig]:
-    service, voice, gem, _ = await _service_and_store()
-    return service, voice, gem
-
-
-async def _service_and_store() -> tuple[VoiceServiceV1Class, _Voice, GemConfig, _DocDBFake]:
-    service, voice, gem, docdb, _ = await _service_and_darbar()
-    return service, voice, gem, docdb
-
-
-async def _service_and_darbar() -> tuple[
-    VoiceServiceV1Class, _Voice, GemConfig, _DocDBFake, tuple[DarbarEntityClass, _DarbarDocDB]
+async def _calls() -> tuple[
+    CallEntityClass, _Voice, GemConfig, tuple[DarbarEntityClass, _DarbarDocDB]
 ]:
-    gems, docdb = _gems()
+    gems, _ = _gems()
     gem = await gems.create(name="Gem One", model="Sonnet 5.5", speaks_first=True)
     voice = _Voice()
     darbar = _darbar()
-    service = VoiceServiceV1Class(cast("VoiceEntityClass", voice), gems, darbar[0])
-    return service, voice, gem, docdb, darbar
-
-
-@pytest.mark.parametrize(
-    ("query", "opened"),
-    [
-        # Without a gem: the model and who speaks first as asked, or left to the defaults.
-        ({}, (None, None)),
-        ({"model": "Haiku 5.5"}, ("Haiku 5.5", None)),
-        ({"first": "user"}, (None, False)),
-        ({"first": "assistant"}, (None, True)),
-        ({"model": "6.1 Sol", "first": "assistant"}, ("6.1 Sol", True)),
-    ],
-)
-async def test_a_call_without_a_gem_opens_as_asked(
-    query: dict[str, str], opened: tuple[object, object]
-) -> None:
-    service, voice, _ = await _service_with_a_gem()
-
-    await service.converse(cast("WebSocket", _ServiceSocket(query)))
-
-    assert voice.opened == [(*opened, None)]
-
-
-@pytest.mark.parametrize(
-    ("query", "opened"),
-    [
-        # Left out, each is the gem's to say. Sent, each wins for this call.
-        ({}, (None, None)),
-        ({"model": "6.1 Terra"}, ("6.1 Terra", None)),
-        ({"first": "user"}, (None, False)),
-        ({"first": "assistant"}, (None, True)),
-        ({"model": "Haiku 5.5", "first": "user"}, ("Haiku 5.5", False)),
-    ],
-)
-async def test_a_call_with_a_gem_opens_with_its_config_and_what_the_query_overrides(
-    query: dict[str, str], opened: tuple[object, object]
-) -> None:
-    service, voice, gem = await _service_with_a_gem()
-
-    await service.converse(cast("WebSocket", _ServiceSocket({"gem": str(gem.id), **query})))
-
-    assert voice.opened == [(*opened, gem)]
-
-
-@pytest.mark.parametrize("gem_id", [str(ObjectId()), "not-an-id", ""])
-async def test_a_gem_that_is_not_there_closes_the_socket_with_1008(gem_id: str) -> None:
-    service, voice, _ = await _service_with_a_gem()
-    socket = _ServiceSocket({"gem": gem_id})
-
-    await service.converse(cast("WebSocket", socket))
-
-    assert socket.accepted
-    assert socket.closed == (1008, "unknown gem")
-    assert voice.opened == []
-
-
-async def test_a_gem_whose_config_cannot_be_read_closes_the_socket_with_1011() -> None:
-    service, voice, gem, docdb = await _service_and_store()
-    docdb.documents[gem.id]["version"] = GEM_CONFIG_VERSION + 1
-    socket = _ServiceSocket({"gem": str(gem.id)})
-
-    with pytest.raises(ValidationError, match="newer"):
-        await service.converse(cast("WebSocket", socket))
-
-    assert socket.closed == (1011, "the gem's config cannot be read")
-    assert voice.opened == []
-
-
-# ---- the WebSocket reads the Darbar text once, and only for a gem
+    calls = CallEntityClass(gems=gems, darbar=darbar[0], voice=cast("VoiceEntityClass", voice))
+    return calls, voice, gem, darbar
 
 
 async def test_a_call_with_a_gem_is_opened_with_the_built_in_darbar_text_when_none_is_set() -> None:
-    service, voice, gem, _, (_, darbar_db) = await _service_and_darbar()
+    calls, voice, gem, (_, darbar_db) = await _calls()
 
-    await service.converse(cast("WebSocket", _ServiceSocket({"gem": str(gem.id)})))
+    await calls.open(str(gem.id))
 
     assert voice.darbars == [
         "The user keeps a few assistants of their own, which they call gems. Each gem has "
@@ -569,44 +457,44 @@ async def test_a_call_with_a_gem_is_opened_with_the_built_in_darbar_text_when_no
 
 @pytest.mark.parametrize("text", ["", "Every gem works for one person."])
 async def test_a_call_with_a_gem_is_opened_with_the_darbar_text_that_is_set(text: str) -> None:
-    service, voice, gem, _, (darbar, darbar_db) = await _service_and_darbar()
+    calls, voice, gem, (darbar, darbar_db) = await _calls()
     await darbar.set(text)
     darbar_db.reads = 0
 
-    await service.converse(cast("WebSocket", _ServiceSocket({"gem": str(gem.id)})))
+    await calls.open(str(gem.id))
 
     assert voice.darbars == [text]
     assert darbar_db.reads == 1
 
 
 async def test_a_change_to_the_darbar_text_reaches_the_next_call() -> None:
-    service, voice, gem, _, (darbar, _) = await _service_and_darbar()
-    socket = {"gem": str(gem.id)}
+    calls, voice, gem, (darbar, _) = await _calls()
 
     await darbar.set("Every gem works for one person.")
-    await service.converse(cast("WebSocket", _ServiceSocket(socket)))
+    await calls.open(str(gem.id))
     await darbar.set("Every gem works for two people.")
-    await service.converse(cast("WebSocket", _ServiceSocket(socket)))
+    await calls.open(str(gem.id))
 
     assert voice.darbars == ["Every gem works for one person.", "Every gem works for two people."]
 
 
-@pytest.mark.parametrize("query", [{}, {"model": "Haiku 5.5", "first": "assistant"}])
-async def test_a_call_without_a_gem_does_not_read_the_darbar_text(query: dict[str, str]) -> None:
-    service, voice, _, _, (darbar, darbar_db) = await _service_and_darbar()
+@pytest.mark.parametrize("asked", [{}, {"model": "Haiku 5.5", "speaks_first": True}])
+async def test_a_call_without_a_gem_does_not_read_the_darbar_text(asked: dict[str, Any]) -> None:
+    calls, voice, _, (darbar, darbar_db) = await _calls()
     await darbar.set("Every gem works for one person.")
     darbar_db.reads = 0
 
-    await service.converse(cast("WebSocket", _ServiceSocket(query)))
+    await calls.open(None, **asked)
 
     assert voice.darbars == [None]
     assert darbar_db.reads == 0
 
 
 async def test_a_gem_that_is_not_there_reads_no_darbar_text() -> None:
-    service, voice, _, _, (_, darbar_db) = await _service_and_darbar()
+    calls, voice, _, (_, darbar_db) = await _calls()
 
-    await service.converse(cast("WebSocket", _ServiceSocket({"gem": str(ObjectId())})))
+    with pytest.raises(CallRefused, match="unknown gem"):
+        await calls.open(str(ObjectId()))
 
     assert voice.opened == []
     assert darbar_db.reads == 0

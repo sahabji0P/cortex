@@ -5,7 +5,7 @@ Voice entity: a spoken conversation as a cascade of three services.
                   (Cartesia)         (OpenAI or (Cartesia)
                                       Anthropic)
 
-One `VoiceConversation` per client. The speech-to-text service also detects turns:
+One `VoiceConversation` per call. The speech-to-text service also detects turns:
 
 - `turn.end`   the user finished a sentence. Its transcript starts a reply: the model's
                text is pushed to text-to-speech as it streams, and the audio is forwarded.

@@ -29,7 +29,6 @@ from app.entities.model import (
     to_messages,
 )
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
-from app.routers.voice.models import VoiceModels
 from tests.test_voice_conversation import (
     _DELAY,
     _STT,
@@ -421,23 +420,6 @@ def test_the_models_are_listed_in_order_with_whether_each_can_be_used(
         ("Anthropic", "Sonnet 5.5", False, False),
         ("Anthropic", "Haiku 5.5", False, False),
     ]
-
-
-def test_the_websocket_query_names_a_model_or_none() -> None:
-    query = VoiceModels.V1.Input.Query
-    assert query.model_validate({}).model is None
-    assert query.model_validate({"model": "Haiku 5.5", "other": "x"}).model == "Haiku 5.5"
-    assert query.model_validate({"model": "6.1 Sol"}).model == "6.1 Sol"
-    with pytest.raises(ValueError, match="model"):
-        query.model_validate({"model": "Fable 5.2"})
-
-
-def test_the_websocket_query_says_who_speaks_first_and_defaults_to_the_user() -> None:
-    query = VoiceModels.V1.Input.Query
-    assert query.model_validate({}).first == "user"
-    assert query.model_validate({"first": "assistant"}).first == "assistant"
-    with pytest.raises(ValueError, match="first"):
-        query.model_validate({"first": "nobody"})
 
 
 def test_a_history_that_opens_with_a_note_still_starts_with_the_user_side() -> None:

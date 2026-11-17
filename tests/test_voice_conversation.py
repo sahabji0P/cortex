@@ -14,7 +14,6 @@ from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.entities import voice_ent
 from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
 from app.entities.voice_speech import Playback, Utterance
-from app.routers.voice.service import VoiceServiceV1Class
 
 # The fake speech is 24 kHz 16-bit mono, like the real one.
 _BYTES_PER_SECOND = 48000
@@ -2030,45 +2029,6 @@ async def test_a_delay_reported_mid_reply_counts_for_the_words_already_sent() ->
 
     assert outputs[-1].text == "Once upon…"
     await f.conversation.close()
-
-
-class _Socket:
-    """A client WebSocket that plays back a fixed list of frames, then disconnects."""
-
-    def __init__(self, *frames: dict) -> None:
-        self._frames = [*frames, {"type": "websocket.disconnect"}]
-
-    async def receive(self) -> dict:
-        return self._frames.pop(0)
-
-
-class _Listener:
-    def __init__(self) -> None:
-        self.audio: list[bytes] = []
-        self.delays: list[float] = []
-
-    async def send_audio(self, pcm: bytes) -> None:
-        self.audio.append(pcm)
-
-    def set_output_delay(self, seconds: float) -> None:
-        self.delays.append(seconds)
-
-
-async def test_the_service_takes_audio_and_the_playback_report_and_ignores_the_rest() -> None:
-    listener = _Listener()
-    socket = _Socket(
-        {"type": "websocket.receive", "bytes": b"\x01\x02"},
-        {"type": "websocket.receive", "text": json.dumps({"type": "playback", "delay": 0.18})},
-        {"type": "websocket.receive", "text": json.dumps({"type": "playback", "delay": -1})},
-        {"type": "websocket.receive", "text": json.dumps({"type": "something else"})},
-        {"type": "websocket.receive", "text": "not json"},
-        {"type": "websocket.receive", "bytes": b"\x03"},
-    )
-
-    await VoiceServiceV1Class._relay_mic(socket, listener)
-
-    assert listener.audio == [b"\x01\x02", b"\x03"]
-    assert listener.delays == [0.18]
 
 
 def test_playback_runs_chunks_back_to_back_and_starts_over_after_a_reset() -> None:

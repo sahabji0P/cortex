@@ -3,8 +3,7 @@ Opening a call: everything before its audio starts to flow.
 
 A call is asked for with three settings: a gem, a model and who speaks first. Opening
 it reads the gem's config and the Darbar text, works out who speaks first, and opens the
-voice conversation. Both ways a call can reach the backend use this one opener: the old
-call socket and the standing socket. Only what they do with the outcome differs.
+voice conversation. The standing socket (`app/routers/link`) holds the call from there.
 
 Two kinds of "no" are told apart, because the app is told them apart:
 
