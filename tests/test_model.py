@@ -246,6 +246,21 @@ async def test_a_round_that_must_answer_forbids_tools_without_changing_the_list(
     assert forced["thinking"] == {"type": "disabled"}
 
 
+async def test_the_ceiling_on_a_reply_suits_a_call_unless_another_is_given() -> None:
+    llm = _Claude([_text("Paris."), _final()], [_text("Paris."), _final()])
+    history: list[Item] = [{"role": "user", "content": "Capital of France?"}]
+    adapter = cast("AnthropicAdapterClass", llm)
+
+    for model in (
+        model_for(adapter, "Haiku 5.5", [_SEARCH]),
+        model_for(adapter, "Haiku 5.5", [_SEARCH], max_reply_tokens=32000),
+    ):
+        async for _ in model.round(history, instructions="", think=False, must_answer=False):
+            pass
+
+    assert [request["max_tokens"] for request in llm.requests] == [8192, 32000]
+
+
 @pytest.mark.parametrize(
     ("stop_reason", "message"),
     [
