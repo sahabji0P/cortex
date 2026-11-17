@@ -1,6 +1,6 @@
 # Cortex
 
-Cortex is a personal experimentation backend. Its current experiment is a spoken conversation built as a cascade: speech-to-text, then a model, then text-to-speech, with interruption handling and a web search tool.
+Cortex is a personal experimentation backend. Its current experiment is a spoken conversation built as a cascade: speech-to-text, then a model, then text-to-speech, with interruption handling and a web search tool. A gem can also be written to, in a chat that is kept (see [Chat](#chat)).
 
 ## The voice cascade
 
@@ -68,7 +68,26 @@ The conversation is in [`app/entities/voice_ent.py`](app/entities/voice_ent.py).
 
 Making a reply is not particular to a call either. The loop in [`app/entities/loop.py`](app/entities/loop.py) runs one: a model round, then the tool calls it made, then their results back to the model in the next round, until a round only says something. Every gem, however it is reached, is to run this one loop. What differs is its config and the surface its reply is delivered on. A surface takes the reply's text and can say how much of it got through by a given moment. In a call the surface is speech, and what got through is what was heard. The history holds what was delivered, by the rules above, on any surface.
 
-[`app/entities/written_ent.py`](app/entities/written_ent.py) is a second surface, writing, kept as small as it can be to show the loop is cut in the right place. One message in, its reply streamed out as text, one reply at a time. What was delivered is what the reader was handed: if they stop reading part-way, the history keeps that text ending in "…", and a tool still running is stopped and given a result saying so. It has no route yet.
+[`app/entities/written_ent.py`](app/entities/written_ent.py) is a second surface, writing. One message in, its reply streamed out as text, one reply at a time. It is given the history to start from and hands back what it added. What was delivered is what the reader was handed: if the reply is cut or the reader stops part-way, the history keeps that text ending in "…", and a tool still running is stopped and given a result saying so. Chat is built on it.
+
+## Chat
+
+A gem can be written to as well as called. The app keeps one WebSocket open to `/v1/link`, and chat goes over it; the frames are in [`docs/chat-contract.md`](docs/chat-contract.md), which is the contract with the app. In short: the app sends `chat.send` with a gem's id and the text, and gets back `chat.text` and `chat.tool` frames as the reply is written, then one of `chat.done`, `chat.cut` or `chat.error`. A frame that cannot be read gets `error`, and the socket stays open.
+
+**The database is the truth, not the connection.** Every message is answered from what is stored: the gem's config is loaded as it is now, its written conversation so far is loaded, the instructions are built, one reply is made by the loop, and then what the user wrote and what was delivered of the reply are added to the `ChatItems` collection, before the reply's last frame is sent. Nothing about a gem's conversation is kept in memory between messages except the reply in progress. So a changed gem applies from the next message, two windows on one gem cannot drift apart, and a dropped connection loses nothing: a socket that closes cuts its replies, and they are stored as cut.
+
+The stored conversation is the history the model is sent, item by item, only ever added to, with each item's place and when it was added. It follows the same rules as a call's: it holds what was delivered, every tool call has a result, and each request starts with the whole of the one before it. A reply that did not finish ends in "…". If the text it kept does not (nothing was written yet, or it was cut while a tool ran), a reply of just "…" follows, so the model can see where it was cut off.
+
+`GET /v1/gems/{gem_id}/chat` returns it for showing on screen: `user`, `gem` and `tool` messages, oldest first, each with `at`. Deleting a gem deletes its conversation.
+
+Two first rules, to be tried out rather than settled:
+
+- **The whole stored conversation is sent to the model every time.** Nothing is trimmed or summed up, and old search results are not cleared as they are in a call. The context therefore grows with every message, and quickly when searches are used. A message is at most 20,000 characters, so one stray paste cannot ride along in every request after it.
+- **A new message cuts the reply still being written to that gem**, like speaking over someone in a call. The reply is stored as what was sent plus "…", its socket gets `chat.cut`, and then the new message is answered. This holds across every socket of the process: one reply at a time for each gem.
+
+A call is not joined to this yet. A call still starts empty and adds nothing to the stored conversation.
+
+A gem in writing is offered `web_search` when its `tools` name it and the search key is set, and nothing else: no `cancel_tool_call`, because in writing nothing carries on after its reply.
 
 ## Try it
 
@@ -80,6 +99,8 @@ uv run uvicorn app.main:app --reload
 ```
 
 Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow the mic. Pick a provider and a model first if you want one other than the default, and tick **Cortex speaks first** to be greeted. This is a one-file test page, not a product UI. Use headphones if Cortex cuts itself off, which means the mic is picking up the speakers.
+
+With `?gem=<id>` in the page's address the call is with that gem, and a chat box below it writes to the gem over `/v1/link`, showing the conversation stored so far.
 
 ## The WebSocket contract
 
@@ -131,9 +152,9 @@ Something new (a voice, skills, looks) is added by raising the version and writi
 
 A call is held with a gem when the WebSocket names it with `?gem=`. The gem's name and its instructions open what the model is told, ahead of the rules for a spoken conversation. Its model answers, it greets the user if it speaks first, and it is offered web search only if its `tools` name `web_search` and the search key is set. A call without a gem is unchanged: it is Cortex, with the same instructions as before.
 
-What the model is told is put together in layers, in [`app/entities/instructions.py`](app/entities/instructions.py), from what changes least to what changes most: the Darbar text (what is true for every gem; a call without a gem is not sent it), the gem, the spoken rules, the tools' rules, what the model itself needs, and the date. The order keeps the start of every request the same for as long as possible, which is what a prompt cache needs.
+What the model is told is put together in layers, in [`app/entities/instructions.py`](app/entities/instructions.py), from what changes least to what changes most: the Darbar text (what is true for every gem; a call without a gem is not sent it), the gem, the spoken rules or, in writing, the written ones, the tools' rules, what the model itself needs, and the date. The order keeps the start of every request the same for as long as possible, which is what a prompt cache needs. In writing the rules say the user reads a chat window, ask for plain text (the app shows no formatting yet), and say what a reply ending in "…" means; the search rules are the two that fit writing, without the call's rules for a search that carries on in the background.
 
-The Darbar text is a setting the user can change. Until they do, it is a built-in text: a few plain lines on what a gem is and that the gems share a Darbar. It is kept as one document in the `Darbar` collection, at most 4,000 characters, and an empty one means gems are told nothing there. A call with a gem reads it once, when it opens, and keeps that text to its end, so a change reaches the next call, never one already open. It is in [`app/entities/darbar_ent.py`](app/entities/darbar_ent.py).
+The Darbar text is a setting the user can change. Until they do, it is a built-in text: a few plain lines on what a gem is and that the gems share a Darbar. It is kept as one document in the `Darbar` collection, at most 4,000 characters, and an empty one means gems are told nothing there. A call with a gem reads it once, when it opens, and keeps that text to its end, so a change reaches the next call, never one already open. A written reply reads it each time, so a change applies from the next message. It is in [`app/entities/darbar_ent.py`](app/entities/darbar_ent.py).
 
 | Route | Does |
 | --- | --- |
@@ -141,7 +162,8 @@ The Darbar text is a setting the user can change. Until they do, it is a built-i
 | `GET /v1/gems` | lists them, the one changed most recently first |
 | `GET /v1/gems/{gem_id}` | one gem |
 | `PATCH /v1/gems/{gem_id}` | changes only the fields sent. Only `model` may be null |
-| `DELETE /v1/gems/{gem_id}` | deletes it (204) |
+| `DELETE /v1/gems/{gem_id}` | deletes it (204), and its written conversation |
+| `GET /v1/gems/{gem_id}/chat` | its written conversation so far (see [Chat](#chat)) |
 | `GET /v1/darbar` | the Darbar text: `{"text": "...", "is_default": true}`. `is_default` says whether it is the built-in text |
 | `PUT /v1/darbar` | sets it. Body `{"text": "..."}`, at most 4,000 characters; may be empty. Answers like `GET` |
 | `DELETE /v1/darbar` | goes back to the built-in text. Answers like `GET` |
@@ -156,8 +178,8 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 app/
   adapters/    one file per outside service; the only place an SDK is called
                openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
-  entities/    the logic: loop (making one reply, on any surface), voice_ent and voice_speech (the cascade), written_ent (a written conversation, no route yet), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), gem_ent (a gem's config), darbar_ent (the Darbar text every gem is told first), user_ent
-  routers/     HTTP and WebSocket endpoints: voice, gems, darbar, user
+  entities/    the logic: loop (making one reply, on any surface), voice_ent and voice_speech (the cascade), written_ent (a written conversation), chat_ent (written chat with the gems, made from what is stored), chat_store (each gem's written conversation in the database), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), gem_ent (a gem's config), darbar_ent (the Darbar text every gem is told first), user_ent
+  routers/     HTTP and WebSocket endpoints: voice, gems, darbar, link (the standing socket, which carries chat), user
 ```
 
 Also still present from earlier experiments: user registration and login (`/v1/users`), kept because a login will be needed.
