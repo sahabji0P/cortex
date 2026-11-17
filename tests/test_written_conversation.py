@@ -226,7 +226,7 @@ _PLACEHOLDER_OF_CALL_1 = (
     "Still running in the background, under call_id call_1. It has not failed. Only if "
     "the user says they no longer want this, stop it with cancel_tool_call and that "
     "call_id. Otherwise leave it alone: its result will reach you by itself, as a separate "
-    'call with "deferred_result_for": "call_1". Until then, do not search for this '
+    'call with "deferred_result_for": "call_1". Until then, do not make this call '
     "again, in any wording."
 )
 

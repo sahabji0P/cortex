@@ -1082,13 +1082,13 @@ def _placeholder(call_id: str) -> str:
         f"Still running in the background, under call_id {call_id}. It has not failed. Only "
         "if the user says they no longer want this, stop it with cancel_tool_call and that "
         "call_id. Otherwise leave it alone: its result will reach you by itself, as a "
-        f'separate call with "deferred_result_for": "{call_id}". Until then, do not search '
-        "for this again, in any wording."
+        f'separate call with "deferred_result_for": "{call_id}". Until then, do not make '
+        "this call again, in any wording."
     )
 
 
 _LOST = (
-    "This search was lost before it finished, and its result will not arrive. Search again "
+    "This call was lost before it finished, and its result will not arrive. Make it again "
     "if it is still needed."
 )
 

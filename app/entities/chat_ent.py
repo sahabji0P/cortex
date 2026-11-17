@@ -87,8 +87,8 @@ type Deliver = Callable[[ChatEvent], Awaitable[None]]
 # The result a call lost to a restart is given, so its placeholder does not promise a
 # result for ever. THE OWNER HAS NOT RULED ON THIS WORDING.
 _LOST = (
-    "This search was lost before it finished, and its result will not arrive. Search "
-    "again if it is still needed."
+    "This call was lost before it finished, and its result will not arrive. Make it again "
+    "if it is still needed."
 )
 
 
