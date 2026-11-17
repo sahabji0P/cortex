@@ -87,7 +87,7 @@ text frames like the rest.
 
 | Frame | Fields | Meaning |
 | --- | --- | --- |
-| `call.start` (JSON) | `gem` (optional gem id), `model` (optional, a name from `GET /v1/voice/models`), `first` (optional, `user` or `assistant`) | Open a call. With `gem`, the call is with that gem: its config says who answers, with which model and tools, and whether it greets the user. Without one, the call is with Cortex. `model` is the model for this call, and `first: "assistant"` has the call open with a greeting, `"user"` has it wait for the user to speak. A `model` or `first` that is sent wins over the gem's; one left out, or sent as null, leaves the gem's. Without a gem, those are the configured model and the user |
+| `call.start` (JSON) | `gem` (a gem's id), `first` (optional, `user` or `assistant`) | Open a call with that gem. A call is always with a gem: its config says who answers, with which model and tools, and whether it greets the user. `first: "assistant"` has the call open with a greeting, `"user"` has it wait for the user to speak. A `first` that is sent wins over the gem's; one left out, or sent as null, leaves the gem's. Any other field is ignored |
 | binary | raw 16-bit mono PCM at 16 kHz, about 100 ms a frame | Mic audio for the open call (see [Audio](#audio)). Audio sent after `call.start` and before `call.ready` is kept and fed in order once the call is open: none is lost. A binary frame when no call is open or opening is dropped without an answer |
 | `call.playback` (JSON) | `delay` (seconds, >= 0) | How long the sound device holds audio before it is heard (see [Audio](#audio)) |
 | `call.end` (JSON) | none | Hang up |
@@ -106,7 +106,7 @@ text frames like the rest.
 | `call.interrupt` (JSON) | `text` | The user started speaking: stop playback and drop the speech not yet played. If that cut a reply short, `text` is what the gem remembers of it, the words heard ending in "…" (just "…" if none were); otherwise it is empty |
 | `call.error` (JSON) | `text` | Something failed inside a call that carries on. `text` says what |
 | `call.ended` (JSON) | `text` | The call is over: the app hung up, or the conversation ended by itself. `text` is empty |
-| `call.refused` (JSON) | `text` (the reason) | The call was not opened because of what was asked: a gem that is not there or an id that is not an id ("unknown gem"), a model or setting that is not offered ("unknown model or setting"), or a model whose provider has no key (as "no Anthropic key is set, so Haiku 5.5 cannot be used") |
+| `call.refused` (JSON) | `text` (the reason) | The call was not opened because of what was asked: no gem, or a setting that is not offered ("no gem, or an unknown setting"), a gem that is not there or an id that is not an id ("unknown gem"), or a gem whose model's provider has no key (as "no Anthropic key is set, so Haiku 5.5 cannot be used") |
 | `call.failed` (JSON) | `text` (the reason) | The call could not be opened, or broke, through a fault on the backend's side: the gem's config or the Darbar text cannot be read, speech services are unavailable, a failure mid-call, or mic audio that is not being taken (see the rules). `text` says which, in words |
 
 The events from `call.user.partial` to `call.error` are the conversation's
@@ -141,8 +141,8 @@ The events from `call.user.partial` to `call.error` are the conversation's
   closed on it, which ends its call and cuts its replies.
 - Calls changed nothing about chat frames (`chat.send` and the `chat.*` frames back).
 
-A `call.start` whose `model` or `first` is not offered gets `call.refused` with "unknown
-model or setting", not `error`. A `call.playback` that cannot be read, such as one with a
+A `call.start` that names no gem, or whose `first` is not offered, gets `call.refused`
+with "no gem, or an unknown setting", not `error`. A `call.playback` that cannot be read, such as one with a
 negative delay, gets `error`.
 
 ### Audio
@@ -224,7 +224,7 @@ Deleting a gem deletes its written conversation.
 
 The Darbar text is the first thing every gem is told, ahead of its own name and
 instructions: what is true for every gem. The user can change it. It applies to every
-conversation opened after the change. A call without a gem is not sent it.
+conversation opened after the change.
 
 | Route | Does |
 | --- | --- |

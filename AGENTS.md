@@ -37,6 +37,8 @@ What that means in practice:
 - **A gem's config lives here.** The app shows and saves all of it: name, description,
   picture, instructions, model, whether it speaks first, and its tools. Its voice and
   speed are kept but no call uses them yet, so the app shows them as "coming soon".
+- **A call is always with a gem.** `call.start` names the gem, and may say who speaks
+  first. The gem's config says which model answers: a call cannot ask for another.
 - **The app expects more than this backend sends.** It has screens for cost (it looks
   for a `usage` event that does not exist yet) and a library of files per gem. Those
   are marked "coming soon" or show sample data in the app. When one is built here, tell

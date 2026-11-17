@@ -45,13 +45,18 @@ mic ─▶ speech to text ─▶ conversation ─▶ model ─▶ text to speech
                               └─────── what was heard ─────┘
 ```
 
+- **Always with a gem.** (Enforced) Every call is with one gem, named when it opens. Its
+  config says which model answers, which tools are offered and whether it speaks first,
+  and the instructions open with the Darbar text and who the gem is.
 - **One conversation per call.** (Enforced) It lives in memory for as long as the call
   lasts. Nothing is saved, and nothing is loaded when a call starts.
 - **Six models.** (Enforced) 6 Luna (the default), 6.1 Terra and 6.1 Sol from OpenAI;
-  Haiku 5.5, Sonnet 5.5 and Opus 5.5 from Anthropic. The model is chosen when the call
-  opens and does not change during it.
+  Haiku 5.5, Sonnet 5.5 and Opus 5.5 from Anthropic. The model is the gem's, or the
+  configured one (`VOICE_MODEL`) when the gem names none. It does not change during the
+  call.
 - **Two tools, when a search key is set.** (Enforced) `web_search` and
-  `cancel_tool_call`. Without a search key the model has no tools.
+  `cancel_tool_call`, when the gem's tools name `web_search`. Otherwise the model has no
+  tools.
 - **Who speaks first.** (Enforced) The user, unless the call's gem speaks first or
   `call.start` asks for `first: "assistant"`. Then the history starts with a note asking
   for a greeting.
@@ -233,7 +238,7 @@ instructions gain one line saying what the `<note>` tags mean.
   small. Only results the model has already been sent are replaced, never a placeholder.
 - **The instructions and the tool list are the same for the whole call.** (Enforced) The
   date is the last line of the instructions, so everything before it is the same in
-  every call on any day.
+  every call with the same gem and Darbar text, on any day.
 - **Switching thinking on costs a cache miss**, according to the README's live runs. This
   is the "little thinking while a search has no result yet" above, and the reason it is
   not done on Anthropic.
@@ -241,10 +246,17 @@ instructions gain one line saying what the `<note>` tags mean.
 
 ## The instructions
 
-Sent at the start of every request, as printed from the code.
+Sent at the start of every request, as printed from the code. The parts in braces come
+from the Darbar setting and the gem's config.
 
 ```text
-You are Cortex, a voice assistant in a live spoken conversation. Everything you write is read aloud by a text-to-speech voice.
+{the Darbar text}
+
+You are {the gem's name}.
+
+{the gem's own instructions}
+
+You are in a live spoken conversation. Everything you write is read aloud by a text-to-speech voice.
 
 - Talk like a person on a call: short, natural sentences. Keep to one or two sentences unless the user asks for more.
 - Use plain words only: no markdown, lists, emoji, links or symbols. Write numbers the way they are said.
@@ -253,7 +265,17 @@ You are Cortex, a voice assistant in a live spoken conversation. Everything you 
 - An earlier reply of yours that ends in "…" was cut off at that point. The user heard nothing after it, so do not assume they know the rest. When you carry on, continue from there instead of starting again. Never end a reply with "…" yourself.
 ```
 
-Added when a search key is set:
+The Darbar text is the one the user has set, read once when the call opens. Until they
+set one, it is the built-in text:
+
+```text
+The user keeps a few assistants of their own, which they call gems. Each gem has its own name and its own work. The place they share is called the Darbar.
+```
+
+An empty Darbar text is left out with the blank line after it, and so are a gem's own
+instructions when it has none. Space around either is dropped.
+
+Added when web search is offered:
 
 ```text
 - When what you are about to do will keep the user waiting for more than a second, such as looking something up, first say in a few words what you are going to do, the way a person would, and do it in that same turn: the user hears nothing else while they wait.
