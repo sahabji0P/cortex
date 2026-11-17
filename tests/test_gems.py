@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
 from bson import ObjectId
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ValidationError
 
 from app.core.errors import NotFoundError
@@ -14,6 +15,9 @@ from app.entities.gem_ent import (
     GemVersionError,
     upgrade_gem_document,
 )
+from app.routers.gems.controller import router
+from app.routers.gems.models import GemsModels
+from app.routers.gems.service import GemsServiceV1Class
 
 if TYPE_CHECKING:
     from app.adapters.docdb_adp import DocDBAdapterClass
@@ -240,3 +244,90 @@ def test_a_config_without_a_version_is_read_as_version_1() -> None:
 
     assert upgrade_gem_document(document)["version"] == 1
     assert GemConfig.model_validate(document).version == 1
+
+
+def _service() -> GemsServiceV1Class:
+    return GemsServiceV1Class(_gems()[0])
+
+
+def test_the_routes_are_the_five_a_client_expects() -> None:
+    routes = {
+        (method, route.path, route.status_code)
+        for route in router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods
+    }
+
+    assert routes == {
+        ("POST", "/v1/gems", 201),
+        ("GET", "/v1/gems", None),
+        ("GET", "/v1/gems/{gem_id}", None),
+        ("PATCH", "/v1/gems/{gem_id}", None),
+        ("DELETE", "/v1/gems/{gem_id}", 204),
+    }
+
+
+async def test_the_service_hands_out_a_gem_with_its_id_as_text_and_its_version() -> None:
+    service = _service()
+
+    made = await service.create_gem(GemsModels.V1.Input.CreateGem(name="Lata", model="Haiku 5.5"))
+    read = await service.get_gem(made.id)
+
+    assert read == made
+    assert ObjectId(made.id)
+    assert made.version == GEM_CONFIG_VERSION
+    assert made.tools == ["web_search"]
+    assert [gem.id for gem in await service.list_gems()] == [made.id]
+
+
+async def test_the_service_changes_only_what_a_patch_sends() -> None:
+    service = _service()
+    made = await service.create_gem(
+        GemsModels.V1.Input.CreateGem(name="Lata", model="Opus 5.5", speaks_first=True)
+    )
+
+    patch = GemsModels.V1.Input.UpdateGem.model_validate({"model": None})
+    changed = await service.update_gem(made.id, patch)
+
+    assert changed.model is None
+    assert changed.name == "Lata"
+    assert changed.speaks_first is True
+
+
+async def test_the_service_deletes_and_then_cannot_find_a_gem() -> None:
+    service = _service()
+    made = await service.create_gem(GemsModels.V1.Input.CreateGem(name="Lata"))
+
+    await service.delete_gem(made.id)
+
+    with pytest.raises(NotFoundError):
+        await service.get_gem(made.id)
+    with pytest.raises(NotFoundError):
+        await service.get_gem("not-an-id")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"name": "  "},
+        {"name": "Lata", "model": "GPT-2"},
+        {"name": "Lata", "tools": ["web_search", "web_search"]},
+        {"name": "Lata", "instructions": "x" * 20_001},
+    ],
+)
+def test_a_new_gem_that_breaks_a_rule_is_refused(body: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        GemsModels.V1.Input.CreateGem.model_validate(body)
+
+
+@pytest.mark.parametrize("field", ["name", "instructions", "speaks_first", "tools"])
+def test_a_patch_cannot_set_a_field_other_than_the_model_to_null(field: str) -> None:
+    with pytest.raises(ValidationError, match="cannot be null"):
+        GemsModels.V1.Input.UpdateGem.model_validate({field: None})
+
+
+def test_a_patch_keeps_only_the_fields_sent_and_a_null_model() -> None:
+    patch = GemsModels.V1.Input.UpdateGem.model_validate({"name": " Asha ", "model": None})
+
+    assert patch.changes() == {"name": "Asha", "model": None}
+    assert GemsModels.V1.Input.UpdateGem().changes() == {}

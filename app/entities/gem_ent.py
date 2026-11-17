@@ -24,6 +24,7 @@ from app.core.errors import NotFoundError
 from app.entities.model import ModelName
 
 __all__ = [
+    "DEFAULT_GEM_TOOLS",
     "GEM_CONFIG_VERSION",
     "GemConfig",
     "GemEntityClass",
@@ -40,6 +41,9 @@ GEM_CONFIG_VERSION = 1
 
 # The models a gem can be answered by: the same names a call accepts.
 type GemModelName = ModelName
+
+# The tools a new gem may use. Web search is the only tool there is today.
+DEFAULT_GEM_TOOLS: tuple[str, ...] = ("web_search",)
 
 _NAME_MAX_LENGTH = 100
 # Long enough for a detailed brief. A limit keeps a stray paste out of every request.
@@ -126,7 +130,7 @@ class GemConfig(BaseModel):
     # Whether the gem greets the user when a call connects.
     speaks_first: bool = False
     # The tools this gem may use, by name.
-    tools: GemTools = Field(default_factory=lambda: ["web_search"])
+    tools: GemTools = Field(default_factory=lambda: list(DEFAULT_GEM_TOOLS))
     created_at: datetime
     updated_at: datetime
 
@@ -173,7 +177,7 @@ class GemEntityClass:
                 "instructions": instructions,
                 "model": model,
                 "speaks_first": speaks_first,
-                "tools": ["web_search"] if tools is None else tools,
+                "tools": list(DEFAULT_GEM_TOOLS) if tools is None else tools,
                 "created_at": now,
                 "updated_at": now,
             }
