@@ -18,7 +18,6 @@ from openai import AsyncOpenAI
 from app.adapters.anthropic_adp import AnthropicAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.entities import voice_ent
-from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
 from app.entities.model import (
     CallStarted,
     Item,
@@ -26,9 +25,10 @@ from app.entities.model import (
     RoundDone,
     TextDelta,
     ToolSpec,
+    model_for,
     to_messages,
-    voice_model,
 )
+from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
 from app.routers.voice.models import VoiceModels
 from tests.test_voice_conversation import (
     _DELAY,
@@ -194,7 +194,7 @@ def test_a_longer_history_starts_with_the_whole_of_the_shorter_one() -> None:
 
 async def test_a_round_is_sent_as_a_messages_request_and_read_back_as_events() -> None:
     llm = _Claude([_text("Let me "), _text("check."), _call_starts(), _final(("toolu_1", "f1"))])
-    model = voice_model(cast("AnthropicAdapterClass", llm), "Sonnet 5.5", [_SEARCH])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Sonnet 5.5", [_SEARCH])
 
     events = [
         event
@@ -233,7 +233,7 @@ async def test_a_round_is_sent_as_a_messages_request_and_read_back_as_events() -
 
 async def test_a_round_that_must_answer_forbids_tools_without_changing_the_list() -> None:
     llm = _Claude([_text("Paris."), _final()], [_text("Paris."), _final()])
-    model = voice_model(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
     history: list[Item] = [{"role": "user", "content": "Capital of France?"}]
 
     for must_answer in (False, True):
@@ -263,7 +263,7 @@ async def test_a_round_that_is_refused_or_cut_off_raises(
     final = _final(("toolu_1", "f1"))
     final.stop_reason = stop_reason
     llm = _Claude([_text("I"), final])
-    model = voice_model(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
 
     with pytest.raises(RuntimeError, match=message):
         async for _ in model.round(
@@ -274,7 +274,7 @@ async def test_a_round_that_is_refused_or_cut_off_raises(
 
 async def test_the_label_is_asked_of_the_small_model_without_thinking() -> None:
     llm = _Claude()
-    model = voice_model(cast("AnthropicAdapterClass", llm), "Sonnet 5.5", [])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Sonnet 5.5", [])
 
     assert await model.label("and then the wolf", instructions="Name it.") == (
         "the rest of the story"
@@ -303,7 +303,7 @@ async def test_each_anthropic_model_is_asked_to_think_as_little_as_it_can(
     name: str, thinking: object, output_config: object
 ) -> None:
     llm = _Claude([_text("Paris."), _final()])
-    model = voice_model(cast("AnthropicAdapterClass", llm), name, [_SEARCH])
+    model = model_for(cast("AnthropicAdapterClass", llm), name, [_SEARCH])
 
     async for _ in model.round(
         [{"role": "user", "content": "hi"}], instructions="", think=True, must_answer=False
@@ -345,7 +345,7 @@ async def test_each_openai_model_is_called_by_name_and_thinks_only_as_much_as_it
     name: str, normally: str, asked_to_think: str
 ) -> None:
     llm = _OpenAI()
-    model = voice_model(cast("OpenAIAdapterClass", llm), name, [_SEARCH])
+    model = model_for(cast("OpenAIAdapterClass", llm), name, [_SEARCH])
 
     for think in (False, True):
         async for _ in model.round(
@@ -365,9 +365,9 @@ async def test_each_openai_model_is_called_by_name_and_thinks_only_as_much_as_it
 
 def test_a_model_needs_the_adapter_of_its_own_provider() -> None:
     with pytest.raises(TypeError, match="needs the Anthropic adapter"):
-        voice_model(OpenAIAdapterClass(), "Haiku 5.5", [])
+        model_for(OpenAIAdapterClass(), "Haiku 5.5", [])
     with pytest.raises(TypeError, match="needs the OpenAI adapter"):
-        voice_model(AnthropicAdapterClass(), "6 Luna", [])
+        model_for(AnthropicAdapterClass(), "6 Luna", [])
 
 
 @pytest.mark.parametrize(
@@ -390,13 +390,13 @@ async def test_a_conversation_is_opened_on_the_model_asked_for_or_the_configured
     provider: str,
 ) -> None:
     built: list[tuple[object, str]] = []
-    real = voice_ent.voice_model
+    real = voice_ent.model_for
 
     def spy(llm, name, tools):
         built.append((llm, name))
         return real(llm, name, tools)
 
-    monkeypatch.setattr(voice_ent, "voice_model", spy)
+    monkeypatch.setattr(voice_ent, "model_for", spy)
     monkeypatch.setattr(voice_ent.settings, "voice_model", configured)
     adapters = _adapters(openai_key=True, anthropic_key=True)
     entity = _entity(adapters)
@@ -526,7 +526,7 @@ async def test_cutting_off_an_openai_reply_closes_its_connection_there_and_then(
     adapter._client = AsyncOpenAI(
         api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(answer))
     )
-    model = voice_model(adapter, "6 Luna", [])
+    model = model_for(adapter, "6 Luna", [])
     speaking = asyncio.Event()
 
     async def reply() -> None:

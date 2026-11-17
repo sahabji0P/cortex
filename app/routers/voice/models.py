@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.entities.model import VoiceModelName, VoiceProvider
+from app.entities.model import ModelName, Provider
 
 
 class VoiceModels:
@@ -11,7 +11,7 @@ class VoiceModels:
             class Query(BaseModel):
                 """The WebSocket's query string. Anything else in it is ignored."""
 
-                model: VoiceModelName | None = None
+                model: ModelName | None = None
                 # Who says the first words. By default the assistant waits for the user.
                 first: Literal["user", "assistant"] = "user"
 
@@ -29,8 +29,8 @@ class VoiceModels:
             class Model(BaseModel):
                 """One model a conversation can be held with."""
 
-                name: VoiceModelName  # what to send as `?model=`
-                provider: VoiceProvider
+                name: ModelName  # what to send as `?model=`
+                provider: Provider
                 label: str
                 # Whether the provider's key is set. Without it a conversation cannot open.
                 available: bool
