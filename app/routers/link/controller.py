@@ -23,7 +23,8 @@ async def link(websocket: WebSocket, service: LinkServiceRegistry.V1) -> None:
     for the sound device's delay, and `{"type": "call.end"}` to hang up. The call comes
     as `call.ready`, then speech as binary frames (raw 16-bit mono PCM at 24 kHz) and the
     call's events with `call.` before their type, then exactly one of `call.ended` or
-    `call.failed`; or, if it never opened, `call.refused` or `call.failed`.
+    `call.failed`; or, if it never opened, `call.refused` or `call.failed`, or
+    `call.ended` if it was hung up while it opened.
 
     A frame that cannot be read gets `{"type": "error", "text": ...}`, and the socket
     stays open. See `docs/chat-contract.md`.

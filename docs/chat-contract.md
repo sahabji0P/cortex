@@ -91,8 +91,9 @@ What each event means is in the README, under the old socket's contract. On
 - A `call.start` that is accepted is followed by either `call.ready`, then events and
   audio in the order the conversation produced them, then exactly one of `call.ended` or
   `call.failed`; or, with no `call.ready`, exactly one of `call.refused` or
-  `call.failed`. After that frame nothing more is sent for that call, binary included,
-  and a new `call.start` may be sent.
+  `call.failed`, or `call.ended` if the app hung up while the call was opening. After
+  that frame nothing more is sent for that call, binary included, and a new `call.start`
+  may be sent.
 - The socket stays open through all of it. A refused or failed call never closes the
   link, and never disturbs a chat reply being written on it. A failed chat reply never
   disturbs a call.
