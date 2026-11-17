@@ -62,7 +62,7 @@ from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass, SearchResult
 from app.config import settings
-from app.entities.voice_model import (
+from app.entities.model import (
     VOICE_MODELS,
     CallResult,
     Item,

@@ -27,7 +27,7 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.entities import voice_ent
 from app.entities.voice_ent import VoiceConversation, VoiceEvent
-from app.entities.voice_model import RoundDone, TextDelta, is_openai
+from app.entities.model import RoundDone, TextDelta, is_openai
 from tests import test_voice_conversation as T
 
 DELAY = T._DELAY

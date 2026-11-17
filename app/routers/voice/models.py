@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.entities.voice_model import VoiceModelName, VoiceProvider
+from app.entities.model import VoiceModelName, VoiceProvider
 
 
 class VoiceModels:

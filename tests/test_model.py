@@ -19,7 +19,7 @@ from app.adapters.anthropic_adp import AnthropicAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.entities import voice_ent
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
-from app.entities.voice_model import (
+from app.entities.model import (
     CallStarted,
     Item,
     ModelCall,
