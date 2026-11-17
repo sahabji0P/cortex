@@ -51,7 +51,6 @@ import unicodedata
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -62,6 +61,7 @@ from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
+from app.entities.instructions import instructions
 from app.entities.model import (
     LLM,
     MODELS,
@@ -79,48 +79,6 @@ from app.entities.tools import Tool, Toolbox, web_search_tool
 from app.entities.voice_speech import Clock, Playback, Speech, Standby, Utterance
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
-
-_INSTRUCTIONS = """\
-You are Cortex, a voice assistant in a live spoken conversation. Everything you write \
-is read aloud by a text-to-speech voice.
-
-- Talk like a person on a call: short, natural sentences. Keep to one or two sentences \
-unless the user asks for more.
-- Use plain words only: no markdown, lists, emoji, links or symbols. Write numbers the \
-way they are said.
-- The user's words come from speech recognition and may contain mistakes. Go with the \
-likely meaning, and ask when it is unclear.
-- The user can interrupt you at any time, the way people do in conversation. If they ask \
-or say something, answer that first, then go back to what you were saying if it is still \
-worth finishing. If it was only a sound, or a word like "yes" or "okay", carry on from \
-where you stopped.
-- An earlier reply of yours that ends in "…" was cut off at that point. The user heard \
-nothing after it, so do not assume they know the rest. When you carry on, continue from \
-there instead of starting again. Never end a reply with "…" yourself.
-"""
-
-_SEARCH_INSTRUCTIONS = """\
-- When what you are about to do will keep the user waiting for more than a second, such \
-as looking something up, first say in a few words what you are going to do, the way a \
-person would, and do it in that same turn: the user hears nothing else while they wait.
-- When you answer from search results, name the source.
-- If the user interrupts while a search is running, the search carries on in the \
-background. Do not search for the same thing again: say it is still coming, and answer \
-whatever else they asked. Only if they say they no longer want it, call cancel_tool_call: \
-nothing is cancelled unless you make that call. The result reaches you by itself, as a \
-call with "deferred_result_for" in its arguments. You did not make that call: \
-it only delivers the late result. When it arrives, tell the user what it found straight \
-away, without being asked, unless they have said they no longer want it. If they say \
-something else before you have told them, answer that and then tell them. If you have \
-already told them the same thing, do not repeat it: say in a few words that the search \
-confirms it.
-"""
-
-# The last line of the instructions. It is the one part that differs from one day to the
-# next, so everything before it is the same in every conversation.
-_TODAY = """
-Today is {today}.
-"""
 
 # Stands in for the result of a call that was still running when the user spoke.
 _PLACEHOLDER = (
@@ -380,12 +338,12 @@ class VoiceConversation:
         self._model = model_for(llm, model, self._tools.specs)
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
-        # stays the same. The date goes last, after whatever the model adds of its own.
-        self._instructions = _INSTRUCTIONS
-        if search.configured:
-            self._instructions += _SEARCH_INSTRUCTIONS
-        self._instructions += self._model.own_instructions
-        self._instructions += _TODAY.format(today=datetime.now(UTC).strftime("%A, %d %B %Y"))
+        # stays the same. How they are put together is in `instructions.py`.
+        self._instructions = instructions(
+            gem=None,
+            search=search.configured,
+            model_needs=self._model.own_instructions,
+        )
         # The task producing a reply, while one is being produced.
         self._producing: asyncio.Task[None] | None = None
         # The latest reply, until it joins the history. That happens when the user next
