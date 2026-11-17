@@ -81,6 +81,9 @@ class OpenCall:
         # How many of the items the conversation added are stored.
         self._kept = 0
         self._storing = asyncio.Lock()
+        # The latest write `keep` started. It is not stopped when `keep` is, so a write
+        # the database may already have taken is never cut off half-way.
+        self._writing: asyncio.Future[None] | None = None
         self._let_go = False
 
     def begin(self, conversation: VoiceConversation, stored: Stored) -> None:
@@ -111,7 +114,8 @@ class OpenCall:
         while True:
             await conversation.grew.wait()
             conversation.grew.clear()
-            await self._store()
+            self._writing = asyncio.ensure_future(self._store())
+            await asyncio.shield(self._writing)
 
     async def close(self) -> None:
         """End the call: close its conversation, store what it settled, let the gem go.
@@ -137,6 +141,10 @@ class OpenCall:
     async def _store_last(self) -> None:
         """Store the rest of what the call settled, once it is closed."""
         conversation = self._open()
+        if self._writing is not None:
+            # A write `keep` started finishes first. If it failed, what it was writing
+            # is tried again below.
+            await asyncio.gather(self._writing, return_exceptions=True)
         try:
             await self._store()
         except CallFault:

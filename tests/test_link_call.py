@@ -905,6 +905,28 @@ async def test_a_call_whose_conversation_cannot_be_stored_fails_and_says_so(when
     await _close(socket, linked)
 
 
+async def test_a_write_in_flight_when_the_call_ends_finishes_before_its_last_frame() -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    setup.chat.docdb.slow = asyncio.Event()
+
+    _said_in_the_call(conversation)
+    await _settle()
+    socket.send(type="call.end")
+    await _settle()
+    assert "call.ended" not in socket.types()
+    setup.chat.docdb.slow.set()
+    await socket.until("call.ended")
+
+    assert await setup.chat.stored() == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi."},
+    ]
+    assert "call.failed" not in socket.types()
+    await _close(socket, linked)
+
+
 async def test_what_a_call_settles_is_stored_as_it_goes_and_the_call_carries_on() -> None:
     setup = await _setup()
     socket, linked = await _in_call(setup)
