@@ -419,6 +419,41 @@ async def test_a_search_running_when_a_call_ends_is_stored_and_its_result_told_i
     ]
 
 
+async def test_a_result_after_a_call_with_nobody_to_tell_is_stored_after_one_line() -> None:
+    finish = asyncio.Event()
+    search_call = _search_call("weather in Pune")
+    world = await _world(
+        [_starts(search_call), _completed(search_call)],
+        _said("It is sunny."),
+        search=_Search(gate=finish),
+    )
+
+    call, f, keeping = await world.call()
+    f.stt.say("weather in Pune?")
+    await _read_until(f.conversation, "tool.call")
+    await _hang_up(call, keeping)
+    after_the_call = await world.stored()
+    finish.set()
+    async with asyncio.timeout(2):
+        while True:
+            if len(await world.stored()) > len(after_the_call):
+                break
+            await asyncio.sleep(0)
+    await world.write("and?")
+
+    # No client had written to the gem, so the result is only stored, in writing: the
+    # line that says the call ended goes before it, once, and the next message follows.
+    sent = world.llm.requests[-1]["input"]
+    ended, stub, result, message = sent[len(after_the_call) :]
+    assert sent[: len(after_the_call)] == after_the_call
+    assert ended == _ENDED
+    assert sent.count(_ENDED) == 1
+    assert stub["arguments"] == '{"deferred_result_for": "call_1"}'
+    assert "Norris won in Las Vegas." in result["output"]
+    assert message == _user("and?")
+    assert (await world.modes())[len(after_the_call) :] == ["chat"] * 5
+
+
 async def test_a_search_left_running_in_writing_is_told_in_the_call_that_cuts_its_reply() -> None:
     finish = asyncio.Event()
     search_call = _search_call("weather in Pune")
