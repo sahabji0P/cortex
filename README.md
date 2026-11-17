@@ -114,11 +114,11 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 app/
   adapters/    one file per outside service; the only place an SDK is called
                openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
-  entities/    the logic: voice_ent, voice_speech and voice_model (the cascade), stt_ent, conversation_ent, user_ent
-  routers/     HTTP and WebSocket endpoints: voice, cortex, user
+  entities/    the logic: voice_ent, voice_speech and voice_model (the cascade), user_ent
+  routers/     HTTP and WebSocket endpoints: voice, user
 ```
 
-Also still present from earlier experiments: user registration and login (`/v1/users`), projects and sessions (`/v1/cortex`), a transcription-only WebSocket (`/v1/cortex/transcribe`), and a Claude Agent SDK pipeline that no route uses.
+Also still present from earlier experiments: user registration and login (`/v1/users`), kept because a login will be needed.
 
 ## Development
 
