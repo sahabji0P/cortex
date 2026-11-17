@@ -1,4 +1,5 @@
 from app.adapters import AdapterRegistry
+from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.user_ent import User, UserEntityClass
 from app.entities.voice_ent import VoiceEntityClass
@@ -16,6 +17,7 @@ class EntitiesRegistry:
             cache=adapter.Cache,
         )
         cls.Gems = GemEntityClass(docdb=adapter.DocDB)
+        cls.Darbar = DarbarEntityClass(docdb=adapter.DocDB)
         cls.Voice = VoiceEntityClass(
             stt=adapter.CartesiaSTT,
             tts=adapter.CartesiaTTS,

@@ -22,14 +22,14 @@ from datetime import UTC, datetime
 
 from app.entities.gem_ent import GemConfig
 
-__all__ = ["Layer", "instruction_layers", "instructions"]
+__all__ = ["DEFAULT_DARBAR", "Layer", "instruction_layers", "instructions"]
 
-# What every gem is told of where it is. A call without a gem is not told this.
-_DARBAR = """\
+# What every gem is told of where it is, until the user writes their own (see
+# `darbar_ent.py`). A call without a gem is not told this. The blank line after it is
+# added where it is put in, so a text the user writes gets the same.
+DEFAULT_DARBAR = """\
 The user keeps a few assistants of their own, which they call gems. Each gem has its \
-own name and its own work. The place they share is called the Darbar.
-
-"""
+own name and its own work. The place they share is called the Darbar."""
 
 # How a call without a gem opens. Its rules follow after a blank line.
 _CORTEX = """\
@@ -109,7 +109,7 @@ def instruction_layers(
     today = (now or datetime.now(UTC)).strftime("%A, %d %B %Y")
     return [
         # What is true for every gem. A call without a gem keeps the text it always had.
-        Layer("darbar", "" if gem is None else _DARBAR),
+        Layer("darbar", "" if gem is None else DEFAULT_DARBAR + "\n\n"),
         Layer("gem", _gem(gem)),
         # The text of a call without a gem is kept whole: that call's behaviour is
         # finished, and a gem's wording has not been tried on a live call yet.
