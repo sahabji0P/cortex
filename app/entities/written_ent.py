@@ -13,7 +13,7 @@ the text they were handed, ending in "…".
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Literal
 
@@ -108,12 +108,15 @@ class WrittenConversation:
         self._history: list[Item] = []
         self._writing = False
 
-    async def send(self, text: str) -> AsyncIterator[WrittenEvent]:
+    async def send(self, text: str) -> AsyncGenerator[WrittenEvent]:
         """Send a message and yield its reply as it is written, ending with `done`.
 
         Nothing happens until the stream is read. One reply at a time: reading a second
         stream while a reply is being written raises `RuntimeError`. A reply that fails
         raises its failure, after the text that was delivered.
+
+        To stop a reply part-way, close the stream (as with `contextlib.aclosing`). Only
+        then is the reply settled into the history: a stream left open holds it.
         """
         if self._writing:
             raise RuntimeError("a reply is still being written")
