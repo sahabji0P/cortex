@@ -17,6 +17,11 @@ from app.routers.link.models import LinkModels
 # How long one frame may take to be taken by the client before the client counts as gone.
 _SEND_SECONDS = 10.0
 
+# What a `call.start` is told while a call is open. The app tells this `error` from any
+# other by these exact words (see `docs/chat-contract.md`), so they are not to change
+# without telling it.
+_CALL_ALREADY_OPEN = "a call is already open"
+
 # How many frames of mic audio may wait to be fed into a call: about half a minute. The
 # old call socket made the client wait when speech recognition took no audio. Here the
 # socket is read whatever the call does, so audio that is not taken piles up instead, and
@@ -125,7 +130,7 @@ class LinkServiceV1Class:
                 elif kind == "call.start":
                     if busy():
                         # The running call carries on.
-                        await send(LinkModels.V1.Output.Error(text="a call is already open"))
+                        await send(LinkModels.V1.Output.Error(text=_CALL_ALREADY_OPEN))
                         continue
                     try:
                         start = LinkModels.V1.Input.CallStart.model_validate_json(text)

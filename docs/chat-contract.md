@@ -98,7 +98,10 @@ What each event means is in the README, under the old socket's contract. On
   link, and never disturbs a chat reply being written on it. A failed chat reply never
   disturbs a call.
 - A `call.start` while a call is open or opening on this socket gets the general
-  `{"type": "error", "text": ...}` frame and the running call carries on. `call.end` and
+  `{"type": "error", "text": "a call is already open"}` frame and the running call
+  carries on. That start gets no other frame. It is not `call.refused`, because a
+  call's frames carry no tag: a refusal arriving in the middle of the running call
+  could be taken for that call's last frame. The app may rely on those exact words. `call.end` and
   `call.playback` with no call are ignored. A `call.start` sent right after a `call.end`
   is accepted, and its frames come after the first call's `call.ended`.
 - A `call.end` while the call is still opening stops the opening and gets `call.ended`.
