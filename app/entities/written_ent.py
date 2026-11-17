@@ -107,6 +107,9 @@ class WrittenConversation:
         self._instructions = instructions + self._model.own_instructions
         self._history: list[Item] = []
         self._writing = False
+        # Settling the latest reply into the history. Kept so the task is not lost if
+        # the reader that started it is cancelled while it runs.
+        self._settling: asyncio.Task[None] | None = None
 
     async def send(self, text: str) -> AsyncGenerator[WrittenEvent]:
         """Send a message and yield its reply as it is written, ending with `done`.
@@ -116,32 +119,34 @@ class WrittenConversation:
         raises its failure, after the text that was delivered.
 
         To stop a reply part-way, close the stream (as with `contextlib.aclosing`). Only
-        then is the reply settled into the history: a stream left open holds it.
+        then is the reply settled into the history: a stream left open holds it. A reply
+        read to its end is settled before `done` is yielded, so the next message can be
+        sent as soon as `done` is seen.
         """
         if self._writing:
             raise RuntimeError("a reply is still being written")
         self._writing = True
+        self._history.append({"role": "user", "content": text})
+        out: asyncio.Queue[_Handed] = asyncio.Queue()
+        reply = Reply(_Page(out))
+        producing = asyncio.create_task(self._produce(reply, out))
         try:
-            self._history.append({"role": "user", "content": text})
-            out: asyncio.Queue[_Handed] = asyncio.Queue()
-            reply = Reply(_Page(out))
-            producing = asyncio.create_task(self._produce(reply, out))
-            try:
-                while (handed := await out.get()) is not None:
-                    event, passage, taken = handed
-                    if passage is not None:
-                        passage.handed += len(event.text)
-                    if taken is not None:
-                        taken.set_result(None)
-                    yield event
-                await producing
-                yield WrittenEvent("done")
-            finally:
-                producing.cancel()
-                await asyncio.gather(producing, return_exceptions=True)
-                await self._settle(reply)
+            while (handed := await out.get()) is not None:
+                event, passage, taken = handed
+                if passage is not None:
+                    passage.handed += len(event.text)
+                if taken is not None:
+                    taken.set_result(None)
+                yield event
+            await producing
         finally:
-            self._writing = False
+            # Settled in a task of its own, and only waited for here. A reader that is
+            # cancelled again while it waits then cannot leave the reply out of the
+            # history, or its tool calls running. The next message is accepted once
+            # that task is done, not before.
+            self._settling = asyncio.create_task(self._settle(reply, producing))
+            await asyncio.shield(self._settling)
+        yield WrittenEvent("done")
 
     async def _produce(self, reply: Reply, out: asyncio.Queue[_Handed]) -> None:
         try:
@@ -163,11 +168,16 @@ class WrittenConversation:
         # is not settled.
         return RoundInput(self._history, think=False)
 
-    async def _settle(self, reply: Reply) -> None:
-        """Move the reply into the history as it was delivered."""
-        stopped = [task for call in reply.calls() if (task := _stop(call)) is not None]
-        await asyncio.gather(*stopped, return_exceptions=True)
-        self._history.extend(reply.delivered(0.0).items)
+    async def _settle(self, reply: Reply, producing: asyncio.Task[None]) -> None:
+        """Stop what is still running, then move the reply into the history as delivered."""
+        try:
+            producing.cancel()
+            await asyncio.gather(producing, return_exceptions=True)
+            stopped = [task for call in reply.calls() if (task := _stop(call)) is not None]
+            await asyncio.gather(*stopped, return_exceptions=True)
+            self._history.extend(reply.delivered(0.0).items)
+        finally:
+            self._writing = False
 
 
 def _stop(call: ToolCall) -> asyncio.Task[str] | None:

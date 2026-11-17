@@ -260,3 +260,94 @@ async def test_a_failed_reply_raises_and_keeps_what_was_delivered() -> None:
 
     await _read(conversation, "again")
     assert llm.requests[1]["input"][1] == {"role": "assistant", "content": "Half…"}
+
+
+async def test_the_next_message_can_be_sent_as_soon_as_done_is_seen() -> None:
+    llm = _LLM(_said("Hi."), _said("Again."))
+    conversation = _conversation(llm)
+
+    # The reader stops at `done` without reading on, and keeps the stream open.
+    stream = conversation.send("hello")
+    async with asyncio.timeout(2):
+        async for event in stream:
+            if event.type == "done":
+                break
+
+    # The first reply is already in the history, and the conversation is free.
+    await _read(conversation, "and again")
+    assert llm.requests[1]["input"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi."},
+        {"role": "user", "content": "and again"},
+    ]
+    await stream.aclose()
+
+
+async def test_a_reader_cancelled_twice_still_leaves_the_reply_in_the_history() -> None:
+    ended: list[str] = []
+    let_go = asyncio.Event()
+
+    async def slow_to_stop(arguments: str) -> str:
+        try:
+            await asyncio.sleep(100)
+        except asyncio.CancelledError:
+            # A tool that takes a while to stop when it is told to.
+            await let_go.wait()
+            ended.append("stopped")
+            raise
+        return "Found it."
+
+    spec = ToolSpec(
+        name="look_up",
+        description="Look something up.",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    )
+    tools = Toolbox([Tool(spec, slow_to_stop, shown=lambda a: json.loads(a)["query"])])
+    call = _call("the weather")
+    llm = _LLM([_delta("Let me look."), _starts(call), _completed(call)], _said("Sunny."))
+    conversation = WrittenConversation(
+        llm=llm, model="6 Luna", tools=tools, instructions="Be brief."
+    )
+    looking = asyncio.Event()
+
+    async def reader() -> None:
+        async for event in conversation.send("what is the weather?"):
+            if event.type == "tool.call":
+                looking.set()
+
+    reading = asyncio.create_task(reader())
+    async with asyncio.timeout(2):
+        await looking.wait()
+        # The first cancel stops the reply. The second lands while the reply is being
+        # settled, which is still waiting for the tool to stop.
+        reading.cancel()
+        await asyncio.sleep(0.01)
+        reading.cancel()
+        await asyncio.gather(reading, return_exceptions=True)
+        assert reading.cancelled()
+
+        # The reply is not settled yet, so the next message is refused for now.
+        with pytest.raises(RuntimeError):
+            await _read(conversation, "too soon")
+
+        let_go.set()
+        await asyncio.sleep(0.01)
+        assert ended == ["stopped"]
+
+        # Settled all the same: what was said, and the call with a result of its own.
+        await _read(conversation, "never mind")
+    sent = llm.requests[1]["input"]
+    assert [item.get("role") or item["type"] for item in sent] == [
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+        "user",
+    ]
+    assert sent[1]["content"] == "Let me look."
+    assert sent[3]["output"].startswith("Stopped:")
