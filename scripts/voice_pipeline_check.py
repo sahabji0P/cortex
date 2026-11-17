@@ -51,9 +51,6 @@ class Recorder:
         self._model = model
         return self
 
-    async def label(self, text, *, instructions):
-        return await self._model.label(text, instructions=instructions)
-
     async def round(self, items, *, instructions, think):
         sent = [dict(i) for i in items]
         if self.requests:
@@ -320,9 +317,7 @@ async def scenario_3(llm, par, replies):
     t.clock.advance(DELAY + 6.5)
     t.stt.turn_start()
     heard = await t.until("interrupt")
-    await asyncio.sleep(
-        1.8
-    )  # a spoken sentence takes this long; the note on the unheard part is worded meanwhile
+    await asyncio.sleep(1.8)  # a spoken sentence takes this long
     t.stt.turn_end("What were the exact last words I heard from you? Quote them.")
     a = await t.until("assistant.done")
     replies.append(a)
@@ -345,15 +340,15 @@ async def scenario_3(llm, par, replies):
         stored == heard,
         f"stored {stored!r} ({len(full.split())} words were generated)",
     )
-    # 4. the remainder note
+    # 4. nothing of ours follows the cut, and the model still knows the rest went unheard
     notes = [i["content"] for i in hist if i.get("role") == "developer"]
     t.clock.advance(600)
     a = await t.ask("Did I hear your whole story, yes or no?")
     replies.append(a)
     note(
-        "remainder note: model knows the rest was not heard",
-        bool(notes) and re.search(r"\bno\b|not|didn.t|interrupt|cut", a.lower()) is not None,
-        f"note {notes[0][:90] if notes else None!r}; model said {a[:110]!r}",
+        "cut reply: model knows the rest was not heard",
+        not notes and re.search(r"\bno\b|not|didn.t|interrupt|cut", a.lower()) is not None,
+        f"notes added {len(notes)}; model said {a[:110]!r}",
     )
     await t.close()
 
