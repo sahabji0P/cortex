@@ -4,9 +4,13 @@ from collections.abc import MutableMapping
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ValidationError
 
 from app.entities.darbar_ent import Darbar, DarbarEntityClass, DarbarSetting
+from app.routers.darbar.controller import router
+from app.routers.darbar.models import DarbarModels
+from app.routers.darbar.service import DarbarServiceV1Class
 
 if TYPE_CHECKING:
     from app.adapters.docdb_adp import DocDBAdapterClass
@@ -142,3 +146,66 @@ async def test_the_text_is_at_most_4000_characters() -> None:
         await darbar.set("x" * 4_001)
     assert (await darbar.read()).text == "x" * 4_000
     assert len(docdb.documents) == 1
+
+
+# ---- the routes
+
+
+def _service() -> DarbarServiceV1Class:
+    return DarbarServiceV1Class(_darbar()[0])
+
+
+def test_the_routes_are_the_three_the_contract_names() -> None:
+    routes = {
+        (method, route.path, route.status_code)
+        for route in router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods
+    }
+
+    # Each answers 200 with the text in use, as `GET` does.
+    assert routes == {
+        ("GET", "/v1/darbar", None),
+        ("PUT", "/v1/darbar", None),
+        ("DELETE", "/v1/darbar", None),
+    }
+
+
+async def test_the_service_answers_get_put_and_delete_with_the_text_in_use() -> None:
+    service = _service()
+    built_in = DarbarModels.V1.Output.Darbar(text=_BUILT_IN, is_default=True)
+
+    assert await service.get_darbar() == built_in
+
+    put = await service.set_darbar(DarbarModels.V1.Input.SetDarbar(text="Gems are kind."))
+    assert put == DarbarModels.V1.Output.Darbar(text="Gems are kind.", is_default=False)
+    assert await service.get_darbar() == put
+
+    assert await service.reset_darbar() == built_in
+    assert await service.get_darbar() == built_in
+
+
+async def test_the_service_keeps_an_empty_text() -> None:
+    service = _service()
+
+    put = await service.set_darbar(DarbarModels.V1.Input.SetDarbar(text=""))
+
+    assert put == DarbarModels.V1.Output.Darbar(text="", is_default=False)
+    assert await service.get_darbar() == put
+
+
+def test_the_output_is_the_shape_the_contract_names() -> None:
+    out = DarbarModels.V1.Output.Darbar(text="Hi.", is_default=False)
+
+    assert out.model_dump() == {"text": "Hi.", "is_default": False}
+
+
+@pytest.mark.parametrize("text", ["", "x" * 4_000])
+def test_a_put_takes_any_text_up_to_4000_characters(text: str) -> None:
+    assert DarbarModels.V1.Input.SetDarbar.model_validate({"text": text}).text == text
+
+
+@pytest.mark.parametrize("body", [{"text": "x" * 4_001}, {}, {"text": None}])
+def test_a_put_that_is_too_long_or_has_no_text_is_refused(body: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        DarbarModels.V1.Input.SetDarbar.model_validate(body)
