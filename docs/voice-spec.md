@@ -161,8 +161,7 @@ calls and results (all Enforced).
   either id works.
 - **Any call still running** when the user speaks gets a placeholder, however short it
   is. One that finished in the instant before gets its real result.
-- **A reply may search up to 3 times.** On its fourth model call the tools are
-  forbidden, so it has to answer.
+- **A reply may search as often as the model needs.** There is no cap on tool rounds.
 
 Message sequence, from the tests' stand-in services:
 
@@ -193,13 +192,12 @@ Every request to the conversation model is built the same way, in this order (En
 | 2. Tools | `web_search` and `cancel_tool_call`, or none | No |
 | 3. History | Every finished item, oldest first | Only grows at its end |
 | 4. The open user turn | The turn no reply has been heard to yet | Can gain a line |
-| 5. This reply so far | On the second to fourth call of one reply: what was said before the search, the call, its result | Grows within the reply |
+| 5. This reply so far | On the second and later calls of one reply: what was said before the search, the call, its result | Grows within the reply |
 
 Set per request:
 
 - **A little thinking while a search has no result yet.** OpenAI models only. Otherwise
   the model does not think before it speaks, except 6.1 Sol, which cannot run without.
-- **No tools on the fourth call of a reply.** The tool list itself is not changed.
 - **OpenAI:** nothing is stored at the provider.
 - **Anthropic:** caching is asked for up to the end of the request. Haiku 5.5 runs with
   thinking off, Sonnet 5.5 is set as near to off as it allows, and Opus 5.5 is asked for
@@ -322,8 +320,6 @@ A fourth, added on 16 November 2026:
   words before a wait, carrying on after a sound, and telling a late result after
   answering something else. If a model does not follow them, the user hears silence
   during a search, hears a sentence start over, or is never told a result.
-- **The cap of 3 searches is still in the code.** The project notes list "no cap on tool
-  rounds in one reply" as decided. It is not built.
 - **Some wording still names search.** The last search instruction and the placeholder
   say "a search" and "do not search for this again". They will not fit a second tool.
 - **A sound before the greeting's first word.** If a turn with no words cuts the
@@ -336,7 +332,7 @@ A fourth, added on 16 November 2026:
 
 - `app/entities/voice_ent.py`: the conversation, the history, interruption, late results.
 - `app/entities/voice_speech.py`: speaking, and working out what was heard.
-- `app/entities/voice_model.py`: the two providers behind one interface.
+- `app/entities/model.py`: the two providers behind one interface.
 - `app/routers/voice/`: the WebSocket, the model list and the test page.
-- `tests/test_voice_conversation.py` and `tests/test_voice_model.py`: the tests for what
+- `tests/test_voice_conversation.py` and `tests/test_model.py`: the tests for what
   goes into the history and how it is sent to each provider.
