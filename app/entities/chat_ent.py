@@ -55,7 +55,7 @@ from app.entities.instructions import instructions
 from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
 from app.entities.model import LLM, Item, ModelName, is_openai, model_for
-from app.entities.tools import Tool, Toolbox, web_search_tool
+from app.entities.tools import gem_toolbox
 from app.entities.written_ent import WrittenConversation, WrittenEvent
 
 __all__ = ["ChatEntityClass", "ChatEvent", "ChatMessage", "ChatTurn", "Deliver"]
@@ -305,24 +305,7 @@ class ChatEntityClass:
         tell = _teller(gem_id, deliver)
         gem = ready.gem
         late = self._state(key).late
-        # Writing offers web search when the gem's tools name it and the key is set, and
-        # with it, as in a call, cancel_tool_call to stop a call that carries on.
-        offers_search = self._search.configured and "web_search" in gem.tools
-        search = web_search_tool(self._search)
-        cancel = late.tool
-        if offers_search:
-            tools = Toolbox([search, cancel])
-        else:
-            # The conversation holds calls from when the gem could search. A provider
-            # refuses a history with calls of a tool it is not told of, so such a tool
-            # stays declared, and a call of it now is answered with why not.
-            tools = Toolbox(
-                [
-                    Tool(tool.spec, _not_available)
-                    for tool in (search, cancel)
-                    if any(_calls(item, tool.name) for item in history)
-                ]
-            )
+        tools = gem_toolbox(gem.tools, self._search, late.tool, history)
         model = model_for(ready.llm, ready.name, tools.specs)
         # Read for every reply, so a change to it applies from the next message.
         darbar = (await self._darbar.read()).text
@@ -585,15 +568,6 @@ async def _read(
     except Exception as exc:
         return None, exc
     return None, None
-
-
-def _calls(item: Item, tool: str) -> bool:
-    """Whether a history item is a call of the tool called `tool`."""
-    return "type" in item and item["type"] == "function_call" and item["name"] == tool
-
-
-async def _not_available(arguments: str) -> str:
-    return "This tool is not available to you now."
 
 
 def _key(gem_id: str) -> str:

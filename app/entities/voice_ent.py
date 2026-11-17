@@ -69,7 +69,7 @@ from app.entities.model import (
     is_openai,
     model_for,
 )
-from app.entities.tools import Toolbox, web_search_tool
+from app.entities.tools import gem_toolbox
 from app.entities.voice_speech import Clock, Playback, Speech, Standby
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
@@ -181,11 +181,9 @@ class VoiceConversation:
         # Tool calls that outlived their replies, until their results are told. A result
         # that comes in is told at the next quiet moment.
         self._late = LateResults(self._announce_when_quiet)
-        # `llm` has to be the adapter of the provider that `model` belongs to.
-        # The gem is offered only the tools its config names. A name with no tool behind
-        # it here is passed over, so a config saved before a tool went still opens a call.
-        offers_search = search.configured and "web_search" in gem.tools
-        self._tools = Toolbox([web_search_tool(search), self._late.tool] if offers_search else [])
+        # `llm` has to be the adapter of the provider that `model` belongs to. The gem is
+        # offered the tools its config names, as in writing (see `tools.py`).
+        self._tools = gem_toolbox(gem.tools, search, self._late.tool, self._history)
         self._model = model_for(llm, model, self._tools.specs)
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
