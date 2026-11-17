@@ -648,7 +648,7 @@ async def test_a_tool_call_is_shown_its_result_sent_back_and_both_stored() -> No
     await _close(socket, linked)
 
 
-async def test_a_tool_still_running_at_a_cut_is_stopped_and_stored_with_a_result() -> None:
+async def test_a_tool_still_running_at_a_cut_is_stored_with_the_placeholder() -> None:
     call = _search_call("Pune weather")
     setup = await _chat(
         [_delta("Let me look."), _starts(call), _completed(call)],
@@ -678,7 +678,7 @@ async def test_a_tool_still_running_at_a_cut_is_stopped_and_stored_with_a_result
         "user",
         "assistant",
     ]
-    assert stored[3]["output"].startswith("Stopped:")
+    assert stored[3]["output"].startswith("Still running in the background, under call_id call_1.")
     assert setup.llm.requests[1]["input"] == stored[:5]
     await _close(socket, linked)
 

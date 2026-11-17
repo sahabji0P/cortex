@@ -216,10 +216,20 @@ async def test_a_reader_cancelled_mid_reply_is_treated_the_same() -> None:
     assert llm.requests[1]["input"][1] == {"role": "assistant", "content": "Once upon a time…"}
 
 
-async def test_a_tool_still_running_at_a_cut_is_stopped_and_given_a_result() -> None:
+_PLACEHOLDER_OF_CALL_1 = (
+    "Still running in the background, under call_id call_1. It has not failed. Only if "
+    "the user says they no longer want this, stop it with cancel_tool_call and that "
+    "call_id. Otherwise leave it alone: its result will reach you by itself, as a separate "
+    'call with "deferred_result_for": "call_1". Until then, do not search for this '
+    "again, in any wording."
+)
+
+
+async def test_a_tool_still_running_at_a_cut_is_left_running_with_the_placeholder() -> None:
     call = _call("Pune weather")
     llm = _LLM([_delta("Let me look."), _starts(call), _completed(call)], _said("Okay."))
-    look_up = _LookUp(gate=asyncio.Event())
+    gate = asyncio.Event()
+    look_up = _LookUp(gate=gate)
     conversation = _conversation(llm, look_up)
 
     async with contextlib.aclosing(conversation.send("weather?")) as stream:
@@ -227,17 +237,49 @@ async def test_a_tool_still_running_at_a_cut_is_stopped_and_given_a_result() -> 
             if event.type == "tool.call":
                 break
 
-    # Nothing is left running, and the call has a result the model can read.
-    assert look_up.ended == ["cancelled"]
+    # The call is not stopped: it is handed back, still running.
+    [left] = conversation.left_running
+    assert left.call_id == "call_1"
+    assert left.running is not None and not left.running.done()
     await _read(conversation, "never mind")
     sent = llm.requests[1]["input"]
     # The text said before the call was complete, so it is kept as it is.
     assert sent[1] == {"role": "assistant", "content": "Let me look."}
-    assert sent[3]["type"] == "function_call_output"
-    assert sent[3]["call_id"] == "call_1"
-    assert sent[3]["output"].startswith("Stopped")
-    # Nothing is made up to mark the cut: the stopped call says it.
+    # Its result is the placeholder a call uses. Nothing is made up to mark the cut.
+    assert sent[3] == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": _PLACEHOLDER_OF_CALL_1,
+    }
     assert sent[4] == {"role": "user", "content": "never mind"}
+
+    gate.set()
+    async with asyncio.timeout(2):
+        assert await left.running == "Found it."
+    assert look_up.ended == ["finished"]
+    # Delivering the result is the caller's job: the history is not touched.
+    assert [entry.item for entry in conversation.added][3]["output"] == _PLACEHOLDER_OF_CALL_1
+
+
+async def test_a_tool_that_finished_before_the_cut_is_not_handed_back() -> None:
+    call = _call("Pune weather")
+    llm = _LLM([_starts(call), _completed(call)], [asyncio.Event()])
+    conversation = _conversation(llm)
+
+    async with asyncio.timeout(2), contextlib.aclosing(conversation.send("weather?")) as stream:
+        assert (await anext(stream)).type == "tool.call"
+        # The tool answers at once; the second round waits for ever.
+        await asyncio.sleep(0.02)
+        assert len(llm.requests) == 2
+        conversation.cut()
+        assert [event.type async for event in stream] == ["cut"]
+
+    assert conversation.left_running == []
+    assert conversation.added[2].item == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "Found it.",
+    }
 
 
 async def test_a_second_message_while_a_reply_is_written_is_refused() -> None:
@@ -296,46 +338,45 @@ async def test_the_next_message_can_be_sent_as_soon_as_done_is_seen() -> None:
     await stream.aclose()
 
 
+class _SlowToStop(_LLM):
+    """A model whose first reply says a word, then takes a while to stop when told to."""
+
+    def __init__(self, *rounds: list) -> None:
+        super().__init__(*rounds)
+        self.let_go = asyncio.Event()
+        self.ended: list[str] = []
+
+    async def stream_response(self, **request):
+        if self.requests:
+            return await super().stream_response(**request)
+        self.requests.append({**request, "input": [dict(item) for item in request["input"]]})
+
+        async def stream():
+            yield _delta("Let me look.")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await self.let_go.wait()
+                self.ended.append("stopped")
+                raise
+
+        return stream()
+
+
 async def test_a_reader_cancelled_twice_still_leaves_the_reply_in_the_history() -> None:
-    ended: list[str] = []
-    let_go = asyncio.Event()
-
-    async def slow_to_stop(arguments: str) -> str:
-        try:
-            await asyncio.sleep(100)
-        except asyncio.CancelledError:
-            # A tool that takes a while to stop when it is told to.
-            await let_go.wait()
-            ended.append("stopped")
-            raise
-        return "Found it."
-
-    spec = ToolSpec(
-        name="look_up",
-        description="Look something up.",
-        parameters={
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
-    tools = Toolbox([Tool(spec, slow_to_stop, shown=lambda a: json.loads(a)["query"])])
-    call = _call("the weather")
-    llm = _LLM([_delta("Let me look."), _starts(call), _completed(call)], _said("Sunny."))
-    conversation = _with_tools(llm, tools)
-    looking = asyncio.Event()
+    llm = _SlowToStop(_said("Sunny."))
+    conversation = _conversation(llm)
+    began = asyncio.Event()
 
     async def reader() -> None:
-        async for event in conversation.send("what is the weather?"):
-            if event.type == "tool.call":
-                looking.set()
+        async for _ in conversation.send("what is the weather?"):
+            began.set()
 
     reading = asyncio.create_task(reader())
     async with asyncio.timeout(2):
-        await looking.wait()
+        await began.wait()
         # The first cancel stops the reply. The second lands while the reply is being
-        # settled, which is still waiting for the tool to stop.
+        # settled, which is still waiting for the model to stop.
         reading.cancel()
         await asyncio.sleep(0.01)
         reading.cancel()
@@ -346,22 +387,18 @@ async def test_a_reader_cancelled_twice_still_leaves_the_reply_in_the_history() 
         with pytest.raises(RuntimeError):
             await _read(conversation, "too soon")
 
-        let_go.set()
+        llm.let_go.set()
         await asyncio.sleep(0.01)
-        assert ended == ["stopped"]
+        assert llm.ended == ["stopped"]
 
-        # Settled all the same: what was said, and the call with a result of its own.
+        # Settled all the same: what was said, ending in "…".
         await _read(conversation, "never mind")
     sent = llm.requests[1]["input"]
-    assert [item.get("role") or item["type"] for item in sent] == [
-        "user",
-        "assistant",
-        "function_call",
-        "function_call_output",
-        "user",
+    assert sent == [
+        {"role": "user", "content": "what is the weather?"},
+        {"role": "assistant", "content": "Let me look.…"},
+        {"role": "user", "content": "never mind"},
     ]
-    assert sent[1]["content"] == "Let me look."
-    assert sent[3]["output"].startswith("Stopped:")
 
 
 # ---- given a history, handing back what was added, and cutting
@@ -446,3 +483,63 @@ async def test_a_failed_reply_is_handed_back_as_delivered() -> None:
 async def _read_at(conversation: WrittenConversation, text: str, at: datetime) -> None:
     async with asyncio.timeout(2):
         assert [event.type async for event in conversation.send(text, at=at)][-1] == "done"
+
+
+# ---- a reply with no new message, and thinking
+
+
+async def test_a_reply_can_be_written_with_no_new_message() -> None:
+    llm = _LLM(_said("It is sunny in Pune."))
+    earlier: list[Item] = [
+        {"role": "user", "content": "weather?"},
+        {"type": "function_call", "call_id": "c", "name": "look_up", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c", "output": "Sunny."},
+    ]
+    conversation = _conversation(llm, history=earlier)
+
+    events = await _read_none(conversation)
+
+    assert events == [
+        WrittenEvent("text", "It is sunny in Pune."),
+        WrittenEvent("done", "It is sunny in Pune."),
+    ]
+    # The request is the history as it stands: no message is added to it.
+    assert llm.requests[0]["input"] == earlier
+    assert [entry.item for entry in conversation.added] == [
+        {"role": "assistant", "content": "It is sunny in Pune."}
+    ]
+
+
+async def test_a_reply_with_no_message_cut_before_it_begins_adds_nothing() -> None:
+    llm = _LLM()
+    conversation = _conversation(llm)
+
+    conversation.cut()
+    assert await _read_none(conversation) == [WrittenEvent("cut", "…")]
+    assert llm.requests == []
+    assert conversation.added == []
+
+
+async def test_whether_to_think_is_asked_at_the_start_of_every_round() -> None:
+    call = _call("Pune weather")
+    llm = _LLM([_starts(call), _completed(call)], _said("Sunny."))
+    pending = [True]
+    tools = _LookUp().tools()
+    conversation = WrittenConversation(
+        model=model_for(llm, "6 Luna", tools.specs),
+        tools=tools,
+        instructions="Be brief.",
+        think=lambda: pending.pop(0) if pending else False,
+    )
+
+    await _read(conversation, "weather?")
+
+    assert [request["reasoning"] for request in llm.requests] == [
+        {"effort": "low"},
+        {"effort": "none"},
+    ]
+
+
+async def _read_none(conversation: WrittenConversation) -> list[WrittenEvent]:
+    async with asyncio.timeout(2):
+        return [event async for event in conversation.send(None)]
