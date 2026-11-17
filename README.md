@@ -131,7 +131,9 @@ Something new (a voice, skills, looks) is added by raising the version and writi
 
 A call is held with a gem when the WebSocket names it with `?gem=`. The gem's name and its instructions open what the model is told, ahead of the rules for a spoken conversation. Its model answers, it greets the user if it speaks first, and it is offered web search only if its `tools` name `web_search` and the search key is set. A call without a gem is unchanged: it is Cortex, with the same instructions as before.
 
-What the model is told is put together in layers, in [`app/entities/instructions.py`](app/entities/instructions.py), from what changes least to what changes most: the Darbar (what is true for every gem: a few plain lines on what a gem is and that the gems share a Darbar; a call without a gem is not sent it), the gem, the spoken rules, the tools' rules, what the model itself needs, and the date. The order keeps the start of every request the same for as long as possible, which is what a prompt cache needs.
+What the model is told is put together in layers, in [`app/entities/instructions.py`](app/entities/instructions.py), from what changes least to what changes most: the Darbar text (what is true for every gem; a call without a gem is not sent it), the gem, the spoken rules, the tools' rules, what the model itself needs, and the date. The order keeps the start of every request the same for as long as possible, which is what a prompt cache needs.
+
+The Darbar text is a setting the user can change. Until they do, it is a built-in text: a few plain lines on what a gem is and that the gems share a Darbar. It is kept as one document in the `Darbar` collection, at most 4,000 characters, and an empty one means gems are told nothing there. A call with a gem reads it once, when it opens, and keeps that text to its end, so a change reaches the next call, never one already open. It is in [`app/entities/darbar_ent.py`](app/entities/darbar_ent.py).
 
 | Route | Does |
 | --- | --- |
@@ -140,8 +142,11 @@ What the model is told is put together in layers, in [`app/entities/instructions
 | `GET /v1/gems/{gem_id}` | one gem |
 | `PATCH /v1/gems/{gem_id}` | changes only the fields sent. Only `model` may be null |
 | `DELETE /v1/gems/{gem_id}` | deletes it (204) |
+| `GET /v1/darbar` | the Darbar text: `{"text": "...", "is_default": true}`. `is_default` says whether it is the built-in text |
+| `PUT /v1/darbar` | sets it. Body `{"text": "..."}`, at most 4,000 characters; may be empty. Answers like `GET` |
+| `DELETE /v1/darbar` | goes back to the built-in text. Answers like `GET` |
 
-Ids go out as strings, and a missing or malformed id is a 404. There is no sign-in: this backend has one user for now.
+Ids go out as strings, and a missing or malformed id is a 404. There is no sign-in on any of these: this backend has one user for now. How the app uses them is in [`docs/chat-contract.md`](docs/chat-contract.md).
 
 ## Layout
 
@@ -151,8 +156,8 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 app/
   adapters/    one file per outside service; the only place an SDK is called
                openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
-  entities/    the logic: loop (making one reply, on any surface), voice_ent and voice_speech (the cascade), written_ent (a written conversation, no route yet), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), gem_ent (a gem's config), user_ent
-  routers/     HTTP and WebSocket endpoints: voice, gems, user
+  entities/    the logic: loop (making one reply, on any surface), voice_ent and voice_speech (the cascade), written_ent (a written conversation, no route yet), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), gem_ent (a gem's config), darbar_ent (the Darbar text every gem is told first), user_ent
+  routers/     HTTP and WebSocket endpoints: voice, gems, darbar, user
 ```
 
 Also still present from earlier experiments: user registration and login (`/v1/users`), kept because a login will be needed.
