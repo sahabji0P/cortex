@@ -1695,6 +1695,50 @@ async def test_a_search_lost_to_a_restart_is_closed_once_before_the_next_message
     await _close(socket, linked)
 
 
+async def test_a_result_that_could_not_be_stored_is_closed_as_lost_before_the_next_one() -> None:
+    searches = _Searches("Pune weather", "Delhi weather")
+    pune, delhi = _search_call("Pune weather", "call_1"), _search_call("Delhi weather", "call_2")
+    setup = await _chat(
+        [_delta("Looking at both."), _starts(pune), _starts(delhi), _completed(pune, delhi)],
+        _said("Sure."),
+        _said("Delhi is hazy. The Pune search was lost."),
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather in Pune and Delhi?")
+    await socket.until("chat.tool", 2)
+    socket.send(setup.gem.id, "hurry")
+    await socket.until("chat.done")
+
+    # Pune's result cannot be stored: the database is out of reach.
+    setup.docdb.breaks_after = 0
+    searches.gates["Pune weather"].set()
+    await _settle()
+    setup.docdb.breaks_after = None
+    assert len(await grows.check()) == 8
+
+    searches.gates["Delhi weather"].set()
+    await socket.until("chat.done", 2)
+
+    stored = await grows.check()
+    assert _kinds(stored[8:]) == [
+        "function_call",
+        "function_call_output",
+        "function_call",
+        "function_call_output",
+        "assistant",
+    ]
+    assert _stub_of(stored[8]) == "call_1" and stored[9]["output"] == _LOST
+    assert _stub_of(stored[10]) == "call_2"
+    assert stored[11]["output"] == searches.found("Delhi weather")
+    assert [frame for frame in socket.chat() if frame[0] == "chat.result"] == [
+        ("chat.result", "Delhi weather")
+    ]
+    _a_valid_chain(stored)
+    await _close(socket, linked)
+
+
 @pytest.mark.parametrize("how", ["cancelled", "delivered"])
 async def test_a_search_that_was_cancelled_or_told_is_not_lost(how: str) -> None:
     searches = _Searches(_WEATHER)
