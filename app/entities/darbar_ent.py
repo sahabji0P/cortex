@@ -13,6 +13,7 @@ from typing import Annotated, ClassVar
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.adapters.docdb_adp import DocDBAdapterClass
+from app.core.times import UtcDatetime
 from app.entities.instructions import DEFAULT_DARBAR
 
 __all__ = ["DARBAR_MAX_LENGTH", "Darbar", "DarbarEntityClass", "DarbarSetting", "DarbarText"]
@@ -39,7 +40,7 @@ class DarbarSetting(BaseModel):
     id: str = Field(default=_ID, alias="_id")
     # Stored as it was sent. Space around it is dropped only when a gem is told it.
     text: DarbarText
-    updated_at: datetime
+    updated_at: UtcDatetime
 
 
 @dataclass(frozen=True, slots=True)

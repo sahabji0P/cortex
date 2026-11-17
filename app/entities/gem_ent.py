@@ -23,6 +23,7 @@ from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.core.errors import NotFoundError
+from app.core.times import UtcDatetime
 from app.entities.chat_store import ChatStoreClass
 
 # The one place the model names are imported. Everything else uses `GemModelName`.
@@ -182,8 +183,8 @@ class GemConfig(BaseModel):
     # so they have one home. A call does not use them yet.
     voice: GemVoice | None = None
     speech_speed: GemSpeechSpeed = 1.0
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
     @model_validator(mode="before")
     @classmethod

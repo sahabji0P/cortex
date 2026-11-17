@@ -177,6 +177,22 @@ def test_every_tool_a_gem_can_be_given_is_a_tool_there_is() -> None:
     assert (search.name,) == GEM_TOOL_NAMES
 
 
+async def test_a_time_the_database_hands_back_without_a_zone_is_read_as_utc() -> None:
+    # The database keeps no zone. A client sent a time without one cannot read it.
+    gems, docdb = _gems()
+    document = _stored(
+        created_at=datetime(2026, 11, 17, 8, 0), updated_at=datetime(2026, 11, 17, 9, 30)
+    )
+    docdb.documents[document["_id"]] = document
+
+    read = await gems.get(str(document["_id"]))
+    (listed,) = await gems.list_all()
+
+    assert read.created_at == listed.created_at == datetime(2026, 11, 17, 8, 0, tzinfo=UTC)
+    assert read.updated_at == datetime(2026, 11, 17, 9, 30, tzinfo=UTC)
+    assert '"created_at":"2026-11-17T08:00:00Z"' in read.model_dump_json()
+
+
 async def test_a_stored_gem_with_a_tool_that_has_gone_still_loads_and_can_be_changed() -> None:
     # The tool is only left out when a call opens. The config keeps what it was given.
     gems, docdb = _gems()
