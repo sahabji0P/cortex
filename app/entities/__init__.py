@@ -27,6 +27,7 @@ class EntitiesRegistry:
         cls.ChatStore = ChatStoreClass(docdb=adapter.DocDB)
         cls.Chat = ChatEntityClass(
             gems=cls.Gems,
+            darbar=cls.Darbar,
             store=cls.ChatStore,
             openai=adapter.OpenAI,
             anthropic=adapter.Anthropic,

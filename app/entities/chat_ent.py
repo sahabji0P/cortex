@@ -3,8 +3,9 @@ Chat entity: written chat with the gems, one reply at a time for each gem.
 
 The database is the truth, not the connection. For every message:
 
-1. the gem's config and its written conversation so far are loaded from the database,
-2. the instructions are built from the config as it is now,
+1. the gem's config, the Darbar text and the gem's written conversation so far are
+   loaded from the database,
+2. the instructions are built from the config and the Darbar text as they are now,
 3. one reply is made by the shared loop (see `written_ent.py`), delivered as it is
    written,
 4. what the user wrote and what was delivered of the reply are added to the database.
@@ -33,6 +34,7 @@ from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.core.errors import NotFoundError
 from app.entities.chat_store import ChatItem, ChatStoreClass
+from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.instructions import instructions
 from app.entities.model import LLM, is_openai, model_for
@@ -50,7 +52,7 @@ class ChatEvent(BaseModel):
                     looks up
     - `chat.done`   the reply is complete. `text` is the whole reply
     - `chat.cut`    the reply was cut off by a new message. `text` is what is kept of
-                    it, ending in "…"
+                    it (just "…" if nothing is)
     - `chat.error`  no reply can be made, or the reply failed. `text` is the reason
 
     `gem` is the gem's id as the client sent it.
@@ -103,12 +105,14 @@ class ChatEntityClass:
         self,
         *,
         gems: GemEntityClass,
+        darbar: DarbarEntityClass,
         store: ChatStoreClass,
         openai: OpenAIAdapterClass,
         anthropic: AnthropicAdapterClass,
         search: ParallelAdapterClass,
     ) -> None:
         self._gems = gems
+        self._darbar = darbar
         self._store = store
         self._openai = openai
         self._anthropic = anthropic
@@ -147,8 +151,8 @@ class ChatEntityClass:
         reply is still being written cuts that reply, as speaking over someone does in
         a call. The reply is kept as what was sent, ending in "…", its client gets
         `chat.cut`, and then the new message is answered. Messages that come faster
-        than that are each cut in turn, in the order they came: each is stored, kept
-        as just "…", without asking the model.
+        than that are each cut in turn, in the order they came: each is stored, with
+        no reply, without asking the model.
         """
         at = datetime.now(UTC)
         key = _key(gem_id)
@@ -202,10 +206,13 @@ class ChatEntityClass:
             tools = Toolbox([web_search_tool(self._search)] if offers_search else [])
             model = model_for(llm, name, tools.specs)
             stored = await self._store.load(gem.id)
+            # Read for every reply, so a change to it applies from the next message.
+            darbar = (await self._darbar.read()).text
             conversation = WrittenConversation(
                 model=model,
                 tools=tools,
                 instructions=instructions(
+                    darbar=darbar,
                     gem=gem,
                     search=offers_search,
                     written=True,

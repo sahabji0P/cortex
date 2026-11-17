@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from app.core.errors import NotFoundError
 from app.entities.chat_ent import ChatEntityClass
 from app.entities.chat_store import ChatItem, ChatStoreClass
+from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.instructions import instruction_layers, instructions
 from app.routers.gems.service import GemsServiceV1Class
@@ -192,8 +193,14 @@ class _DocDB:
         collection: type[BaseModel],
         filters: MutableMapping[str, Any],
         update_data: MutableMapping[str, Any],
+        *,
+        upsert: bool = False,
     ) -> int:
         found = [d for d in self._all(collection) if self._matches(d, filters)]
+        if not found and upsert:
+            ids = {"_id" if key == "id" else key: value for key, value in filters.items()}
+            self._all(collection).append({**ids, **update_data})
+            return 1
         for document in found[:1]:
             document.update(update_data)
         return len(found[:1])
@@ -403,6 +410,7 @@ class _Chat(SimpleNamespace):
         """The same database, read by a new chat entity, as after a restart."""
         chat = ChatEntityClass(
             gems=self.gems,
+            darbar=DarbarEntityClass(cast("Any", self.docdb)),
             store=self.store,
             openai=cast("Any", self.llm),
             anthropic=cast("Any", _NoKey()),
@@ -425,6 +433,7 @@ async def _chat(*rounds: list[Any], search: Any = None, **gem: Any) -> _Chat:
     search = _Search() if search is None else search
     chat = ChatEntityClass(
         gems=gems,
+        darbar=DarbarEntityClass(adapter),
         store=store,
         openai=cast("Any", llm),
         anthropic=cast("Any", _NoKey()),
@@ -575,7 +584,6 @@ async def test_messages_faster_than_the_reply_are_each_cut_in_turn() -> None:
         "a story",
         "Once upon…",
         "no wait",
-        "…",
         "the weather",
         "Sure.",
     ]
@@ -640,7 +648,7 @@ async def test_a_tool_still_running_at_a_cut_is_stopped_and_stored_with_a_result
     assert socket.chat() == [
         ("chat.text", "Let me look."),
         ("chat.tool", "Pune weather"),
-        ("chat.cut", "Let me look. …"),
+        ("chat.cut", "Let me look."),
         ("chat.text", "Okay."),
         ("chat.done", "Okay."),
     ]
@@ -650,13 +658,11 @@ async def test_a_tool_still_running_at_a_cut_is_stopped_and_stored_with_a_result
         "assistant",
         "function_call",
         "function_call_output",
-        "assistant",
         "user",
         "assistant",
     ]
     assert stored[3]["output"].startswith("Stopped:")
-    assert stored[4] == {"role": "assistant", "content": "…"}
-    assert setup.llm.requests[1]["input"] == stored[:6]
+    assert setup.llm.requests[1]["input"] == stored[:5]
     await _close(socket, linked)
 
 
@@ -709,6 +715,7 @@ async def test_a_reply_that_cannot_be_stored_ends_in_chat_error() -> None:
     await setup.store.add([_item(setup.gem.id, 0, "from elsewhere")])
     setup.chat = ChatEntityClass(
         gems=setup.gems,
+        darbar=DarbarEntityClass(cast("Any", setup.docdb)),
         store=cast("Any", _BlindStore(setup.store)),
         openai=cast("Any", setup.llm),
         anthropic=cast("Any", _NoKey()),
@@ -930,3 +937,26 @@ async def test_a_deleted_gem_has_no_history() -> None:
     assert setup.docdb.collections["ChatItems"] == []
     with pytest.raises(NotFoundError):
         await GemsServiceV1Class(setup.gems, setup.chat).get_chat(str(setup.gem.id))
+
+
+async def test_a_changed_darbar_text_applies_from_the_next_message() -> None:
+    setup = await _chat(_said("Hi."), _said("Hi again."), _said("And again."))
+    socket, linked = await _open(setup.service())
+    darbar = DarbarEntityClass(cast("Any", setup.docdb))
+
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done")
+    await darbar.set("Every gem answers to the user alone.")
+    socket.send(setup.gem.id, "hello again")
+    await socket.until("chat.done", 2)
+    await darbar.set("")
+    socket.send(setup.gem.id, "and again")
+    await socket.until("chat.done", 3)
+
+    first, second, third = (request["instructions"] for request in setup.llm.requests)
+    # Until the user writes their own, it is the built-in text.
+    assert first.startswith("The user keeps a few assistants of their own")
+    assert second.startswith("Every gem answers to the user alone.\n\nYou are Kuber.\n")
+    # An empty one tells the gem nothing there.
+    assert third.startswith("You are Kuber.\n")
+    await _close(socket, linked)

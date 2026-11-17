@@ -14,9 +14,9 @@ The history follows the same rules as a call's. In writing, what was delivered i
 the reader was handed, and the reply runs at most one piece of text ahead of them. A
 reply that does not finish, because it was cut, the reader stopped part-way (closed the
 stream, or was cancelled), or it failed, leaves the history with the text the reader was
-handed, ending in "…". If that text does not end in "…" (nothing was handed, or the
-last of it was sent back to the model in full before a tool call), a reply of just "…"
-follows it. So the model can always see where a reply of its own was cut off.
+handed, ending in "…". Nothing is made up to mark the cut: a reply cut before any of
+it was handed over leaves no reply at all, as a call's does, and one cut while a tool
+ran keeps the text before the call whole, with the call's result saying it was stopped.
 """
 
 import asyncio
@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from app.entities.loop import CUT_MARK, Reply, RoundInput, ToolCall, run_reply
-from app.entities.model import Item, Message, Model
+from app.entities.model import Item, Model
 from app.entities.tools import Toolbox
 
 __all__ = ["Added", "WrittenConversation", "WrittenEvent"]
@@ -42,7 +42,9 @@ class WrittenEvent:
     - `text`       the next piece of the reply's text
     - `tool.call`  a tool call is being made (what it does in `text`, such as a query)
     - `done`       the reply is complete. `text` is the whole reply
-    - `cut`        the reply was cut off. `text` is what is kept of it, ending in "…"
+    - `cut`        the reply was cut off. `text` is what is kept of it: ending in "…" if
+                   it was cut mid-text, whole if it was cut while a tool ran, and just
+                   "…" if nothing is kept
 
     The text of `done` and `cut` is the reply's stretches of text, as the history keeps
     them, joined by a space.
@@ -196,7 +198,7 @@ class WrittenConversation:
         """Cut the reply being written off where the reader is, as a new message does.
 
         Its stream ends with `cut`. Called before `send`, the next reply is cut before
-        it begins: it is kept as just "…", and the model is not asked for it.
+        it begins: nothing is kept of it, and the model is not asked for it.
         """
         self._cut = True
         if self._out is not None:
@@ -236,9 +238,6 @@ class WrittenConversation:
             delivered = reply.delivered(0.0)
             items = delivered.items
             whole = reply.finished and delivered.kept is None
-            if not whole and not _ends_cut(items):
-                cut: Message = {"role": "assistant", "content": CUT_MARK}
-                items = [*items, cut]
             now = datetime.now(UTC)
             shown = {call.call_id: _shown(call) for call in reply.calls()}
             if self._open is not None:
@@ -249,7 +248,13 @@ class WrittenConversation:
                 else:
                     self._add(Added(item, now))
             kept = " ".join(item["content"] for item in items if "role" in item)
-            return WrittenEvent("done" if whole else "cut", kept)
+            if whole:
+                return WrittenEvent("done", kept)
+            # The history keeps only what was written, as a call keeps only what was
+            # heard: a reply cut before any of it was sent leaves nothing there, and
+            # one cut while a tool ran keeps the text before it whole. The event still
+            # says something was cut.
+            return WrittenEvent("cut", kept or CUT_MARK)
         finally:
             self._open = None
             self._out = None
@@ -259,13 +264,6 @@ class WrittenConversation:
     def _add(self, added: Added) -> None:
         self._history.append(added.item)
         self.added.append(added)
-
-
-def _ends_cut(items: list[Item]) -> bool:
-    """Whether the items end in a reply's text that ends in "…"."""
-    if not items or "role" not in items[-1]:
-        return False
-    return items[-1]["content"].endswith(CUT_MARK)
 
 
 def _shown(call: ToolCall) -> str | None:

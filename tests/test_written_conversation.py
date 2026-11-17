@@ -236,9 +236,8 @@ async def test_a_tool_still_running_at_a_cut_is_stopped_and_given_a_result() -> 
     assert sent[3]["type"] == "function_call_output"
     assert sent[3]["call_id"] == "call_1"
     assert sent[3]["output"].startswith("Stopped")
-    # The text before the call was complete, so the cut is marked after the call.
-    assert sent[4] == {"role": "assistant", "content": "…"}
-    assert sent[5] == {"role": "user", "content": "never mind"}
+    # Nothing is made up to mark the cut: the stopped call says it.
+    assert sent[4] == {"role": "user", "content": "never mind"}
 
 
 async def test_a_second_message_while_a_reply_is_written_is_refused() -> None:
@@ -359,11 +358,9 @@ async def test_a_reader_cancelled_twice_still_leaves_the_reply_in_the_history() 
         "assistant",
         "function_call",
         "function_call_output",
-        "assistant",
         "user",
     ]
     assert sent[1]["content"] == "Let me look."
-    assert sent[4]["content"] == "…"
     assert sent[3]["output"].startswith("Stopped:")
 
 
@@ -419,7 +416,7 @@ async def test_a_cut_ends_the_stream_with_what_is_kept() -> None:
     ]
 
 
-async def test_a_reply_cut_before_it_begins_is_kept_as_the_mark_and_asks_nothing() -> None:
+async def test_a_reply_cut_before_it_begins_leaves_no_reply_and_asks_nothing() -> None:
     llm = _LLM()
     conversation = _conversation(llm)
 
@@ -430,7 +427,6 @@ async def test_a_reply_cut_before_it_begins_is_kept_as_the_mark_and_asks_nothing
     assert llm.requests == []
     assert [entry.item for entry in conversation.added] == [
         {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "…"},
     ]
 
 
