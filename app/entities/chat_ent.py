@@ -34,8 +34,8 @@ import asyncio
 import contextlib
 import functools
 import json
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -50,12 +50,13 @@ from app.core.errors import NotFoundError
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
+from app.entities.history import Added, UserTurn, shown
 from app.entities.instructions import instructions
 from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
 from app.entities.model import LLM, Item, ModelName, is_openai, model_for
 from app.entities.tools import Tool, Toolbox, web_search_tool
-from app.entities.written_ent import WrittenConversation, WrittenEvent, shown
+from app.entities.written_ent import WrittenConversation, WrittenEvent
 
 __all__ = ["ChatEntityClass", "ChatEvent", "ChatMessage", "ChatTurn", "Deliver"]
 
@@ -138,12 +139,16 @@ class ChatTurn:
 
 @dataclass(slots=True)
 class _Outliving:
-    """What outlives a gem's replies: its calls still running, and who to tell."""
+    """What outlives a gem's replies: its calls still running, who to tell, and the
+    user's turn no reply has got through to yet."""
 
     # The gem's calls that outlived their replies, until their results are told.
     late: LateResults
     # The latest message to the gem: its id as the client spelled it, and its client.
     latest: tuple[str, Deliver] | None = None
+    # Messages whose replies were cut or failed before they left anything in the
+    # history. The next message joins them, and they are stored as one.
+    turn: UserTurn = field(default_factory=UserTurn)
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,8 +215,9 @@ class ChatEntityClass:
         reply is still being written cuts that reply, as speaking over someone does in
         a call. The reply is kept as what was sent, ending in "…", its client gets
         `chat.cut`, and then the new message is answered. Messages that come faster
-        than that are each cut in turn, in the order they came: each is stored, with
-        no reply, without asking the model.
+        than that are each cut in turn, in the order they came, without asking the
+        model. A message whose reply left nothing in the history is not stored on its
+        own: the next message joins it, as words do in a call (see `history.py`).
 
         A reply that tells of a late search result is cut the same way. Later replies of
         that kind go to the client of the latest message.
@@ -257,7 +263,7 @@ class ChatEntityClass:
             stored = await self._store.load(ready.gem.id)
             history = [item.item for item in stored]
             # A call lost to a restart is closed before the new message.
-            history += await self._add_stubs(ready.gem.id, history, self._lost(key, stored))
+            history += await self._add(ready.gem.id, history, _stubs(self._lost(key, stored)))
             await self._write(turn, key, ready, history, text, at, gem_id, deliver)
         except Exception as exc:
             # Anything else, such as the store being out of reach before the reply began.
@@ -334,23 +340,12 @@ class ChatEntityClass:
             # only grows, and quickly when searches are used.
             history=history,
             late=late,
+            turn=self._state(key).turn,
         )
         turn.begin(conversation)
         ended, failure = await _read(conversation, text, at, gem_id, deliver)
         try:
-            await self._store.add(
-                [
-                    ConversationItem(
-                        gem_id=gem.id,
-                        place=len(history) + offset,
-                        at=added.at,
-                        item=added.item,
-                        shown=added.shown,
-                        mark=added.mark,
-                    )
-                    for offset, added in enumerate(conversation.added)
-                ]
-            )
+            await self._add(gem.id, history, conversation.added)
         except Exception as exc:
             # The calls left running are in no stored conversation: nothing could take
             # their results.
@@ -406,7 +401,7 @@ class ChatEntityClass:
         state = self._outliving.get(key)
         if state is None or key in self._turns:
             return
-        if not state.late.pending and state.latest is None:
+        if not state.late.pending and state.latest is None and not state.turn.open:
             del self._outliving[key]
 
     def _tell_when_quiet(self, key: str) -> None:
@@ -445,8 +440,9 @@ class ChatEntityClass:
             stored = await self._store.load(gem_oid)
             history = [item.item for item in stored]
             lost = self._lost(key, stored, told=told)
-            stubs = [*lost, *(late.stub for late in told)]
-            history += await self._add_stubs(gem_oid, history, stubs)
+            # A turn left open has been sent to the model: the results follow it.
+            added = [*_stubs(lost), *state.turn.close(), *_stubs(late.stub for late in told)]
+            history += await self._add(gem_oid, history, added)
             if not await self._gems.exists(key):
                 await self._store.forget(gem_oid)  # deleted while they were stored
                 return
@@ -480,19 +476,24 @@ class ChatEntityClass:
         finally:
             self._release(turn, key)
 
-    async def _add_stubs(
-        self, gem_id: ObjectId, history: Sequence[Item], stubs: Sequence[ToolCall]
+    async def _add(
+        self, gem_id: ObjectId, history: Sequence[Item], added: Sequence[Added]
     ) -> list[Item]:
-        """Store each stub call and its result after the conversation. Return the items."""
-        items = [item for stub in stubs for item in stub.items()]
-        now = datetime.now(UTC)
+        """Store items after the conversation, all or none. Return them."""
         await self._store.add(
             [
-                ConversationItem(gem_id=gem_id, place=len(history) + offset, at=now, item=item)
-                for offset, item in enumerate(items)
+                ConversationItem(
+                    gem_id=gem_id,
+                    place=len(history) + offset,
+                    at=one.at,
+                    item=one.item,
+                    shown=one.shown,
+                    mark=one.mark,
+                )
+                for offset, one in enumerate(added)
             ]
         )
-        return items
+        return [one.item for one in added]
 
     def _lost(
         self, key: str, stored: Sequence[ConversationItem], *, told: Sequence[LateResult] = ()
@@ -531,6 +532,12 @@ class ChatEntityClass:
             call = calls[call_id]
             lost.append(late_stub(ToolCall(call_id, call["name"], call["arguments"]), _LOST))
         return lost
+
+
+def _stubs(calls: Iterable[ToolCall]) -> list[Added]:
+    """Stub calls and their results, as they are added. A stub shows nothing."""
+    now = datetime.now(UTC)
+    return [Added(item, now) for call in calls for item in call.items()]
 
 
 def _teller(

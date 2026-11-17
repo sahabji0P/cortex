@@ -29,7 +29,8 @@ item, which can gain a line (see below).
 
 A user turn stays open until some of the reply to it has been heard. Words that arrive
 before that join the same turn on a new line: speech recognition often splits one
-sentence in two, and the second half is not a new request.
+sentence in two, and the second half is not a new request. The rule is the same in
+writing, and in one place (`history.py`).
 
 A tool call is not stopped by an interruption. If the user speaks while one is running,
 it carries on, as it does in writing (see `late_results.py`). What the user said is
@@ -55,6 +56,7 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
+from app.entities.history import UserTurn
 from app.entities.instructions import instructions
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, run_reply
@@ -162,9 +164,9 @@ class VoiceConversation:
         # Everything the model sees, oldest first. It only ever grows at the end, and
         # each entry is final when it is added. A call starts with nothing before it.
         self._history: list[Item] = [{"role": "developer", "content": _CALL_STARTED}]
-        # The user's turn that has not been answered yet, as the pieces it arrived in.
-        # It joins the history when some of the reply to it has been heard.
-        self._turn: list[str] = []
+        # The user's turn that has not been answered yet. It joins the history when some
+        # of the reply to it has been heard.
+        self._turn = UserTurn()
         # Whether the turn the user has just opened cut a reply short, and whether any
         # of that reply had been heard.
         self._cut_a_reply = False
@@ -305,10 +307,8 @@ class VoiceConversation:
             # user has been told. (One that was cut off or failed before it said
             # anything also has nothing "cut", but has told them nothing.)
             self._results_owed = False
-        if heard.items and self._turn:
-            # Some of the reply got through, so the turn it answers is closed.
-            self._history.append({"role": "user", "content": "\n".join(self._turn)})
-            self._turn = []
+        # If some of the reply got through, the turn it answers is closed.
+        self._history.extend(added.item for added in self._turn.answered(heard.items))
         self._history.extend(heard.items)
         return heard
 
@@ -351,9 +351,7 @@ class VoiceConversation:
 
         Whatever is added next follows it, and what the user says next is a new turn.
         """
-        if self._turn:
-            self._history.append({"role": "user", "content": "\n".join(self._turn)})
-            self._turn = []
+        self._history.extend(added.item for added in self._turn.close())
 
     def _add_late_results(self) -> None:
         """Add each waiting result to the history, as a stub call followed by the result."""
@@ -380,14 +378,14 @@ class VoiceConversation:
         # The reply that was to tell the user of a late result, cut off unheard, is not
         # "picked up where it stopped": it is made again, by the same path as before.
         retell = self._results_owed and not said
-        if not said and not self._turn and (not self._cut_a_reply or retell):
+        if not said and not self._turn.open and (not self._cut_a_reply or retell):
             # Nothing was said and nothing heard was stopped: late results may be waiting.
             self._announce_when_quiet()
             return
         if said:
             # The result is in front of the model along with what the user now says.
             self._results_owed = False
-            self._turn.append(transcript)
+            self._turn.add(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
             self._emit("user.final", transcript)
@@ -432,18 +430,12 @@ class VoiceConversation:
         # little thinking it was about one in twenty. That costs about half a second at
         # the median and 1.5 s for the slowest tenth, on every request made while this
         # holds. An Anthropic model is not asked to: see `model.py`.
-        return RoundInput([*self._history, *self._open_turn()], think=self._late.pending)
+        return RoundInput([*self._history, *self._turn.items()], think=self._late.pending)
 
     def _is_noise(self, transcript: str) -> bool:
         """Whether a turn's words are a stray fragment trailing the user's last sentence."""
-        trailing = bool(self._turn) or (
-            self._turn_began_at - self._said_at <= _STRAY_WINDOW_SECONDS
-        )
+        trailing = self._turn.open or (self._turn_began_at - self._said_at <= _STRAY_WINDOW_SECONDS)
         return trailing and _is_stray(transcript, self._said, self._user_scripts)
-
-    def _open_turn(self) -> list[Item]:
-        """The user's unanswered turn as one message, for a model call."""
-        return [{"role": "user", "content": "\n".join(self._turn)}] if self._turn else []
 
     def _show_call(self, text: str) -> None:
         """Tell the client what a tool call is doing, such as what a search looks up."""

@@ -1,0 +1,108 @@
+"""
+What joins a gem's history, by the same rules in a call and in writing.
+
+The user's turn stays open until a reply to it leaves something in the history: some of
+its text was delivered, or it called a tool. What the user says before then joins the
+same turn, on a new line. In a call, speech recognition often splits one sentence in
+two, and the second half is not a new request. In writing, a message sent before the
+reply to the one before it got anywhere is the same: the user is still saying what they
+want. A reply cut before it left anything leaves the turn open, and the next reply
+answers all of it.
+
+A turn joins the history as one user item, and is final from then on. Until then it is
+the last thing a request is sent, and the one thing in a request that can change
+afterwards: it can gain a line. So it is never stored while it is open.
+
+Everything else is added to the history once it is final, and is added with what is
+kept beside it (`Added`): when it was added, what a tool call showed, and what a call's
+result stands for.
+"""
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from app.entities.loop import ResultMark, ToolCall
+from app.entities.model import Item
+
+__all__ = ["Added", "UserTurn", "added_reply", "shown"]
+
+
+@dataclass(frozen=True, slots=True)
+class Added:
+    """One item added to a history, with what is kept beside it."""
+
+    item: Item
+    # When it was added. The user's turn carries when its first piece came.
+    at: datetime
+    # For a tool call, the text of its `tool.call` event, if it had one.
+    shown: str | None = None
+    # For a call's result, what it stands for beyond its text (see `ResultMark`).
+    mark: ResultMark | None = None
+
+
+class UserTurn:
+    """The user's turn that no reply has got through to yet, as the pieces it came in."""
+
+    def __init__(self) -> None:
+        self._pieces: list[str] = []
+        self._at: datetime | None = None
+
+    @property
+    def open(self) -> bool:
+        """Whether the user has said anything that no reply has got through to yet."""
+        return bool(self._pieces)
+
+    def add(self, text: str, at: datetime | None = None) -> None:
+        """What the user says next joins the turn, on a new line. `at` is when it came."""
+        if not self._pieces:
+            self._at = at or datetime.now(UTC)
+        self._pieces.append(text)
+
+    def items(self) -> list[Item]:
+        """The turn as one user item, for a request, or nothing if no turn is open."""
+        return [{"role": "user", "content": "\n".join(self._pieces)}] if self._pieces else []
+
+    def close(self) -> list[Added]:
+        """Take the turn out as it stands, to join the history, where it is final.
+
+        Whatever is added next follows it, and what the user says next is a new turn.
+        """
+        added = [Added(item, self._at or datetime.now(UTC)) for item in self.items()]
+        self._pieces, self._at = [], None
+        return added
+
+    def answered(self, items: Sequence[Item]) -> list[Added]:
+        """A reply to the turn leaves `items` in the history. Return what goes before them.
+
+        If the reply left anything, it got through, so the turn it answers is closed and
+        goes before it. If it left nothing, the turn stays open.
+        """
+        return self.close() if items else []
+
+
+def added_reply(items: Sequence[Item], calls: Sequence[ToolCall], at: datetime) -> list[Added]:
+    """A reply's items as they are added, with what each tool call showed and each result's mark.
+
+    `calls` are the reply's tool calls, settled: each has its result and its mark.
+    """
+    by_id = {call.call_id: call for call in calls}
+    added: list[Added] = []
+    for item in items:
+        if "type" not in item:
+            added.append(Added(item, at))
+        elif item["type"] == "function_call":
+            added.append(Added(item, at, shown=shown(by_id[item["call_id"]])))
+        else:
+            added.append(Added(item, at, mark=by_id[item["call_id"]].mark))
+    return added
+
+
+def shown(call: ToolCall) -> str | None:
+    """The text of the `tool.call` event a call sent, worked out again from its arguments."""
+    if call.tool is None:
+        return None  # a tool the conversation does not have shows nothing
+    try:
+        return call.tool.shown(call.arguments)
+    except Exception:
+        return None  # arguments that cannot be read send no event

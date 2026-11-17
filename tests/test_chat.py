@@ -27,7 +27,14 @@ from app.entities.instructions import instructions
 from app.routers.gems.service import GemsServiceV1Class
 from app.routers.link.service import LinkServiceV1Class
 from tests.test_model import _call_starts, _Claude, _final, _text
-from tests.test_voice_conversation import _completed, _delta, _Search, _search_call, _starts
+from tests.test_voice_conversation import (
+    _assert_only_grew,
+    _completed,
+    _delta,
+    _Search,
+    _search_call,
+    _starts,
+)
 from tests.test_voice_gem import _DARBAR
 
 if TYPE_CHECKING:
@@ -269,7 +276,8 @@ class _LLM:
 
     A round's `asyncio.Event` pauses the stream there until the test sets it. Every
     request starts with the whole of the one before it for the same conversation (told
-    apart by its first message), which is the rule the history keeps.
+    apart by its first message), which is the rule the history keeps: the one thing
+    that may change is the user's open turn, the last item, which can gain a line.
     """
 
     configured = True
@@ -285,8 +293,7 @@ class _LLM:
         sent = [dict(item) for item in request["input"]]
         same = [r for r in self.requests if r["input"][:1] == sent[:1]]
         if same:
-            before = same[-1]["input"]
-            assert sent[: len(before)] == before, "an earlier item was changed"
+            _assert_only_grew(same[-1]["input"], sent)
         self.requests.append({**request, "input": sent})
         script = self._rounds.pop(0)
 
@@ -554,14 +561,48 @@ async def test_messages_faster_than_the_reply_are_each_cut_in_turn() -> None:
         ("chat.done", "Sure."),
     ]
     assert len(setup.llm.requests) == 2
+    # No reply got through to the middle message, so the last one joins it: they are
+    # one turn, as words are in a call.
     assert [item["content"] for item in await setup.stored()] == [
         "a story",
         "Once upon…",
-        "no wait",
-        "the weather",
+        "no wait\nthe weather",
         "Sure.",
     ]
     await _close(socket, linked)
+
+
+async def test_a_message_sent_before_any_of_the_reply_got_through_joins_the_open_turn() -> None:
+    pause = asyncio.Event()
+    setup = await _chat([pause, _delta("Never said.")], _said("Sunny."))
+    socket, linked = await _open(setup.service())
+
+    socket.send(setup.gem.id, "a story")
+    await _eventually_asked(setup, 1)
+    socket.send(setup.gem.id, "no, the weather")
+    await socket.until("chat.done")
+
+    assert socket.chat() == [("chat.cut", "…"), ("chat.text", "Sunny."), ("chat.done", "Sunny.")]
+    # The model was asked about the first message, and is then asked about both, as
+    # one turn that gained a line. They are stored once, as one user item.
+    first, second = setup.llm.requests
+    assert first["input"] == [{"role": "user", "content": "a story"}]
+    assert second["input"] == [{"role": "user", "content": "a story\nno, the weather"}]
+    assert await setup.stored() == [
+        {"role": "user", "content": "a story\nno, the weather"},
+        {"role": "assistant", "content": "Sunny."},
+    ]
+    assert await setup.shown() == [("user", "a story\nno, the weather"), ("gem", "Sunny.")]
+    await _close(socket, linked)
+
+
+async def _eventually_asked(setup: _Chat, count: int) -> None:
+    """Wait until the model has been sent `count` requests."""
+    async with asyncio.timeout(2):
+        while True:
+            if len(setup.llm.requests) >= count:
+                return
+            await asyncio.sleep(0)
 
 
 async def test_a_tool_call_is_shown_its_result_sent_back_and_both_stored() -> None:
@@ -2117,7 +2158,7 @@ async def test_a_search_running_when_its_gem_is_deleted_is_stopped() -> None:
     assert setup.chat._outliving == {}
 
 
-async def test_a_client_that_goes_before_its_message_is_answered_is_not_kept() -> None:
+async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_open() -> None:
     setup = await _chat(_said("Hi."))
     socket, linked = await _open(setup.service())
 
@@ -2125,5 +2166,17 @@ async def test_a_client_that_goes_before_its_message_is_answered_is_not_kept() -
     await _close(socket, linked)
     await _settle()
 
+    # No reply got through, so nothing is stored: the message waits, in memory, for the
+    # next one to join it. That client is not written to again.
+    assert await setup.stored() == []
+    [state] = setup.chat._outliving.values()
+    assert state.latest is None
+    other, other_linked = await _open(setup.service())
+    other.send(setup.gem.id, "are you there?")
+    await other.until("chat.done")
+    assert await setup.stored() == [
+        {"role": "user", "content": "hello\nare you there?"},
+        {"role": "assistant", "content": "Hi."},
+    ]
+    await _close(other, other_linked)
     assert setup.chat._outliving == {}
-    assert _kinds(await setup.stored()) == ["user"]
