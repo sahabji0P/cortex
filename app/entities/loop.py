@@ -17,8 +17,9 @@ moment. That is what the history keeps, by the same rules everywhere:
 - Nothing the model has been sent is changed afterwards. So text that was sent back to
   the model, in a later round of the same reply, is kept in full however much of it was
   delivered.
-- Every tool call keeps a valid result. What a call still running at a cut gets as its
-  result is decided by the conversation that made it.
+- Every tool call keeps a valid result. A call still running at a cut is left running
+  with a placeholder as its result, the same in a call and in writing (see
+  `late_results.py`).
 
 Which history a round is sent, whether the model thinks first, and where the text and
 tool events go are the conversation's own. It hands them over at the start of each round.
