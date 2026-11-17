@@ -1,0 +1,97 @@
+# Darbar notes
+
+Things that came up while planning. One line each, as a reminder. Started 2026-11-16.
+
+## Words
+
+- Gem: one of your assistants. Never "bot" or "agent".
+- Darbar: the common place, where gems meet and talk. Also the part every gem is told.
+- Home: a gem's own private place (its computer and files).
+- Bhandar: a gem's library of files.
+- Samvaad (proposed): the one ongoing conversation with a gem, by call or by chat.
+- Gyan Kosh (proposed): memory.
+- Granth (proposed): a long document a gem writes, kept in its Bhandar.
+- Vichar Dhara (proposed): the setting that carries a gem's thinking forward.
+- No name yet: skills, tool servers ("connection" for now), the vault.
+- Not decided: whether "Cortex" is the app or the memory system.
+
+## Decided
+
+- A gem is one entity with one context. Call or chat, it is the same context. No sessions.
+- Every gem has both call and chat.
+- How a call behaves is closed, until we find something that makes it better.
+- One WebSocket once you are logged in. Calls, chat and events all go over it.
+- It goes both ways: a gem can call or message you.
+- Call and chat are a medium between any two: you and a gem, or gem and gem.
+- One agentic loop for call, chat and workers. Only the config differs.
+- A gem is defined by a GemConfig: in the database, treated like a config file.
+- No cap on tool rounds in one reply. No fuse either: watch first, build if it loops.
+- Before a wait, the gem says a few words first. Same in chat as in a call.
+- Instructions and skills are plainly written. Nothing hard-coded.
+- The list of gems changes, so it is not in the fixed instructions.
+- Product questions are settled by trying them out with proper evals, not blindly.
+
+## Base (next, order not fixed, no rush)
+
+- GemConfig on the backend: character, instructions, model, tools, skills, permissions, sandbox.
+- The shared loop, taken out of the call code without changing how a call behaves.
+- A tool registry, then skills.
+- The standing WebSocket, with the call moved onto it.
+- Chat.
+
+## Deferred
+
+- Gyan Kosh: what context a gem carries, and how much. The main work, and the important one.
+- Homes and the Darbar are part of the memory design too: what is private to a gem, what is common.
+- Proactivity: gems calling or messaging first, routines. Comes with memory.
+- Gem to gem samvaad, and several gems in one call.
+- Workers: a worker returns to its parent gem. A shared worker that is triggered is a new idea.
+- Vault: secrets per gem, and shared ones. The model never sees a secret.
+- Vault: a gem without a secret asks the gem that has it to do the job. The secret is not handed over.
+- Permissions: allow, ask or block, per gem and tool.
+- Sandbox: what a tool can reach even when it is allowed.
+- Hooks: our own code run at fixed moments of the loop.
+- Homes: each gem's own computer, hosted so it works when the Mac is off.
+- A gem using your PC, with permission.
+- Granth as a page, like Notion or Claude artifacts. Doable in the app.
+- OpenUI-style rendering: the open one. Find out what GPUI can draw.
+- Vichar Dhara toggle per gem: keep the thinking and pass it back, or drop it.
+- Config: how you control and customise a gem.
+- Characters: animated raja and rani types, GIF or Rive.
+- Cost: the backend sends none yet.
+- Old text code (Project, Session, SessionTurn, the Agent SDK pipeline): keep or remove.
+
+## Learned from Docker Agent (read 2026-11-16, config version 16)
+
+- One file defines a whole team. Models, tool servers, skills and budgets are named once at the top and shared.
+- An agent is: description, instruction, model, toolsets, sub_agents, handoffs, skills, hooks, limits.
+- The config has a version number and an upgrade step for each old version.
+- No cap on tool rounds by default. It stops only on the same tool calls repeated 5 times.
+- Tool calls in one reply run in parallel.
+- A new message during a run is "steer": it joins at the next step and does not cut the run.
+- A worker gets only its task, not the parent's history. Only its last message comes back.
+- No worker lives on or is shared. Every delegation is a new one.
+- A handoff is different: the next agent takes over the same conversation.
+- Permission is checked per tool call: allow, ask or deny, by tool name and arguments. Deny always wins.
+- Four modes: strict, balanced, restricted, autonomous. Unattended runs turn an ask into a deny.
+- Hooks: about 30 moments. Some can add text for the model, some can rewrite, some can block.
+- Skills: a list of names and descriptions in the prompt, the body read by a tool.
+- Memory is only a tool there (add, search, update, delete). Thin.
+- Thinking is kept and sent back by default.
+- Compaction at 90% of the window: a summary, with the latest part kept as it is.
+- Its sandbox is not its own: the whole agent runs in a Docker Sandboxes VM.
+- In the VM: its folder is read-write, the rest read-only, network closed except an allowlist.
+- Keys never enter the VM. A proxy adds the real key to requests for one domain.
+- Outside the VM there is no real wall: the shell sees every key on the machine.
+- One sandbox for the whole team, not one per agent. We want one home per gem.
+- Tool output is scrubbed for secrets by pattern. It can miss.
+- Optional git snapshots of the work folder, for undo.
+
+## To try out with evals
+
+- Chat with no stop button: a new message cuts the reply, like barge-in.
+- Chat: is a second message a cut, or an addition to the first?
+- Chat: is a cut reply kept as what was shown plus "…", like a call?
+- Sizes: short in a call, medium in chat, long as a granth.
+- One context with both speaking and writing in it: does the gem keep to the right one?
+- No cap on tool rounds: does a gem ever loop?
