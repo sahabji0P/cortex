@@ -46,6 +46,11 @@ _CORTEX_OPENING = (
     "You are Cortex, a voice assistant in a live spoken conversation. Everything you write "
     "is read aloud by a text-to-speech voice.\n"
 )
+_DARBAR = (
+    "The user keeps a few assistants of their own, which they call gems. Each gem has its "
+    "own name and its own work. The place they share is called the Darbar.\n"
+    "\n"
+)
 _GEM_OPENING = (
     "You are in a live spoken conversation. Everything you write is read aloud by a "
     "text-to-speech voice.\n"
@@ -147,7 +152,7 @@ def test_the_layers_go_from_what_changes_least_to_what_changes_most() -> None:
     layers = instruction_layers(gem=None, search=True, model_needs="", now=_NOW)
 
     assert [layer.name for layer in layers] == ["darbar", "gem", "spoken", "tools", "model", "date"]
-    # Nothing is written for the Darbar yet, and without a gem the gem says nothing.
+    # A call without a gem is told nothing of the Darbar, and the gem says nothing.
     assert [layer.text for layer in layers[:2]] == ["", ""]
     assert layers[-1].text == _DATE
 
@@ -161,7 +166,7 @@ def test_a_gem_is_named_and_its_own_instructions_come_before_the_spoken_rules() 
     text = instructions(gem=gem, search=True, model_needs="", now=_NOW)
 
     assert text == (
-        "You are Kuber.\n"
+        _DARBAR + "You are Kuber.\n"
         "\n"
         "You look after the user's personal finances.\n"
         "\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _SEARCH_RULES + _DATE
@@ -174,7 +179,7 @@ def test_a_gem_without_instructions_is_only_named(own: str) -> None:
 
     text = instructions(gem=gem, search=False, model_needs="", now=_NOW)
 
-    assert text == "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+    assert text == _DARBAR + "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
 
 
 def test_a_gem_s_instructions_are_sent_as_stored_without_the_space_around_them() -> None:
@@ -183,7 +188,7 @@ def test_a_gem_s_instructions_are_sent_as_stored_without_the_space_around_them()
 
     text = instructions(gem=gem, search=False, model_needs="", now=_NOW)
 
-    assert text.startswith(f"You are Kuber.\n\n{own}\n\n{_GEM_OPENING}\n")
+    assert text.startswith(f"{_DARBAR}You are Kuber.\n\n{own}\n\n{_GEM_OPENING}\n")
     assert "\n\n\n" not in text
 
 
@@ -191,7 +196,7 @@ def test_a_gem_s_instructions_are_sent_as_stored_without_the_space_around_them()
 
 
 _KUBER_WITH_SEARCH = (
-    "You are Kuber.\n"
+    _DARBAR + "You are Kuber.\n"
     "\n"
     "You look after the user's personal finances.\n"
     "\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _SEARCH_RULES + _DATE
@@ -248,7 +253,7 @@ async def test_a_gem_without_web_search_is_offered_no_tools_even_with_the_key(
 
     assert llm.requests[0]["tools"] == []
     assert _dated(llm.requests[0]["instructions"]) == (
-        "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+        _DARBAR + "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
     )
     await f.conversation.close()
 
