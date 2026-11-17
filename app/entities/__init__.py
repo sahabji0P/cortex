@@ -1,5 +1,4 @@
 from app.adapters import AdapterRegistry
-from app.entities.pipeline_agent_sdk import AgentSDKPipelineEntityClass
 from app.entities.user_ent import User, UserEntityClass
 from app.entities.voice_ent import VoiceEntityClass
 
@@ -13,7 +12,6 @@ class EntitiesRegistry:
             docdb=adapter.DocDB,
             cache=adapter.Cache,
         )
-        cls.AgentSDKPipeline = AgentSDKPipelineEntityClass()
         cls.Voice = VoiceEntityClass(
             stt=adapter.CartesiaSTT,
             tts=adapter.CartesiaTTS,
