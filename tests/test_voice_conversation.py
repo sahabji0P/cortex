@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
-from app.entities.gem_ent import GemConfig
+from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig
 from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
 from app.entities.voice_speech import Playback, Utterance
 
@@ -25,6 +25,7 @@ _DELAY = 0.15
 # the default tools. What it is told is tested in `test_voice_gem.py`.
 _GEM = GemConfig.model_validate(
     {
+        "version": GEM_CONFIG_VERSION,
         "name": "Gem One",
         "created_at": datetime(2026, 11, 17, tzinfo=UTC),
         "updated_at": datetime(2026, 11, 17, tzinfo=UTC),

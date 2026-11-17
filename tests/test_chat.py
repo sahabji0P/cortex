@@ -21,7 +21,7 @@ from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
 from app.entities.chat_store import ChatItem, ChatStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
-from app.entities.gem_ent import GemConfig, GemEntityClass
+from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig, GemEntityClass
 from app.entities.instructions import instruction_layers, instructions
 from app.routers.gems.service import GemsServiceV1Class
 from app.routers.link.service import LinkServiceV1Class
@@ -75,6 +75,7 @@ _TODAY = "\nToday is Tuesday, 17 November 2026.\n"
 def _a_gem(**fields: object) -> GemConfig:
     return GemConfig.model_validate(
         {
+            "version": GEM_CONFIG_VERSION,
             "name": "Gem One",
             "instructions": "You look after the user's personal finances.",
             "created_at": _NOW,
