@@ -18,6 +18,11 @@
   #log div { margin: 8px 0; white-space: pre-wrap; }
   .you b { color: #3b82f6; } .cortex b { color: #10b981; }
   .meta { color: var(--dim); font-size: .85rem; }
+  #chat { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 12px; }
+  #chat h2 { font-size: 1rem; margin: 0; }
+  #chatLog div { margin: 8px 0; white-space: pre-wrap; }
+  #chatForm { display: flex; gap: 8px; margin-top: 12px; }
+  #chatText { flex: 1; font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); }
 </style>
 </head>
 <body>
@@ -30,6 +35,11 @@
 </div>
 <label class="option"><input type="checkbox" id="first"> Cortex speaks first</label>
 <div id="log"></div>
+<section id="chat" hidden>
+  <h2>Chat</h2>
+  <div id="chatLog"></div>
+  <form id="chatForm"><input id="chatText" autocomplete="off" placeholder="Write a message"><button>Send</button></form>
+</section>
 
 <script>
 const MIC_RATE = 16000;     // what the server expects from us
@@ -216,6 +226,83 @@ function stop() {
 }
 
 toggle.onclick = () => (socket ? stop() : start().catch((error) => { line("meta").textContent = `error: ${error.message}`; stop(); }));
+</script>
+
+<script>
+// Written chat with the gem named in the address (?gem=<id>), over the standing socket.
+// It has nothing to do with the call above, which also talks to that gem.
+const chatGem = new URLSearchParams(location.search).get("gem");
+if (chatGem) openChat(chatGem);
+
+function openChat(gem) {
+  const chatLog = document.getElementById("chatLog");
+  const chatText = document.getElementById("chatText");
+  document.getElementById("chat").hidden = false;
+  let name = "Gem";
+  let writing = null;  // the line the reply being written goes into
+  let link = null;
+
+  function say(cls, label, text) {
+    const el = document.createElement("div");
+    el.className = cls;
+    if (label) { const b = document.createElement("b"); b.textContent = label; el.append(b, " "); }
+    const span = document.createElement("span");
+    span.textContent = text;
+    el.append(span);
+    chatLog.append(el);
+    el.scrollIntoView({ block: "end" });
+    return span;
+  }
+
+  function onFrame(frame) {
+    if (frame.gem !== undefined && frame.gem !== gem) return;
+    if (frame.type === "chat.text") {
+      writing ??= say("cortex", name, "");
+      writing.textContent += frame.text;
+    } else if (frame.type === "chat.tool") {
+      say("meta", "", `using a tool: ${frame.text}`);
+      writing = null;  // what follows a tool is a stretch of its own, as it is stored
+    } else if (frame.type === "chat.done") {
+      writing = null;
+    } else if (frame.type === "chat.cut") {
+      // Shown as it is kept: what was written, ending in "…".
+      if (writing && !writing.textContent.trimEnd().endsWith("…")) writing.textContent = `${writing.textContent.trimEnd()}…`;
+      else if (!writing) say("cortex", name, "…");
+      say("meta", "", "cut off by a new message");
+      writing = null;
+    } else if (frame.type === "chat.error" || frame.type === "error") {
+      say("meta", "", `error: ${frame.text}`);
+      writing = null;
+    }
+  }
+
+  async function load() {
+    const found = await fetch(`/v1/gems/${encodeURIComponent(gem)}`);
+    if (!found.ok) { say("meta", "", "no gem with that id"); return; }
+    name = (await found.json()).name;
+    const { messages } = await (await fetch(`/v1/gems/${encodeURIComponent(gem)}/chat`)).json();
+    for (const message of messages) {
+      if (message.role === "user") say("you", "You", message.text);
+      else if (message.role === "gem") say("cortex", name, message.text);
+      else say("meta", "", `used a tool: ${message.text}`);
+    }
+    link = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/link`);
+    link.onmessage = (message) => onFrame(JSON.parse(message.data));
+    link.onclose = () => { say("meta", "", "the chat socket closed: reload the page to open it again"); link = null; };
+  }
+
+  document.getElementById("chatForm").onsubmit = (event) => {
+    event.preventDefault();
+    const text = chatText.value;
+    if (!text.trim() || link?.readyState !== WebSocket.OPEN) return;
+    // `writing` is kept: if a reply is being written, its `chat.cut` comes next.
+    say("you", "You", text);
+    link.send(JSON.stringify({ type: "chat.send", gem, text }));
+    chatText.value = "";
+  };
+
+  load().catch((error) => say("meta", "", `error: ${error.message}`));
+}
 </script>
 </body>
 </html>
