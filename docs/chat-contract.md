@@ -72,9 +72,22 @@ A reply's text comes in stretches. What a gem writes before it uses a tool is on
 stretch, and what it writes after is another: start a new line after a `chat.tool`. The
 history keeps each stretch as a message of its own.
 
-Nothing is kept of a message that gets `chat.error` because the gem is not there, its
-config cannot be read, its model has no key, or it is in a call. When a reply fails
-part-way, the user's message and what was sent of the reply are kept.
+What is kept of a message, once its `chat.send` has had its last frame. Read the history
+again first: a message that is in it is stored, with what was sent of its reply, and
+nothing more needs working out. For one that is not in it, the last frame says which of
+two things is true:
+
+| Last frame | Of a message that is not in the history |
+| --- | --- |
+| `chat.cut` | Held open: nothing of the reply got through |
+| `chat.error` `reply failed: …` | Held open: the reply failed before any of it got through |
+| `chat.error` `unknown gem`, `the gem's config cannot be read`, `no … key is set, so … cannot be used`, `the gem is in a call` | Not kept: the backend never took it up |
+| `chat.error` `no reply could be made: …` | Not kept: a fault before the reply began, as when the database is out of reach |
+| `chat.error` `the reply could not be stored: …` | Not kept, and neither is the reply |
+
+A message that was not kept can be sent again as it is. One that is held open must not
+be sent again by the app on its own: the next message joins it, so it would be joined to
+itself.
 
 A message whose reply was cut or failed before any of it was sent is not kept on its
 own. It stays open, and the next message to the gem joins it on a new line: the two are
