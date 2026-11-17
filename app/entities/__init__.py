@@ -1,4 +1,5 @@
 from app.adapters import AdapterRegistry
+from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
 from app.entities.chat_store import ChatItem, ChatStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
@@ -40,6 +41,7 @@ class EntitiesRegistry:
             anthropic=adapter.Anthropic,
             search=adapter.Parallel,
         )
+        cls.Call = CallEntityClass(gems=cls.Gems, darbar=cls.Darbar, voice=cls.Voice)
 
 
 __all__ = ["EntitiesRegistry"]
