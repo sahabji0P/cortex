@@ -2,8 +2,6 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, Field
 
-from app.entities.model import ModelName
-
 # The whole stored conversation is sent to the model with every message, for good. A
 # limit keeps one stray paste from riding along in every request after it.
 _MESSAGE_MAX_LENGTH = 20_000
@@ -35,18 +33,15 @@ class LinkModels:
                 ]
 
             class CallStart(BaseModel):
-                """Open a call. Anything else in the frame is ignored.
+                """Open a call with a gem. Anything else in the frame is ignored.
 
-                `gem` is the id of the gem to talk to; without one the call is with
-                Cortex. `model` is a name from `GET /v1/voice/models`, and `first` says
-                who says the first words. A `model` or `first` that is sent wins over the
-                gem's for this call; one left out, or sent as null, leaves the gem's.
-                Without a gem they are the configured model and the user.
+                `gem` is the id of the gem to talk to. Its config says which model
+                answers. `first` says who says the first words: sent, it wins over the
+                gem's for this call; left out, or sent as null, it leaves the gem's.
                 """
 
                 type: Literal["call.start"]
-                gem: str | None = None
-                model: ModelName | None = None
+                gem: str
                 first: Literal["user", "assistant"] | None = None
 
             class CallPlayback(BaseModel):

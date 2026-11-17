@@ -134,8 +134,8 @@ class LinkServiceV1Class:
                     try:
                         start = LinkModels.V1.Input.CallStart.model_validate_json(text)
                     except ValidationError:
-                        # A refusal, not an unreadable frame: this is a model or a
-                        # setting that is not offered.
+                        # A refusal, not an unreadable frame: a start that names no gem,
+                        # or asks for a setting that is not offered.
                         start = None
                     # A call that is ending sends its last frame before this one's first.
                     call = _Call(self.call, start, send, send_audio, after=call)
@@ -207,7 +207,7 @@ class _Call:
         after: "_Call | None",
     ) -> None:
         self._calls = calls
-        self._start = start  # None: the frame asked for something that is not offered
+        self._start = start  # None: the frame named no gem, or a setting not offered
         self._send = send
         self._send_audio = send_audio
         # Mic audio waits here from `call.start` until the call is open, so none is lost.
@@ -253,7 +253,7 @@ class _Call:
             if self._hung_up.is_set():
                 return  # hung up while it waited for the call before it: `call.ended`
             if self._start is None:
-                last = LinkModels.V1.Output.CallRefused(text="unknown model or setting")
+                last = LinkModels.V1.Output.CallRefused(text="no gem, or an unknown setting")
                 return
             if (refused := await self._open(self._start)) is not None:
                 last = refused
@@ -317,9 +317,7 @@ class _Call:
         if self._hung_up.is_set():
             return None
         first = None if start.first is None else start.first == "assistant"
-        opening = asyncio.create_task(
-            self._calls.open(start.gem, model=start.model, speaks_first=first)
-        )
+        opening = asyncio.create_task(self._calls.open(start.gem, speaks_first=first))
         hung_up = asyncio.create_task(self._hung_up.wait())
         try:
             await asyncio.wait({opening, hung_up}, return_when=asyncio.FIRST_COMPLETED)

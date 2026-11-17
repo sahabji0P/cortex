@@ -25,21 +25,14 @@ from app.entities.gem_ent import GemConfig
 __all__ = ["DEFAULT_DARBAR", "Layer", "instruction_layers", "instructions"]
 
 # What every gem is told of where it is, until the user writes their own (see
-# `darbar_ent.py`). A call without a gem is not told this. The blank line after it is
-# added where it is put in, so a text the user writes gets the same.
+# `darbar_ent.py`). The blank line after it is added where it is put in, so a text the
+# user writes gets the same.
 DEFAULT_DARBAR = """\
 The user keeps a few assistants of their own, which they call gems. Each gem has its \
 own name and its own work. The place they share is called the Darbar."""
 
-# How a call without a gem opens. Its rules follow after a blank line.
-_CORTEX = """\
-You are Cortex, a voice assistant in a live spoken conversation. Everything you write \
-is read aloud by a text-to-speech voice.
-
-"""
-
-# How the spoken rules open when a gem has already said who it is: the opening above,
-# without the part that names Cortex.
+# How a call is carried. The gem has already said who it is. Its rules follow after a
+# blank line.
 _SPOKEN = """\
 You are in a live spoken conversation. Everything you write is read aloud by a \
 text-to-speech voice.
@@ -62,8 +55,7 @@ nothing after it, so do not assume they know the rest. When you carry on, contin
 there instead of starting again. Never end a reply with "…" yourself.
 """
 
-# How a written conversation is carried. Writing is always with a gem, which has
-# already said who it is.
+# How a written conversation is carried. The gem has already said who it is.
 _WRITTEN = """\
 You are in a written conversation. The user reads what you write in a chat window.
 
@@ -141,7 +133,7 @@ class Layer:
 def instruction_layers(
     *,
     darbar: str | None = None,
-    gem: GemConfig | None,
+    gem: GemConfig,
     search: bool,
     written: bool = False,
     model_needs: str,
@@ -150,25 +142,19 @@ def instruction_layers(
     """The layers of a conversation's instructions, in the order they are sent.
 
     `search` says whether web search is offered, and `model_needs` is what the model
-    adds of its own. Without a gem the result is the text a call has always been sent.
+    adds of its own.
 
-    `darbar` is the Darbar text the user wrote, or None for the built-in one. A gem is
+    `darbar` is the Darbar text the user wrote, or None for the built-in one. The gem is
     told it first. An empty one tells it nothing.
-    `written` gives the rules for writing in place of the spoken ones. Writing is always
-    with a gem.
+    `written` gives the rules for writing in place of the spoken ones.
     """
-    if written and gem is None:
-        raise ValueError("a written conversation is always with a gem")
     today = (now or datetime.now(UTC)).strftime("%A, %d %B %Y")
     return [
-        # What is true for every gem. A call without a gem keeps the text it always had.
-        Layer("darbar", "" if gem is None else _darbar(darbar)),
+        Layer("darbar", _darbar(darbar)),
         Layer("gem", _gem(gem)),
-        # The text of a call without a gem is kept whole: that call's behaviour is
-        # finished, and a gem's wording has not been tried on a live call yet.
         Layer("written", _WRITTEN + _WRITTEN_RULES)
         if written
-        else Layer("spoken", (_CORTEX if gem is None else _SPOKEN) + _SPOKEN_RULES),
+        else Layer("spoken", _SPOKEN + _SPOKEN_RULES),
         Layer("tools", "" if not search else _WRITTEN_SEARCH_RULES if written else _SEARCH_RULES),
         Layer("model", model_needs),
         Layer("date", _TODAY.format(today=today)),
@@ -178,7 +164,7 @@ def instruction_layers(
 def instructions(
     *,
     darbar: str | None = None,
-    gem: GemConfig | None,
+    gem: GemConfig,
     search: bool,
     written: bool = False,
     model_needs: str,
@@ -204,10 +190,8 @@ def _darbar(darbar: str | None) -> str:
     return f"{text}\n\n" if text else ""
 
 
-def _gem(gem: GemConfig | None) -> str:
+def _gem(gem: GemConfig) -> str:
     """Who the gem is: its name, then its own instructions as its owner wrote them."""
-    if gem is None:
-        return ""
     # Space around the gem's own text is dropped, so the layers stay one blank line
     # apart. Everything between its first and last letter is sent as stored.
     own = gem.instructions.strip()

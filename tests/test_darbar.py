@@ -25,7 +25,7 @@ _BUILT_IN = (
 class _DocDBFake:
     """Holds the one Darbar document as a plain dict, as the real adapter would.
 
-    It counts reads, so a test can say a call without a gem never made one.
+    It counts reads, so a test can say how often a call read it.
     """
 
     def __init__(self) -> None:

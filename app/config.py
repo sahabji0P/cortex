@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     environment: Literal["local", "staging", "production"] = "local"
     debug: bool = True
 
-    # The model a voice conversation is held with unless the client asks for another:
+    # The model a gem answers with, in a call or in writing, when its config names none:
     # "6 Luna", "6.1 Terra" or "6.1 Sol" (OpenAI); "Haiku 5.5", "Sonnet 5.5" or "Opus 5.5"
     # (Anthropic). Its provider needs a key.
     voice_model: Literal[

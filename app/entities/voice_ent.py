@@ -157,10 +157,10 @@ class VoiceConversation:
         tts: CartesiaTTSAdapterClass,
         llm: LLM,
         search: ParallelAdapterClass,
+        gem: GemConfig,
+        darbar: str | None = None,
         model: ModelName = "6 Luna",
         speaks_first: bool = False,
-        gem: GemConfig | None = None,
-        darbar: str | None = None,
         clock: Clock = time.monotonic,
     ) -> None:
         self._stt = stt
@@ -185,9 +185,9 @@ class VoiceConversation:
         self._user_scripts: set[str] = set()
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
         # `llm` has to be the adapter of the provider that `model` belongs to.
-        # A gem is offered only the tools its config names. A name with no tool behind it
-        # here is passed over, so a config saved before a tool went still opens a call.
-        offers_search = search.configured and (gem is None or "web_search" in gem.tools)
+        # The gem is offered only the tools its config names. A name with no tool behind
+        # it here is passed over, so a config saved before a tool went still opens a call.
+        offers_search = search.configured and "web_search" in gem.tools
         self._tools = Toolbox(
             [web_search_tool(search), Tool(_CANCEL_TOOL, self._cancel_call)]
             if offers_search
@@ -576,25 +576,24 @@ class VoiceEntityClass:
 
     async def open_conversation(
         self,
-        model: ModelName | None = None,
+        gem: GemConfig,
         *,
         speaks_first: bool | None = None,
-        gem: GemConfig | None = None,
         darbar: str | None = None,
     ) -> VoiceConversation:
         """Start listening. The caller owns the conversation and must `close()` it.
 
-        `model` is the model to hold it with; left out, it is the gem's, and without a
-        gem or a model of the gem's, the configured one. With `speaks_first` the
-        assistant greets the user as soon as the conversation opens; left out, it does
-        if the gem says so, and otherwise waits for the user to speak. The gem also says
-        who the assistant is and which tools it may use. `darbar` is the Darbar text a gem
-        is told first, or None for the built-in one; it is kept for the whole
-        conversation. Raises `LookupError` if the model's provider has no key.
+        The conversation is with `gem`: it says who the assistant is, which tools it may
+        use, and which model answers, or the configured one if it names none. With
+        `speaks_first` the gem greets the user as soon as the conversation opens, or
+        waits for the user to speak; left out, the gem's config says which. `darbar` is
+        the Darbar text the gem is told first, or None for the built-in one; it is kept
+        for the whole conversation. Raises `LookupError` if the model's provider has no
+        key.
         """
-        model = model or (gem.model if gem is not None else None) or settings.voice_model
+        model = gem.model or settings.voice_model
         if speaks_first is None:
-            speaks_first = gem is not None and gem.speaks_first
+            speaks_first = gem.speaks_first
         llm: LLM = self._openai if is_openai(model) else self._anthropic
         if not llm.configured:
             # Said now, not as a failed reply after the user has spoken.
@@ -606,10 +605,10 @@ class VoiceEntityClass:
             tts=self._tts,
             llm=llm,
             search=self._search,
-            model=model,
-            speaks_first=speaks_first,
             gem=gem,
             darbar=darbar,
+            model=model,
+            speaks_first=speaks_first,
         )
 
 

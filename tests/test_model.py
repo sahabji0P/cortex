@@ -31,6 +31,7 @@ from app.entities.model import (
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
 from tests.test_voice_conversation import (
     _DELAY,
+    _GEM,
     _STT,
     _TTS,
     _Clock,
@@ -109,7 +110,7 @@ class _Claude:
 def _conversation(llm: _Claude, model: str = "Haiku 5.5", search: _Search | None = None):
     stt, tts, clock = _STT(), _TTS(), _Clock()
     conversation = VoiceConversation(
-        stt=stt, tts=tts, llm=llm, search=search or _Search(), model=model, clock=clock
+        stt=stt, tts=tts, llm=llm, search=search or _Search(), gem=_GEM, model=model, clock=clock
     )
     return conversation, stt, clock
 
@@ -329,7 +330,7 @@ def test_a_model_needs_the_adapter_of_its_own_provider() -> None:
 
 
 @pytest.mark.parametrize(
-    ("asked", "configured", "used", "provider"),
+    ("named", "configured", "used", "provider"),
     [
         (None, "6 Luna", "6 Luna", "openai"),
         (None, "Sonnet 5.5", "Sonnet 5.5", "anthropic"),
@@ -340,9 +341,9 @@ def test_a_model_needs_the_adapter_of_its_own_provider() -> None:
         ("Opus 5.5", "6 Luna", "Opus 5.5", "anthropic"),
     ],
 )
-async def test_a_conversation_is_opened_on_the_model_asked_for_or_the_configured_one(
+async def test_a_conversation_is_opened_on_the_gem_s_model_or_the_configured_one(
     monkeypatch: pytest.MonkeyPatch,
-    asked: str | None,
+    named: str | None,
     configured: str,
     used: str,
     provider: str,
@@ -359,7 +360,7 @@ async def test_a_conversation_is_opened_on_the_model_asked_for_or_the_configured
     adapters = _adapters(openai_key=True, anthropic_key=True)
     entity = _entity(adapters)
 
-    conversation = await entity.open_conversation(asked)
+    conversation = await entity.open_conversation(_GEM.model_copy(update={"model": named}))
     await conversation.close()
 
     assert built == [(adapters[provider], used)]
@@ -394,9 +395,9 @@ async def test_a_model_whose_provider_has_no_key_is_refused_when_the_conversatio
     entity = _entity(_adapters(openai_key=True, anthropic_key=False))
 
     with pytest.raises(LookupError, match="no Anthropic key is set"):
-        await entity.open_conversation("Opus 5.5")
+        await entity.open_conversation(_GEM.model_copy(update={"model": "Opus 5.5"}))
 
-    conversation = await entity.open_conversation("6.1 Terra")
+    conversation = await entity.open_conversation(_GEM.model_copy(update={"model": "6.1 Terra"}))
     await conversation.close()
 
 
