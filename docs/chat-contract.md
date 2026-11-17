@@ -127,7 +127,7 @@ What each event means is in the README, under the old socket's contract. On
   `call.failed`. The old socket made the app wait instead.
 - A client that stops reading its frames for ten seconds counts as gone: the socket is
   closed on it, which ends its call and cuts its replies.
-- Chat frames (`chat.send` and the `chat.*` frames back) are unchanged.
+- Calls changed nothing about chat frames (`chat.send` and the `chat.*` frames back).
 
 A `call.start` whose `model` or `first` is not offered gets `call.refused` with "unknown
 model or setting", not `error`. A `call.playback` that cannot be read, such as one with a
