@@ -9,6 +9,7 @@ connections open on the owner's paid account.
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -17,6 +18,7 @@ from bson import ObjectId
 from app.entities.call_ent import CallEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GEM_CONFIG_VERSION
+from app.entities.history import Added
 from app.entities.voice_ent import VoiceEvent
 from app.routers.link.service import LinkServiceV1Class
 from tests.test_chat import _Chat, _chat, _said
@@ -819,6 +821,104 @@ async def test_a_message_to_a_gem_in_a_call_gets_chat_error_and_the_call_carries
     assert "call.failed" not in socket.types()
     if not same_socket:
         await _close(writer, writer_linked)
+    await _close(socket, linked)
+
+
+async def test_a_call_start_for_a_gem_in_a_call_on_another_socket_is_refused() -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    other, other_linked = await _open(setup)
+
+    setup.start(other)
+    await other.until("call.refused")
+
+    assert other.frame("call.refused") == {"type": "call.refused", "text": "the gem is in a call"}
+    assert setup.voice.hung_up == 1  # the second call's speech was let go
+    assert conversation.closed == 0
+    assert socket.types() == ["link.ready", "call.ready"]
+    # Once the first call has ended, the gem can be called again.
+    socket.send(type="call.end")
+    await socket.until("call.ended")
+    setup.start(other)
+    await other.until("call.ready")
+    await _close(other, other_linked)
+    await _close(socket, linked)
+
+
+async def test_a_call_start_cuts_a_reply_being_written_and_opens_once_it_is_stored() -> None:
+    pause = asyncio.Event()
+    setup = await _setup([_delta("Once upon "), pause, _delta("a time."), _completed()])
+    socket, linked = await _open(setup)
+    stored_by_then: list[list[Any]] = []
+
+    socket.send(type="chat.send", gem=str(setup.gem.id), text="a story")
+    await socket.until("chat.text")
+    setup.start(socket)
+    await socket.until("call.ready")
+    stored_by_then.append(await setup.chat.stored())
+
+    assert socket.types() == ["link.ready", "chat.text", "chat.cut", "call.ready"]
+    assert socket.frame("chat.cut")["text"] == "Once upon…"
+    assert stored_by_then == [
+        [
+            {"role": "user", "content": "a story"},
+            {"role": "assistant", "content": "Once upon…"},
+        ]
+    ]
+    pause.set()
+    await _close(socket, linked)
+
+
+def _said_in_the_call(conversation: _Conversation, *, grew: bool = True) -> None:
+    """The conversation settles a turn and its reply, for the call to store.
+
+    Without `grew`, the call is not told, and stores them only as it ends.
+    """
+    now = datetime.now(UTC)
+    conversation.added += [
+        Added({"role": "user", "content": "hello"}, now),
+        Added({"role": "assistant", "content": "Hi."}, now),
+    ]
+    if grew:
+        conversation.grew.set()
+
+
+@pytest.mark.parametrize("when", ["during the call", "as it ends"])
+async def test_a_call_whose_conversation_cannot_be_stored_fails_and_says_so(when: str) -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+    setup.chat.docdb.breaks_after = 0
+
+    _said_in_the_call(conversation, grew=when == "during the call")
+    if when == "as it ends":
+        socket.send(type="call.end")
+    await socket.until("call.failed")
+
+    assert socket.frame("call.failed") == {
+        "type": "call.failed",
+        "text": "the conversation could not be stored",
+    }
+    assert conversation.closed == 1
+    assert await setup.chat.stored() == []
+    await _close(socket, linked)
+
+
+async def test_what_a_call_settles_is_stored_as_it_goes_and_the_call_carries_on() -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+    [conversation] = setup.voice.made
+
+    _said_in_the_call(conversation)
+    await _eventually(lambda: len(setup.chat.docdb.collections.get("ChatItems", [])) == 2)
+
+    assert await setup.chat.stored() == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi."},
+    ]
+    assert [d["mode"] for d in setup.chat.docdb.collections["ChatItems"]] == ["call", "call"]
+    assert "call.failed" not in socket.types()
     await _close(socket, linked)
 
 
