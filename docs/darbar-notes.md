@@ -17,7 +17,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 
 ## Decided
 
-- A gem is one entity with one context. Call or chat, it is the same context. No sessions.
+- A gem is one entity with one context. Call or chat, it is the same context. No sessions. Built: a call starts from the stored conversation and stores its turns.
 - Every gem has both call and chat.
 - Always a gem: there is no call without one. A call answers with the gem's model.
 - How a call behaves is closed, until we find something that makes it better.
@@ -35,7 +35,11 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - There is no other Darbar text: it is the environment instruction, and it stays editable.
 - The instructions do not depend on call or chat, or on the tools offered.
 - A new gem's instructions come filled in with the call and writing style rules. The user may change or remove them.
-- A line in the conversation says a call has started. For now a call starts empty, so it is the call's first line.
+- A line says where the mode changes: before a call's first turn after writing, and before the first written turn after a call. Written when the next turn needs it.
+- Every stored item says its mode, call or chat. Old items have none and are read as chat.
+- One rule for the user's turn, in a call and in writing: what comes before a reply gets through joins it.
+- One writer for a gem at a time, a call or a written reply. Chat to a gem in a call gets an error.
+- One set of late results per gem: told in the call if one is open, in writing otherwise.
 - Product questions are settled by trying them out with proper evals, not blindly.
 - Tools are the same in a call and in chat: the same tools, run the same way, by one copy of the code.
 - A tool call still running at a cut carries on in both. cancel_tool_call stops one, for any tool.
@@ -56,7 +60,6 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Homes and the Darbar are part of the memory design too: what is private to a gem, what is common.
 - Proactivity: gems calling or messaging first, routines. Comes with memory.
 - Gem to gem samvaad, and several gems in one call.
-- A call joined to the stored conversation, with the call-start line written wherever the mode changes.
 - Workers: a worker returns to its parent gem. A shared worker that is triggered is a new idea.
 - Vault: secrets per gem, and shared ones. The model never sees a secret.
 - Vault: a gem without a secret asks the gem that has it to do the job. The secret is not handed over.
@@ -72,6 +75,10 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Characters: animated raja and rani types, GIF or Rive.
 - Cost: the backend sends none yet.
 - Old text code (Project, Session, SessionTurn, the Agent SDK pipeline): keep or remove.
+- Which mode each message was in, in the history route's answer: on hold.
+- A user's turn that never gets a reply is lost: it is kept in memory only, never stored.
+- Two calls in a row: no line between them, so the gem is not told one ended.
+- A long conversation is sent whole at the start of every call. Trimming comes with Gyan Kosh.
 
 ## Learned from Docker Agent (read 2026-11-16, config version 16)
 

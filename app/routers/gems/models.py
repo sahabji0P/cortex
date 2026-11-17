@@ -83,6 +83,6 @@ class GemsModels:
                 at: datetime
 
             class Chat(BaseModel):
-                """A gem's written conversation so far, oldest first."""
+                """A gem's conversation so far, a call's turns included, oldest first."""
 
                 messages: list["GemsModels.V1.Output.ChatMessage"]

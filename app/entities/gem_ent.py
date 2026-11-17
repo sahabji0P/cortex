@@ -277,7 +277,7 @@ class GemEntityClass:
 
     def __init__(self, docdb: DocDBAdapterClass) -> None:
         self._docdb = docdb
-        # A gem's written conversation is deleted with it.
+        # A gem's conversation is deleted with it.
         self._conversations = ConversationStoreClass(docdb)
 
     async def create(

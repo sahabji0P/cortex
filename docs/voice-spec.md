@@ -1,7 +1,8 @@
 # Cortex voice: behaviour spec
 
 What a call does, and what the model is sent while it lasts. Written on 17 November 2026
-from the code on `main`. The picture that goes with it is
+from the code on `main`, and brought up to date on 18 November 2026, when a call became
+part of the gem's one stored conversation. The picture that goes with it is
 [`voice-context.excalidraw`](voice-context.excalidraw).
 
 This describes the code as it is. It proposes nothing. Where the project's notes have
@@ -48,8 +49,10 @@ mic ─▶ speech to text ─▶ conversation ─▶ model ─▶ text to speech
 - **Always with a gem.** (Enforced) Every call is with one gem, named when it opens. Its
   config says which model answers, which tools are offered and whether it speaks first.
   It is told the same instructions as in writing: the Darbar text, then who the gem is.
-- **One conversation per call.** (Enforced) It lives in memory for as long as the call
-  lasts. Nothing is saved, and nothing is loaded when a call starts.
+- **One conversation per gem.** (Enforced) A gem has one conversation, called or written
+  to. A call starts from it as it is stored, and stores what it settles as it goes
+  (see [Caching and persistence](#caching-and-persistence)). A written reply after the
+  call is made from all of it.
 - **Six models.** (Enforced) 6 Luna (the default), 6.1 Terra and 6.1 Sol from OpenAI;
   Haiku 5.5, Sonnet 5.5 and Opus 5.5 from Anthropic. The model is the gem's, or the
   configured one (`VOICE_MODEL`) when the gem names none. It does not change during the
@@ -57,12 +60,17 @@ mic ─▶ speech to text ─▶ conversation ─▶ model ─▶ text to speech
 - **Two tools, when a search key is set.** (Enforced) `web_search` and
   `cancel_tool_call`, when the gem's tools name `web_search`. Otherwise the model has no
   tools.
-- **The history opens with a line that says the user has called.** (Enforced) The
-  instructions are the same in a call and in writing, so this line is what tells the
-  model the conversation is spoken.
+- **A line says the user has called.** (Enforced) The instructions are the same in a
+  call and in writing, so a line in the history is what tells the model the conversation
+  is spoken. It follows the stored conversation when that ends in writing (or opens an
+  empty one). After a call ended in a call, there is no new line. The first written turn
+  after a call has a line of its own, saying the call has ended.
+- **One writer at a time.** (Enforced) While a call holds the gem, nothing is written to
+  it: a message gets `chat.error`, and another `call.start` for the gem is refused. A
+  reply being written when the call starts is cut, and the call opens once it is stored.
 - **Who speaks first.** (Enforced) The user, unless the call's gem speaks first or
-  `call.start` asks for `first: "assistant"`. Then that line is followed by a note
-  asking for a greeting.
+  `call.start` asks for `first: "assistant"`. Then the history so far is followed by a
+  note asking for a greeting.
 
 ## Input path
 
@@ -72,7 +80,9 @@ Speech reaches the model as text only.
    the user starts speaking and when they stop. Those two moments drive everything else.
 2. **A turn stays open until it has been answered.** (Enforced) A user turn joins the
    history only once some of the reply to it has been heard. Words that arrive before
-   then join the same turn on a new line. There is no time limit on this.
+   then join the same turn on a new line. There is no time limit on this. Writing keeps
+   the same rule, by the same code: a message sent before any of the reply to the one
+   before it got through joins it. A turn still open when the call ends is not stored.
 3. **A stray fragment is dropped.** (Enforced) One or two words, in a writing system this
    user has not spoken in during the call, that follow a finished sentence within 3
    seconds, are treated as noise and never reach the model. The same applies to such a
@@ -157,6 +167,8 @@ code does it (`app/entities/late_results.py`).
 | The user speaks while the search is running | The call gets a placeholder result, written by the server. The user's turn follows. The call carries on |
 | The late result arrives | At the next quiet moment: a call written by the server that names the original call, then the real result. The model then replies with no user turn before it |
 | The model is asked to drop it | It calls `cancel_tool_call` with the original call's id. The result is "Cancelled." |
+| A search left running by a written reply comes back during the call | The same as a late result of the call's own: the gem has one set of calls that outlive their replies |
+| The call ends while a search runs | The reply is stored as heard, the call with its placeholder. The search carries on, and its result is told in writing |
 
 - **A quiet moment** is when the reply in progress has been produced and played to its
   end, and the user is not speaking. A result that comes back sooner waits for it.
@@ -174,7 +186,8 @@ code does it (`app/entities/late_results.py`).
   is. One that finished in the instant before gets its real result.
 - **A reply may search as often as the model needs.** There is no cap on tool rounds.
 
-Message sequence, from the tests' stand-in services, after the line that opens the call:
+Message sequence, from the tests' stand-in services, in an empty conversation, after the
+line that says the user has called:
 
 1. user: "what's the weather"
 2. call: `web_search`, id `call_1`, `{"query": "weather in Pune"}`
@@ -201,7 +214,7 @@ Every request to the conversation model is built the same way, in this order (En
 | --- | --- | --- |
 | 1. Instructions | The text under [The instructions](#the-instructions) | No |
 | 2. Tools | `web_search` and `cancel_tool_call`, or none | No |
-| 3. History | Every finished item, oldest first | Only grows at its end |
+| 3. History | The gem's stored conversation, then every item the call has finished, oldest first | Only grows at its end |
 | 4. The open user turn | The turn no reply has been heard to yet | Can gain a line |
 | 5. This reply so far | On the second and later calls of one reply: what was said before the search, the call, its result | Grows within the reply |
 
@@ -230,8 +243,9 @@ OpenAI takes the items as they are. For Anthropic they are translated on every r
 | Its result | `function_call_output` | user message, `tool_result` block |
 
 For Anthropic, neighbouring items of one side are merged into one message, and the
-instructions gain one paragraph saying what the `<note>` tags mean. The line that opens
-a call is such a note, so it shares the first user message with the user's first words.
+instructions gain one paragraph saying what the `<note>` tags mean. The line that says
+the user has called is such a note, so it shares a user message with the user's first
+words in the call (and with a tool result before it, if the written part ended in one).
 
 ## Caching and persistence
 
@@ -246,7 +260,17 @@ a call is such a note, so it shares the first user message with the user's first
 - **Switching thinking on costs a cache miss**, according to the README's live runs. This
   is the "little thinking while a search has no result yet" above, and the reason it is
   not done on Anthropic.
-- **Nothing is persisted.** (Enforced) When the call ends, the history is gone.
+- **What the call settles is stored.** (Enforced) Each item the call adds to the history
+  is stored after the gem's conversation, in order, as it is added: the user's turns,
+  the replies as heard, tool calls and results, late results, and our lines. A line of
+  ours waits for the first item that follows it, so a call in which nothing was said
+  stores nothing. The open user turn and a reply that can still be cut are not stored.
+  All of it is stored before the call's last frame. If it cannot be, the call fails with
+  "the conversation could not be stored". Each stored item is marked `call`.
+- **The next request after a call starts with what the call stored.** (Enforced) What a
+  call sent the model and never settled (an open turn, an unheard greeting with its
+  line) is not stored, so the request after the call does not start with it. It is the
+  one place the history does not only grow.
 
 ## The instructions
 
@@ -275,7 +299,7 @@ set one, it is the built-in text. It is a draft the owner has yet to read:
 The user keeps a few assistants of their own, which they call gems. Each gem has its own name and its own work. The place they share is called the Darbar.
 
 The user reaches you in one conversation, by calling you or by writing to you.
-- A call is a live spoken conversation. Everything you write is read aloud by a text-to-speech voice. The user's words come from speech recognition and may contain mistakes: go with the likely meaning, and ask when it is unclear. A line in the conversation says when a call starts.
+- A call is a live spoken conversation. Everything you write is read aloud by a text-to-speech voice. The user's words come from speech recognition and may contain mistakes: go with the likely meaning, and ask when it is unclear. A line in the conversation says when a call starts and when it ends.
 - Outside a call the conversation is written: the user reads what you write in a chat window.
 - The user can interrupt you at any time, by speaking in a call or by sending a new message in writing. An earlier reply of yours that ends in "…" was cut off at that point. The user heard or read nothing after it, so do not assume they know the rest. Never end a reply with "…" yourself.
 - A tool call that is still running when the user interrupts carries on in the background. Do not make the same call again: say it is still coming, and answer whatever else they asked. Only if they say they no longer want it, call cancel_tool_call: nothing is cancelled unless you make that call. The result reaches you by itself, as a call with "deferred_result_for" in its arguments. You did not make that call: it only delivers the late result. When it arrives, tell the user what it found straight away, without being asked, unless they have said they no longer want it. If they say something else before you have told them, answer that and then tell them. If you have already told them the same thing, do not repeat it: say in a few words that the result confirms it.
@@ -324,8 +348,10 @@ Everything in the history that neither the user nor the model wrote (all Enforce
 
 | What | Shape | When | Text |
 | --- | --- | --- | --- |
-| Call-start line | Note, first item | Every call | "The user has called you. From here on the conversation is spoken." |
-| Greeting note | Note, after the call-start line | The call opens with the assistant speaking first | "The call has just connected and the user has not said anything yet. Greet them in one short sentence and ask what you can do for them." |
+| Call-start line | Note, after the stored conversation | A call whose stored conversation ends in writing, or is empty | "The user has called you. From here on the conversation is spoken." |
+| Call-ended line | Note, written by chat | The first written turn after a call | "The call has ended. From here on the conversation is written." |
+| Greeting note | Note, after the stored conversation and the call-start line | The call opens with the assistant speaking first | "The call has just connected and the user has not said anything yet. Greet them in one short sentence and ask what you can do for them." |
+| Lost stub | A call written by the server, then its result | A placeholder whose search was lost to a restart, when the call opens | "This call was lost before it finished, and its result will not arrive. Make it again if it is still needed." |
 | Cut mark | The end of a reply's text | A reply was cut part-way | "…" |
 | No-words note | Note, after the cut reply | A turn with no words cut a reply the user was hearing | "The user made a sound there, with no words in it." |
 | Placeholder result | The result of the model's own call | A tool call was still running when the user spoke | "Still running in the background, under call_id {call_id}. [...]" |
@@ -366,6 +392,17 @@ A fourth, added on 16 November 2026:
   the call stays silent until the user speaks. Found while writing this, by running it.
 - **An unused event.** The model layer still reports that a tool call has started
   (`CallStarted`). Nothing uses it since the server stopped speaking before a search.
+- **What a call never settled is lost.** A turn the user was still speaking when the
+  call ended, or one no reply to was heard, is not stored, and neither is a greeting the
+  user did not hear. The model was sent them, so the next request does not start with
+  the whole of the one before it.
+- **Two calls in a row have no line between them.** The model is not told that one call
+  ended and another began.
+- **A long history is sent whole.** A call now starts from everything stored, so its
+  first request is as long as the gem's whole conversation. Nothing is trimmed.
+- **One context with both speaking and writing in it has no recorded live run.** Whether
+  a gem keeps to its call rules after a written stretch, and to its writing rules after
+  a call, is to be tried out.
 
 ## Where the code is
 
@@ -375,8 +412,13 @@ A fourth, added on 16 November 2026:
   call and for chat.
 - `app/entities/voice_speech.py`: speaking, and working out what was heard.
 - `app/entities/model.py`: the two providers behind one interface.
-- `app/entities/call_ent.py`: opening a call.
+- `app/entities/call_ent.py`: opening a call, and storing what it adds.
+- `app/entities/conversation_ent.py`: what is kept of each gem's one conversation: its
+  writer, its late results, and loading and adding to what is stored.
+- `app/entities/history.py`: the user's turn, the lines where the mode changes, and what
+  is stored when.
 - `app/routers/link/`: the standing socket, which carries the call.
 - `app/routers/voice/`: the model list.
 - `tests/test_voice_conversation.py` and `tests/test_model.py`: the tests for what
   goes into the history and how it is sent to each provider.
+  `tests/test_one_conversation.py`: a call and chat on one stored conversation.

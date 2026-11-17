@@ -9,9 +9,10 @@ tells it. It is then added after everything else, as a call we write ourselves (
 that names the real call) followed by the result. The model can stop a call still
 running, or a result not told yet, with `cancel_tool_call`.
 
-A conversation holds one `LateResults`. What is its own is when a waiting result is told,
-and how the reply about it is delivered: a call tells it once nothing is being said or
-played, and chat once no reply is being written to the gem.
+A gem holds one `LateResults`, whether its calls were made in a call or in writing (see
+`conversation_ent.py`). What is the call's or chat's own is when a waiting result is
+told, and how the reply about it is delivered: a call tells it once nothing is being
+said or played, and chat once no reply is being written to the gem and no call holds it.
 """
 
 import asyncio

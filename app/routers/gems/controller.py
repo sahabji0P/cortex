@@ -28,7 +28,7 @@ async def get_gem(gem_id: str, service: GemsServiceRegistry.V1) -> GemsModels.V1
 
 @router.get("/{gem_id}/chat")
 async def get_chat(gem_id: str, service: GemsServiceRegistry.V1) -> GemsModels.V1.Output.Chat:
-    """The gem's written conversation so far, oldest first, for showing on screen."""
+    """The gem's conversation so far, calls included, oldest first, for showing on screen."""
     return await service.get_chat(gem_id)
 
 
