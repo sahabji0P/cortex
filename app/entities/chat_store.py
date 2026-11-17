@@ -4,7 +4,8 @@ Chat store entity: each gem's written conversation, kept in the `ChatItems` coll
 The conversation is kept as the model is sent it: one document per item of the history
 (a message, a tool call, or a call's result), in order. It is only ever added to. That
 is what lets the database be the truth: every reply is made from what is stored. All
-that is kept in memory between messages is the searches still running (see `chat_ent.py`).
+that is kept in memory between messages is the tool calls still running (see
+`chat_ent.py`).
 
 A gem's conversation goes when the gem does (see `GemEntityClass.delete`).
 """
@@ -19,6 +20,7 @@ from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.core.times import UtcDatetime
+from app.entities.loop import ResultMark
 from app.entities.model import Item
 
 __all__ = ["ChatItem", "ChatStoreClass"]
@@ -41,6 +43,10 @@ class ChatItem(BaseModel):
     item: Item
     # For a tool call, what its `chat.tool` frame said, if it said anything.
     shown: str | None = None
+    # For a call's result, what it stands for beyond its text: the placeholder of a call
+    # left running, or the answer of a `cancel_tool_call` that stopped one. What is
+    # stored is read by this, never by the result's wording.
+    mark: ResultMark | None = None
 
 
 class ChatStoreClass:

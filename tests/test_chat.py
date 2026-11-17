@@ -16,6 +16,7 @@ from bson import ObjectId
 from pydantic import BaseModel
 
 from app.core.errors import NotFoundError
+from app.entities import chat_ent, late_results
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
 from app.entities.chat_store import ChatItem, ChatStoreClass
@@ -1769,6 +1770,48 @@ async def test_a_search_that_was_cancelled_or_told_is_not_lost(how: str) -> None
     await _close(socket, linked)
 
 
+@pytest.mark.parametrize("how", ["lost", "cancelled"])
+async def test_rewording_a_result_does_not_change_which_stored_calls_are_lost(
+    how: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # What is stored is read by the marks stored with it, never by its wording.
+    searches = _Searches(_WEATHER)
+    cancel = _cancel_call("call_9", "call_1")
+    setup = await _chat(
+        _looks(),
+        *([[_starts(cancel), _completed(cancel)], _said("Stopped.")] if how == "cancelled" else []),
+        *([_said("Noon.")] if how == "lost" else []),
+        search=searches,
+    )
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    await _close(socket, linked)
+    before = await setup.stored()
+
+    # The wording of the result each case turns on is changed, wherever it is: in its own
+    # module, and in any that imports it.
+    name, reworded = (
+        ("PLACEHOLDER", "Reworded: {call_id} is still going.")
+        if how == "lost"
+        else ("CANCELLED", "Reworded: stopped.")
+    )
+    for module in (late_results, chat_ent):
+        monkeypatch.setattr(module, name, reworded, False)
+    later = setup.again()
+    setup.llm.then(_said("Hi."))
+    socket, linked = await _open(later.service())
+    socket.send(later.gem.id, "hello")
+    await socket.until("chat.done")
+
+    added = (await later.stored())[len(before) :]
+    if how == "lost":
+        assert _kinds(added) == ["function_call", "function_call_output", "user", "assistant"]
+        assert _stub_of(added[0]) == "call_1" and added[1]["output"] == _LOST
+    else:
+        assert _kinds(added) == ["user", "assistant"]
+    await _close(socket, linked)
+
+
 async def test_a_reply_about_a_result_that_fails_to_begin_ends_in_chat_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1865,21 +1908,27 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
     # And a search lost to a restart, closed before a message.
     await setup.store.add(
         [
-            ChatItem(gem_id=setup.gem.id, place=place, at=_NOW, item=item)
-            for place, item in enumerate(
+            ChatItem(gem_id=setup.gem.id, place=place, at=_NOW, item=item, mark=mark)
+            for place, (item, mark) in enumerate(
                 [
-                    {"role": "user", "content": "and Delhi?"},
-                    {
-                        "type": "function_call",
-                        "call_id": "toolu_2",
-                        "name": "web_search",
-                        "arguments": json.dumps({"query": "Delhi weather"}),
-                    },
-                    {
-                        "type": "function_call_output",
-                        "call_id": "toolu_2",
-                        "output": _placeholder("toolu_2"),
-                    },
+                    ({"role": "user", "content": "and Delhi?"}, None),
+                    (
+                        {
+                            "type": "function_call",
+                            "call_id": "toolu_2",
+                            "name": "web_search",
+                            "arguments": json.dumps({"query": "Delhi weather"}),
+                        },
+                        None,
+                    ),
+                    (
+                        {
+                            "type": "function_call_output",
+                            "call_id": "toolu_2",
+                            "output": _placeholder("toolu_2"),
+                        },
+                        "placeholder",
+                    ),
                 ],
                 start=len(await setup.stored()),
             )

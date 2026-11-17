@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from app.entities.late_results import LateResults
-from app.entities.loop import CUT_MARK, Reply, RoundInput, ToolCall, run_reply
+from app.entities.loop import CUT_MARK, Reply, ResultMark, RoundInput, ToolCall, run_reply
 from app.entities.model import Item, Model
 from app.entities.tools import Toolbox
 
@@ -67,6 +67,8 @@ class Added:
     at: datetime
     # For a tool call, the text of its `tool.call` event, if it had one.
     shown: str | None = None
+    # For a call's result, what it stands for beyond its text (see `ResultMark`).
+    mark: ResultMark | None = None
 
 
 class _Passage:
@@ -263,10 +265,12 @@ class WrittenConversation:
             if self._open is not None:
                 self._add(Added(self._open, self._open_at))
             for item in items:
-                if "type" in item and item["type"] == "function_call":
+                if "type" not in item:
+                    self._add(Added(item, now))
+                elif item["type"] == "function_call":
                     self._add(Added(item, now, shown=shown(calls[item["call_id"]])))
                 else:
-                    self._add(Added(item, now))
+                    self._add(Added(item, now, mark=calls[item["call_id"]].mark))
             kept = " ".join(item["content"] for item in items if "role" in item)
             if whole:
                 return WrittenEvent("done", kept)

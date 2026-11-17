@@ -20,8 +20,9 @@ A tool call outlives a reply that is cut, as in a call, and by the same code (se
 message is answered first. When the call finishes, at the next moment no reply is being
 written to that gem, its result is added to the stored conversation as a stub call
 followed by the result, and the gem tells the user about it in a reply of its own, sent
-to the socket that sent the latest message to it. Which stub delivered which call, and
-which calls were cancelled, are read from the stored conversation.
+to the socket that sent the latest message to it. Which stub delivered which call is read
+from the stub's arguments, and which results are placeholders and which cancels stopped
+a call, from the marks stored with them.
 
 Running calls live in this process's memory, so a restart loses them. A placeholder whose
 call is gone is closed with a stub saying so, before the next reply is made.
@@ -50,15 +51,7 @@ from app.entities.chat_store import ChatItem, ChatStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.instructions import instructions
-from app.entities.late_results import (
-    CANCEL_TOOL,
-    CANCELLED,
-    PLACEHOLDER,
-    LateResult,
-    LateResults,
-    delivers,
-    late_stub,
-)
+from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
 from app.entities.model import LLM, Item, ModelName, is_openai, model_for
 from app.entities.tools import Tool, Toolbox, web_search_tool
@@ -355,6 +348,7 @@ class ChatEntityClass:
                         at=added.at,
                         item=added.item,
                         shown=added.shown,
+                        mark=added.mark,
                     )
                     for offset, added in enumerate(conversation.added)
                 ]
@@ -508,7 +502,8 @@ class ChatEntityClass:
         """A stub for each call lost to a restart, closing its placeholder.
 
         Lost is a placeholder whose call is not running or waiting here (or being `told`
-        now), that no stub has delivered, and that no `cancel_tool_call` stopped.
+        now), that no stub has delivered, and that no `cancel_tool_call` stopped. Each is
+        known by the mark stored with its result, never by the result's wording.
         """
         state = self._outliving.get(key)
         here = {late.call.call_id for late in told}
@@ -521,16 +516,14 @@ class ChatEntityClass:
         delivered = {original for item in items if (original := delivers(item))}
         placeholders: list[str] = []
         cancelled: set[str | None] = set()
-        for item in items:
+        for entry in stored:
+            item = entry.item
             if "type" not in item or item["type"] != "function_call_output":
                 continue
-            call_id = item["call_id"]
-            if item["output"] == PLACEHOLDER.format(call_id=call_id):
-                placeholders.append(call_id)
-            elif item["output"] == CANCELLED and call_id in calls:
-                cancel = calls[call_id]
-                if cancel["name"] == CANCEL_TOOL.name:
-                    cancelled.add(_named(cancel["arguments"]))
+            if entry.mark == "placeholder":
+                placeholders.append(item["call_id"])
+            elif entry.mark == "cancelled" and item["call_id"] in calls:
+                cancelled.add(_named(calls[item["call_id"]]["arguments"]))
         lost: list[ToolCall] = []
         for call_id in placeholders:
             if call_id not in calls or call_id in here or call_id in delivered:

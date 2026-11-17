@@ -113,15 +113,20 @@ class LateResults:
 
         A call still running is not stopped: its result is the placeholder, and its real
         result waits here once it comes. One that finished in the instant before keeps
-        its own result: nothing is late.
+        its own result: nothing is late. Its `mark` says what its result stands for.
         """
         if call.output is not None:
+            # Our own answer, made in this process: the wording is not read from anything
+            # stored.
+            if call.name == CANCEL_TOOL.name and call.output == CANCELLED:
+                call.mark = "cancelled"
             return False
         running = call.running
         if running is None or running.done():
             call.output = running.result() if running and not running.cancelled() else ""
             return False
         call.output = PLACEHOLDER.format(call_id=call.call_id)
+        call.mark = "placeholder"
         self._running[call.call_id] = call
         running.add_done_callback(functools.partial(self._finished, call))
         return True

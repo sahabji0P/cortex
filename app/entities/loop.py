@@ -28,7 +28,7 @@ import asyncio
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple, Protocol
+from typing import Literal, NamedTuple, Protocol
 
 from app.entities.model import Item, Model, RoundDone, TextDelta
 from app.entities.tools import Tool, Toolbox
@@ -38,6 +38,7 @@ __all__ = [
     "Delivered",
     "Part",
     "Reply",
+    "ResultMark",
     "RoundInput",
     "Surface",
     "ToolCall",
@@ -81,6 +82,12 @@ class Surface(Protocol):
         ...
 
 
+# What a call's result stands for, beyond its text: the placeholder a call left running
+# was given, or the answer of a `cancel_tool_call` that stopped such a call. It is kept
+# with the result, so that a result is never recognised by its wording.
+type ResultMark = Literal["placeholder", "cancelled"]
+
+
 @dataclass(slots=True)
 class ToolCall:
     call_id: str
@@ -90,6 +97,7 @@ class ToolCall:
     tool: Tool | None = None
     output: str | None = None  # None while the tool is still running
     running: asyncio.Task[str] | None = None
+    mark: ResultMark | None = None
 
     def items(self) -> list[Item]:
         return [

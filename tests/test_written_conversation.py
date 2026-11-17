@@ -265,6 +265,8 @@ async def test_a_tool_still_running_at_a_cut_is_left_running_with_the_placeholde
     assert look_up.ended == ["finished"]
     # Delivering the result is the caller's job: the history is not touched.
     assert [entry.item for entry in conversation.added][3]["output"] == _PLACEHOLDER_OF_CALL_1
+    # What it stands for is handed back with it, for whoever stores it.
+    assert conversation.added[3].mark == "placeholder"
 
 
 async def test_a_tool_that_finished_before_the_cut_is_not_handed_back() -> None:
