@@ -2129,3 +2129,15 @@ async def test_a_search_running_when_its_gem_is_deleted_is_stopped() -> None:
     assert searches.cancelled == [_WEATHER]
     assert setup.docdb.collections.get("ChatItems", []) == []
     assert setup.chat._outliving == {}
+
+
+async def test_a_client_that_goes_before_its_message_is_answered_is_not_kept() -> None:
+    setup = await _chat(_said("Hi."))
+    socket, linked = await _open(setup.service())
+
+    socket.send(setup.gem.id, "hello")
+    await _close(socket, linked)
+    await _settle()
+
+    assert setup.chat._outliving == {}
+    assert _kinds(await setup.stored()) == ["user"]

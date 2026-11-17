@@ -263,8 +263,11 @@ class ChatEntityClass:
                 return
             # Noted only for a gem that is there, so an id that names none keeps nothing.
             # Messages are answered in the order they came, so the last to note is the
-            # latest.
-            self._state(key).latest = (gem_id, deliver)
+            # latest. One that was cut is not noted: a newer message notes its own
+            # client, and a client that has gone (which cuts its replies) is not to be
+            # written to again.
+            if not turn.was_cut:
+                self._state(key).latest = (gem_id, deliver)
             stored = await self._store.load(ready.gem.id)
             history = [item.item for item in stored]
             # A search lost to a restart is closed before the new message.
