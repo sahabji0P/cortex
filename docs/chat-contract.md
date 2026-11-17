@@ -1,23 +1,25 @@
-# Chat and the Darbar text: the contract with the app
+# The standing socket: the contract with the app
 
-This is the one place that says how the app and the backend talk about written chat and
-the Darbar text. The backend is built to it and so is the app. Change it here first.
+This is the one place that says how the app and the backend talk over the standing
+socket: written chat, calls, and the Darbar text that goes with them. The backend is
+built to it and so is the app. Change it here first.
 
 The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
 
 ## What stays as it is
 
-- A call: its own WebSocket at `/v1/voice/converse`, opened per call. Nothing about it
-  changes here. It moves onto the standing socket in a later step.
 - Gems: `/v1/gems`, over plain HTTP.
+- The old call socket, `/v1/voice/converse`, opened per call. It works exactly as it did,
+  with the same query, frames and close codes, until the app has moved its calls onto
+  the standing socket. Then it will be removed.
 
 Plain HTTP is for saving and loading things. The standing socket is for what is live.
 
 ## The standing socket: `/v1/link`
 
 The app opens one WebSocket to `/v1/link` when it starts and keeps it open. If it drops,
-the app opens it again. Today it carries written chat. Every frame is a JSON text frame
-with a `type`.
+the app opens it again. It carries written chat and calls. Every text frame is JSON with
+a `type`. Binary frames are a call's audio.
 
 ### The app sends
 
@@ -29,13 +31,13 @@ with a `type`.
 
 | `type` | Fields | Meaning |
 | --- | --- | --- |
-| `link.ready` | `version` (1) | Sent once, as soon as the socket is open |
+| `link.ready` | `version` (2) | Sent once, as soon as the socket is open. Version 2 carries calls |
 | `chat.text` | `gem`, `text` | The next piece of the reply, as it is written |
 | `chat.tool` | `gem`, `text` | The gem is using a tool. `text` says what, such as what a search looks up |
 | `chat.done` | `gem`, `text` | The reply is complete. `text` is the whole reply as it is kept: its stretches of text, joined by a space |
 | `chat.cut` | `gem`, `text` | The reply was cut off by a new message. `text` is what is kept of it: what was sent, ending in "…". If it was cut while a tool was running, it is the text before the tool, whole. If nothing is kept, it is just "…" |
 | `chat.error` | `gem`, `text` | No reply can be made, or the reply failed: the gem is not there, its model has no key, or the model call failed. `text` is the reason. What was sent before a failure is kept, ending in "…" |
-| `error` | `text` | A frame the backend could not read, or a message that is blank or longer than 20,000 characters. Nothing is sent to the gem and no running reply is cut. The socket stays open |
+| `error` | `text` | A frame the backend could not read (not JSON, or a `type` it does not know), a message that is blank or longer than 20,000 characters, or a `call.start` while a call is open. Nothing is sent to the gem, no running reply is cut, and a running call carries on. The socket stays open |
 
 One reply at a time for each gem, whichever socket asked. A `chat.send` that is accepted
 gets `chat.text` and `chat.tool` frames in the order they happen, then exactly one of
@@ -53,6 +55,58 @@ message and what was sent of the reply are kept.
 A reply is sent to the socket that asked for it. Another socket open on the same gem is
 not told: it reads the history again. If that socket closes while a reply is
 being written, the reply is cut, as if a new message had arrived.
+
+## Calls
+
+A call goes over the same socket. Its audio is binary frames; everything else is JSON
+text frames like the rest.
+
+### The app sends
+
+| Frame | Fields | Meaning |
+| --- | --- | --- |
+| `call.start` (JSON) | `gem` (optional gem id), `model` (optional, a name from `GET /v1/voice/models`), `first` (optional, `user` or `assistant`) | Open a call. The three fields mean exactly what `?gem=`, `?model=` and `?first=` mean on the old socket, including that a `model` or `first` that is sent wins over the gem's and one left out leaves the gem's |
+| binary | raw 16-bit mono PCM at 16 kHz, about 100 ms a frame | Mic audio for the open call. Audio sent after `call.start` and before `call.ready` is kept and fed in order once the call is open: none is lost. A binary frame when no call is open or opening is dropped without an answer |
+| `call.playback` (JSON) | `delay` (seconds, >= 0) | The sound device's delay, as `playback` on the old socket |
+| `call.end` (JSON) | none | Hang up |
+
+### The backend sends
+
+| Frame | Fields | Meaning |
+| --- | --- | --- |
+| `call.ready` (JSON) | none | The call is open |
+| binary | raw 16-bit mono PCM at 24 kHz | Speech audio of the open call |
+| `call.user.partial`, `call.user.final`, `call.assistant.delta`, `call.assistant.done`, `call.tool.call`, `call.interrupt`, `call.error` (JSON) | `text` | Each is a `VoiceEvent` with `call.` put before its type; `text` is unchanged. `call.error` is something that failed inside a call that carries on, as `error` was |
+| `call.ended` (JSON) | `text` | The call is over: the app hung up, or the conversation ended by itself. `text` is empty |
+| `call.refused` (JSON) | `text` (the reason) | The call was not opened because of what was asked. This replaces close code 1008: unknown gem, an id that is not an id, a model or setting that is not offered, a model whose provider has no key. Same reasons in words as today |
+| `call.failed` (JSON) | `text` (the reason) | The call could not be opened, or broke, through a fault on the backend's side. This replaces close code 1011: the gem's config cannot be read, speech services unavailable, a relay failure mid-call |
+
+What each event means is in the README, under the old socket's contract. On
+`call.interrupt`, stop playback and drop any audio not yet played.
+
+### Rules
+
+- One call at a time on a socket. Binary frames carry no tag: they belong to that
+  socket's one call.
+- A `call.start` that is accepted is followed by either `call.ready`, then events and
+  audio in the order the conversation produced them, then exactly one of `call.ended` or
+  `call.failed`; or, with no `call.ready`, exactly one of `call.refused` or
+  `call.failed`. After that frame nothing more is sent for that call, binary included,
+  and a new `call.start` may be sent.
+- The socket stays open through all of it. A refused or failed call never closes the
+  link, and never disturbs a chat reply being written on it. A failed chat reply never
+  disturbs a call.
+- A `call.start` while a call is open or opening on this socket gets the general
+  `{"type": "error", "text": ...}` frame and the running call carries on. `call.end` and
+  `call.playback` with no call are ignored. A `call.start` sent right after a `call.end`
+  is accepted, and its frames come after the first call's `call.ended`.
+- A `call.end` while the call is still opening stops the opening and gets `call.ended`.
+- The link closing ends its call, as it cuts its chat replies.
+- Chat frames (`chat.send` and the `chat.*` frames back) are unchanged.
+
+A `call.start` whose `model` or `first` is not offered gets `call.refused` with "unknown
+model or setting", not `error`. A `call.playback` that cannot be read, such as one with a
+negative delay, gets `error`.
 
 ## What a gem remembers of a chat
 

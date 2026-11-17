@@ -72,7 +72,7 @@ Making a reply is not particular to a call either. The loop in [`app/entities/lo
 
 ## Chat
 
-A gem can be written to as well as called. The app keeps one WebSocket open to `/v1/link`, and chat goes over it; the frames are in [`docs/chat-contract.md`](docs/chat-contract.md), which is the contract with the app. In short: the app sends `chat.send` with a gem's id and the text, and gets back `chat.text` and `chat.tool` frames as the reply is written, then one of `chat.done`, `chat.cut` or `chat.error`. A frame that cannot be read gets `error`, and the socket stays open.
+A gem can be written to as well as called. The app keeps one WebSocket open to `/v1/link`, and chat goes over it, as do calls (see [The WebSocket contract](#the-websocket-contract)); the frames are in [`docs/chat-contract.md`](docs/chat-contract.md), which is the contract with the app. In short: the app sends `chat.send` with a gem's id and the text, and gets back `chat.text` and `chat.tool` frames as the reply is written, then one of `chat.done`, `chat.cut` or `chat.error`. A frame that cannot be read gets `error`, and the socket stays open.
 
 **The database is the truth, not the connection.** Every message is answered from what is stored: the gem's config and the Darbar text are loaded as they are now, its written conversation so far is loaded, the instructions are built, one reply is made by the loop, and then what the user wrote and what was delivered of the reply are added to the `ChatItems` collection, before the reply's last frame is sent. Nothing about a gem's conversation is kept in memory between messages except the reply in progress. So a changed gem applies from the next message, two windows on one gem cannot drift apart, and a dropped connection loses nothing: a socket that closes cuts its replies, and they are stored as cut.
 
@@ -100,11 +100,13 @@ uv run uvicorn app.main:app --reload
 
 Open <http://127.0.0.1:8000/v1/voice/test>, press **Start talking**, and allow the mic. Pick a provider and a model first if you want one other than the default, and tick **Cortex speaks first** to be greeted. This is a one-file test page, not a product UI. Use headphones if Cortex cuts itself off, which means the mic is picking up the speakers.
 
-With `?gem=<id>` in the page's address the call is with that gem, and a chat box below it writes to the gem over `/v1/link`, showing the conversation stored so far.
+The page opens one socket to `/v1/link` as it loads, as the app does, and holds its call over it. With `?gem=<id>` in the page's address the call is with that gem, and a chat box below it writes to the gem over the same socket, showing the conversation stored so far.
 
 ## The WebSocket contract
 
-`WS /v1/voice/converse`
+A call goes over the standing socket, `WS /v1/link`, which carries chat too. The app sends `call.start` (with the `gem`, `model` and `first` below), mic audio as binary frames, `call.playback` and `call.end`. It gets `call.ready`, speech as binary frames, the events below with `call.` put before their type, and one last frame: `call.ended`, `call.refused` or `call.failed`. The last two take the place of the old socket's close codes 1008 and 1011, with the same reasons in words. The socket stays open through all of it. The frames and their rules are in [`docs/chat-contract.md`](docs/chat-contract.md).
+
+The old call socket, `WS /v1/voice/converse`, still works exactly as below, until the desktop app has moved its calls onto `/v1/link`. Then it will be removed. Both open a call the same way, in [`app/entities/call_ent.py`](app/entities/call_ent.py).
 
 | Query parameter | Meaning |
 | --- | --- |
@@ -182,8 +184,8 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 app/
   adapters/    one file per outside service; the only place an SDK is called
                openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
-  entities/    the logic: loop (making one reply, on any surface), voice_ent and voice_speech (the cascade), written_ent (a written conversation), chat_ent (written chat with the gems, made from what is stored), chat_store (each gem's written conversation in the database), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), gem_ent (a gem's config), darbar_ent (the Darbar text every gem is told first), user_ent
-  routers/     HTTP and WebSocket endpoints: voice, gems, darbar, link (the standing socket, which carries chat), user
+  entities/    the logic: loop (making one reply, on any surface), voice_ent and voice_speech (the cascade), written_ent (a written conversation), chat_ent (written chat with the gems, made from what is stored), chat_store (each gem's written conversation in the database), call_ent (opening a call, for either socket), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), gem_ent (a gem's config), darbar_ent (the Darbar text every gem is told first), user_ent
+  routers/     HTTP and WebSocket endpoints: voice (the model list, the test page and the old call socket), gems, darbar, link (the standing socket, which carries chat and calls), user
 ```
 
 Also still present from earlier experiments: user registration and login (`/v1/users`), kept because a login will be needed.

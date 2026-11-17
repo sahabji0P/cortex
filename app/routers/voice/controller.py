@@ -15,6 +15,9 @@ _TEST_PAGE = Path(__file__).parent / "test_page.html"
 async def converse(websocket: WebSocket, service: VoiceServiceRegistry.V1) -> None:
     """A spoken conversation over one WebSocket.
 
+    The old call socket. A call also goes over the standing socket, `/v1/link`, and this
+    one stays only until the desktop app has moved its calls there.
+
     Add `?gem=` with a gem's id to talk to that gem: its config says who answers, with
     which model and tools, and whether it speaks first. Add `?model=` with a name from
     `GET /v1/voice/models` to choose the model; without it the gem's or the configured

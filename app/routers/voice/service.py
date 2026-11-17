@@ -55,6 +55,9 @@ class VoiceServiceV1Class:
         Uplink: client binary frames are mic audio, and a JSON text frame can report the
         client's playback delay. Downlink: binary frames are speech audio, text frames
         are JSON `VoiceEvent`s. Ends when either side drops.
+
+        This is the old call socket, kept as it is until the desktop app holds its calls
+        over `/v1/link`. Opening the call is shared with that socket (`CallEntityClass`).
         """
         await websocket.accept()
         try:
