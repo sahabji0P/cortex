@@ -32,6 +32,10 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Instructions and skills are plainly written. Nothing hard-coded.
 - The list of gems changes, so it is not in the fixed instructions.
 - Product questions are settled by trying them out with proper evals, not blindly.
+- Tools are the same in a call and in chat: the same tools, run the same way, by one copy of the code.
+- A tool call still running at a cut carries on in both. cancel_tool_call stops one, for any tool.
+- Nothing is cleared from the history, in a call or in chat. Keep it simple.
+- A stored result says what it is by a mark, never by its wording.
 
 ## Base (next, order not fixed, no rush)
 
