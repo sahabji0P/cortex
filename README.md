@@ -137,18 +137,22 @@ A value that is not offered, a gem that is not there or an id that is not an id,
 
 ## Gems
 
-A gem is one of the user's assistants. Each has one config, kept in the `Gems` collection but treated like a config file. It holds only what a call can honour today:
+A gem is one of the user's assistants. Each has one config, kept in the `Gems` collection but treated like a config file. It is the one home of a gem: what a call or a chat acts on, and what the app shows of it:
 
 | Field | Meaning |
 | --- | --- |
-| `version` | the version of the config's shape, 1 today. Every stored config carries it |
+| `version` | the version of the config's shape, 2 today. Every stored config carries it |
 | `name` | what the gem is called: required, trimmed, at most 100 characters |
+| `description` | one line on what the gem is for, shown under its name. The model is not told it. May be empty; at most 200 characters |
+| `image` | the gem's picture, as one value the backend does not read: today the app's built-in face and colour, later perhaps the address of a picture. Null for none; at most 500 characters |
 | `instructions` | plain text saying who the gem is and how it behaves. May be empty; at most 20,000 characters |
 | `model` | a `name` from `GET /v1/voice/models`, or null for the configured default. A stored name that is no longer offered is read as null |
 | `speaks_first` | whether the gem greets the user when a call connects. Default false |
 | `tools` | the names of the tools it may use, no name twice. Default `["web_search"]`, the only tool there is today. Any other name is refused when a gem is made or changed |
+| `voice` | the voice its replies are spoken in, as the app names it. Null for none chosen; at most 100 characters. Kept, but a call does not use it yet |
+| `speech_speed` | how fast it is spoken, 0.5 to 2.0. Default 1.0. Kept, but a call does not use it yet |
 
-Something new (a voice, skills, looks) is added by raising the version and writing one step that brings older configs up to the new shape (`upgrade_gem_document` in [`app/entities/gem_ent.py`](app/entities/gem_ent.py)). A config from a newer version than the code knows is refused. One with no version is read as version 1, the first shape. A stored config that names a tool which has since gone still loads: a call just does not offer that tool.
+Something new (skills, say) is added by raising the version and writing one step that brings older configs up to the new shape. Version 2 added `description`, `image`, `voice` and `speech_speed`; a version 1 config reads with nothing chosen for them, and is stored in the new shape the next time it is changed (`upgrade_gem_document` in [`app/entities/gem_ent.py`](app/entities/gem_ent.py)). A config from a newer version than the code knows is refused. One with no version is read as version 1, the first shape. A stored config that names a tool which has since gone still loads: a call just does not offer that tool.
 
 A call is held with a gem when the WebSocket names it with `?gem=`. The gem's name and its instructions open what the model is told, ahead of the rules for a spoken conversation. Its model answers, it greets the user if it speaks first, and it is offered web search only if its `tools` name `web_search` and the search key is set. A call without a gem is unchanged: it is Cortex, with the same instructions as before.
 
@@ -159,9 +163,9 @@ The Darbar text is a setting the user can change. Until they do, it is a built-i
 | Route | Does |
 | --- | --- |
 | `POST /v1/gems` | makes a gem (201) |
-| `GET /v1/gems` | lists them, the one changed most recently first |
+| `GET /v1/gems` | lists them in the order they were made. Changing a gem does not move it |
 | `GET /v1/gems/{gem_id}` | one gem |
-| `PATCH /v1/gems/{gem_id}` | changes only the fields sent. Only `model` may be null |
+| `PATCH /v1/gems/{gem_id}` | changes only the fields sent. Only `model`, `image` and `voice` may be null |
 | `DELETE /v1/gems/{gem_id}` | deletes it (204), and its written conversation |
 | `GET /v1/gems/{gem_id}/chat` | its written conversation so far (see [Chat](#chat)) |
 | `GET /v1/darbar` | the Darbar text: `{"text": "...", "is_default": true}`. `is_default` says whether it is the built-in text |
