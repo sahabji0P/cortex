@@ -13,11 +13,14 @@ from bson import ObjectId
 from pydantic import ValidationError
 
 from app.entities import voice_ent
+from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig
 from app.entities.instructions import instruction_layers, instructions
 from app.entities.model import ModelName, model_for
 from app.entities.voice_ent import VoiceConversation
 from app.routers.voice.service import VoiceServiceV1Class
+from tests.test_darbar import _darbar
+from tests.test_darbar import _DocDBFake as _DarbarDocDB
 from tests.test_gems import _DocDBFake, _gems, _stored
 from tests.test_model import _adapters, _entity
 from tests.test_voice_conversation import (
@@ -192,6 +195,58 @@ def test_a_gem_s_instructions_are_sent_as_stored_without_the_space_around_them()
     assert "\n\n\n" not in text
 
 
+# ---- the Darbar text the user wrote
+
+
+def test_a_gem_is_told_the_darbar_text_the_user_wrote_first() -> None:
+    gem = _gem(name="Kuber")
+
+    text = instructions(darbar="Every gem works for Asha.", gem=gem, search=False, model_needs="")
+
+    assert _dated(text) == (
+        "Every gem works for Asha.\n"
+        "\n"
+        "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+    )
+
+
+@pytest.mark.parametrize("darbar", ["", "  ", "\n\n"])
+def test_an_empty_darbar_text_tells_a_gem_nothing_not_even_a_blank_line(darbar: str) -> None:
+    gem = _gem(name="Kuber")
+
+    text = instructions(darbar=darbar, gem=gem, search=False, model_needs="", now=_NOW)
+
+    assert text == "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+
+
+def test_no_darbar_text_is_the_built_in_one() -> None:
+    gem = _gem(name="Kuber")
+
+    assert instructions(darbar=None, gem=gem, search=True, model_needs="", now=_NOW) == (
+        instructions(gem=gem, search=True, model_needs="", now=_NOW)
+    )
+    assert instructions(gem=gem, search=True, model_needs="", now=_NOW).startswith(
+        _DARBAR + "You are Kuber.\n\n"
+    )
+
+
+def test_the_darbar_text_is_sent_without_the_space_around_it() -> None:
+    own = "Every gem works for Asha.\n\n- Speak Hindi when she does."
+    gem = _gem(name="Kuber")
+
+    text = instructions(darbar=f"\n  {own}  \n\n", gem=gem, search=False, model_needs="")
+
+    assert text.startswith(f"{own}\n\nYou are Kuber.\n\n")
+    assert "\n\n\n" not in text
+
+
+@pytest.mark.parametrize("darbar", [None, "", "Every gem works for Asha."])
+def test_a_call_without_a_gem_is_told_no_darbar_text_whatever_it_is(darbar: str | None) -> None:
+    text = instructions(darbar=darbar, gem=None, search=True, model_needs="", now=_NOW)
+
+    assert text == _NO_GEM_WITH_SEARCH + _DATE
+
+
 # ---- a conversation held with a gem
 
 
@@ -203,10 +258,18 @@ _KUBER_WITH_SEARCH = (
 )
 
 
-def _with_gem(llm: _LLM, gem: GemConfig, search: _Search | None = None) -> _Fixture:
+def _with_gem(
+    llm: _LLM, gem: GemConfig, search: _Search | None = None, darbar: str | None = None
+) -> _Fixture:
     stt, tts, clock = _STT(), _TTS(), _Clock()
     conversation = VoiceConversation(
-        stt=stt, tts=tts, llm=llm, search=search or _Search(), gem=gem, clock=clock
+        stt=stt,
+        tts=tts,
+        llm=llm,
+        search=search or _Search(),
+        gem=gem,
+        darbar=darbar,
+        clock=clock,
     )
     return _Fixture(conversation=conversation, stt=stt, tts=tts, llm=llm, clock=clock)
 
@@ -270,6 +333,33 @@ async def test_a_gem_with_web_search_is_offered_nothing_without_the_key() -> Non
     await f.conversation.close()
 
 
+async def test_a_gem_keeps_the_darbar_text_it_opened_with_even_if_it_changes_mid_call() -> None:
+    llm = _LLM(
+        [_delta("Hi."), _completed(_message("Hi."))],
+        [_delta("Bye."), _completed(_message("Bye."))],
+    )
+    darbar, _ = _darbar()
+    await darbar.set("Every gem works for Asha.")
+    f = _with_gem(llm, _gem(name="Kuber"), _Search(configured=False), (await darbar.read()).text)
+
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+    await darbar.set("Every gem works for Ravi.")
+    f.clock.advance(5)
+    f.stt.say("thanks")
+    await _read_until(f.conversation, "assistant.done")
+
+    assert len(llm.requests) == 2
+    # The start of every request stays the same for the whole call.
+    assert llm.requests[0]["instructions"] == llm.requests[1]["instructions"]
+    assert _dated(llm.requests[1]["instructions"]) == (
+        "Every gem works for Asha.\n"
+        "\n"
+        "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+    )
+    await f.conversation.close()
+
+
 # ---- which model, and who speaks first, when a conversation opens
 
 
@@ -308,6 +398,20 @@ async def test_a_conversation_takes_its_model_and_who_speaks_first_from_the_gem_
     assert kwargs["gem"] is config
 
 
+@pytest.mark.parametrize("darbar", [None, "", "Every gem works for Asha."])
+async def test_a_conversation_is_opened_with_the_darbar_text_it_is_handed(
+    monkeypatch: pytest.MonkeyPatch, darbar: str | None
+) -> None:
+    opened: list[dict[str, object]] = []
+    monkeypatch.setattr(voice_ent, "VoiceConversation", lambda **kwargs: opened.append(kwargs))
+    entity = _entity(_adapters(openai_key=True, anthropic_key=True))
+
+    await entity.open_conversation(gem=_gem(name="Kuber"), darbar=darbar)
+
+    [kwargs] = opened
+    assert kwargs["darbar"] == darbar
+
+
 # ---- the WebSocket names a gem
 
 
@@ -342,13 +446,20 @@ class _Opened:
 
 
 class _Voice:
-    """Records what each conversation was opened with."""
+    """Records what each conversation was opened with.
+
+    The Darbar text is kept apart in `darbars`, one per conversation opened.
+    """
 
     def __init__(self) -> None:
         self.opened: list[tuple[object, object, object]] = []
+        self.darbars: list[str | None] = []
 
-    async def open_conversation(self, model=None, *, speaks_first=None, gem=None) -> _Opened:
+    async def open_conversation(
+        self, model=None, *, speaks_first=None, gem=None, darbar=None
+    ) -> _Opened:
         self.opened.append((model, speaks_first, gem))
+        self.darbars.append(darbar)
         return _Opened()
 
 
@@ -358,10 +469,19 @@ async def _service_with_a_gem() -> tuple[VoiceServiceV1Class, _Voice, GemConfig]
 
 
 async def _service_and_store() -> tuple[VoiceServiceV1Class, _Voice, GemConfig, _DocDBFake]:
+    service, voice, gem, docdb, _ = await _service_and_darbar()
+    return service, voice, gem, docdb
+
+
+async def _service_and_darbar() -> tuple[
+    VoiceServiceV1Class, _Voice, GemConfig, _DocDBFake, tuple[DarbarEntityClass, _DarbarDocDB]
+]:
     gems, docdb = _gems()
     gem = await gems.create(name="Kuber", model="Sonnet 5.5", speaks_first=True)
     voice = _Voice()
-    return VoiceServiceV1Class(cast("VoiceEntityClass", voice), gems), voice, gem, docdb
+    darbar = _darbar()
+    service = VoiceServiceV1Class(cast("VoiceEntityClass", voice), gems, darbar[0])
+    return service, voice, gem, docdb, darbar
 
 
 @pytest.mark.parametrize(
@@ -428,3 +548,63 @@ async def test_a_gem_whose_config_cannot_be_read_closes_the_socket_with_1011() -
 
     assert socket.closed == (1011, "the gem's config cannot be read")
     assert voice.opened == []
+
+
+# ---- the WebSocket reads the Darbar text once, and only for a gem
+
+
+async def test_a_call_with_a_gem_is_opened_with_the_built_in_darbar_text_when_none_is_set() -> None:
+    service, voice, gem, _, (_, darbar_db) = await _service_and_darbar()
+
+    await service.converse(cast("WebSocket", _ServiceSocket({"gem": str(gem.id)})))
+
+    assert voice.darbars == [
+        "The user keeps a few assistants of their own, which they call gems. Each gem has "
+        "its own name and its own work. The place they share is called the Darbar."
+    ]
+    assert darbar_db.reads == 1
+
+
+@pytest.mark.parametrize("text", ["", "Every gem works for Asha."])
+async def test_a_call_with_a_gem_is_opened_with_the_darbar_text_that_is_set(text: str) -> None:
+    service, voice, gem, _, (darbar, darbar_db) = await _service_and_darbar()
+    await darbar.set(text)
+    darbar_db.reads = 0
+
+    await service.converse(cast("WebSocket", _ServiceSocket({"gem": str(gem.id)})))
+
+    assert voice.darbars == [text]
+    assert darbar_db.reads == 1
+
+
+async def test_a_change_to_the_darbar_text_reaches_the_next_call() -> None:
+    service, voice, gem, _, (darbar, _) = await _service_and_darbar()
+    socket = {"gem": str(gem.id)}
+
+    await darbar.set("Every gem works for Asha.")
+    await service.converse(cast("WebSocket", _ServiceSocket(socket)))
+    await darbar.set("Every gem works for Ravi.")
+    await service.converse(cast("WebSocket", _ServiceSocket(socket)))
+
+    assert voice.darbars == ["Every gem works for Asha.", "Every gem works for Ravi."]
+
+
+@pytest.mark.parametrize("query", [{}, {"model": "Haiku 5.5", "first": "assistant"}])
+async def test_a_call_without_a_gem_does_not_read_the_darbar_text(query: dict[str, str]) -> None:
+    service, voice, _, _, (darbar, darbar_db) = await _service_and_darbar()
+    await darbar.set("Every gem works for Asha.")
+    darbar_db.reads = 0
+
+    await service.converse(cast("WebSocket", _ServiceSocket(query)))
+
+    assert voice.darbars == [None]
+    assert darbar_db.reads == 0
+
+
+async def test_a_gem_that_is_not_there_reads_no_darbar_text() -> None:
+    service, voice, _, _, (_, darbar_db) = await _service_and_darbar()
+
+    await service.converse(cast("WebSocket", _ServiceSocket({"gem": str(ObjectId())})))
+
+    assert voice.opened == []
+    assert darbar_db.reads == 0

@@ -190,6 +190,7 @@ class VoiceConversation:
         model: ModelName = "6 Luna",
         speaks_first: bool = False,
         gem: GemConfig | None = None,
+        darbar: str | None = None,
         clock: Clock = time.monotonic,
     ) -> None:
         self._stt = stt
@@ -226,7 +227,10 @@ class VoiceConversation:
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
         # stays the same. How they are put together is in `instructions.py`.
+        # The Darbar text is the one read when the call opened: a change to the setting
+        # reaches the next call, never this one.
         self._instructions = instructions(
+            darbar=darbar,
             gem=gem,
             search=offers_search,
             model_needs=self._model.own_instructions,
@@ -656,6 +660,7 @@ class VoiceEntityClass:
         *,
         speaks_first: bool | None = None,
         gem: GemConfig | None = None,
+        darbar: str | None = None,
     ) -> VoiceConversation:
         """Start listening. The caller owns the conversation and must `close()` it.
 
@@ -663,8 +668,9 @@ class VoiceEntityClass:
         gem or a model of the gem's, the configured one. With `speaks_first` the
         assistant greets the user as soon as the conversation opens; left out, it does
         if the gem says so, and otherwise waits for the user to speak. The gem also says
-        who the assistant is and which tools it may use. Raises `LookupError` if the
-        model's provider has no key.
+        who the assistant is and which tools it may use. `darbar` is the Darbar text a gem
+        is told first, or None for the built-in one; it is kept for the whole
+        conversation. Raises `LookupError` if the model's provider has no key.
         """
         model = model or (gem.model if gem is not None else None) or settings.voice_model
         if speaks_first is None:
@@ -683,6 +689,7 @@ class VoiceEntityClass:
             model=model,
             speaks_first=speaks_first,
             gem=gem,
+            darbar=darbar,
         )
 
 
