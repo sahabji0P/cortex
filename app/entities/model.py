@@ -176,31 +176,19 @@ class Model(Protocol):
 
 # A spoken reply is a sentence or two. This is a ceiling against a runaway reply, far
 # above anything a call's instructions ask for. On a model that thinks, the thinking
-# counts against it too.
+# counts against it too. Writing has the same ceiling for now.
 _MAX_REPLY_TOKENS = 8192
 
 
-def model_for(
-    llm: LLM,
-    name: ModelName,
-    tools: Sequence[ToolSpec],
-    *,
-    max_reply_tokens: int = _MAX_REPLY_TOKENS,
-) -> Model:
-    """The model called `name`, reached through `llm`, which must be its provider's adapter.
-
-    `max_reply_tokens` is the ceiling on one model call's output. The default suits a
-    call; a conversation whose replies run longer can pass its own. Only Anthropic's API
-    requires a ceiling, so only an Anthropic model is sent it: an OpenAI model is sent
-    none, as before.
-    """
+def model_for(llm: LLM, name: ModelName, tools: Sequence[ToolSpec]) -> Model:
+    """The model called `name`, reached through `llm`, which must be its provider's adapter."""
     if is_openai(name):
         if isinstance(llm, AnthropicAdapterClass):
             raise TypeError(f"{name!r} is an OpenAI model: it needs the OpenAI adapter")
         return _OpenAIModel(llm, name, tools)
     if isinstance(llm, OpenAIAdapterClass):
         raise TypeError(f"{name!r} is an Anthropic model: it needs the Anthropic adapter")
-    return _AnthropicModel(llm, name, tools, max_reply_tokens=max_reply_tokens)
+    return _AnthropicModel(llm, name, tools)
 
 
 # How much each model thinks before it speaks: normally, and when asked to think a
@@ -316,12 +304,9 @@ class _AnthropicModel:
         llm: AnthropicAdapterClass,
         name: _AnthropicModelName,
         tools: Sequence[ToolSpec],
-        *,
-        max_reply_tokens: int,
     ) -> None:
         self._llm = llm
         self._name: _AnthropicModelName = name
-        self._max_reply_tokens = max_reply_tokens
         self._tools: list[ToolUnionParam] = [
             AnthropicAdapterClass.Tools.function(
                 name=tool.name, description=tool.description, parameters=tool.parameters
@@ -344,7 +329,7 @@ class _AnthropicModel:
             model=self._name,
             messages=to_messages(items),
             system=instructions,
-            max_tokens=self._max_reply_tokens,
+            max_tokens=_MAX_REPLY_TOKENS,
             thinking=settings.thinking,
             output_config=settings.output_config,
             tools=self._tools,
