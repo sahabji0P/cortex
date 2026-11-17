@@ -37,7 +37,7 @@ __all__ = [
     "GemDescription",
     "GemEntityClass",
     "GemImage",
-    "GemInstructions",
+    "GemInstructionsToSave",
     "GemModelName",
     "GemName",
     "GemSpeechSpeed",
@@ -126,7 +126,6 @@ def _check_known_tools(value: list[str]) -> list[str]:
 
 # The rules for each field, shared by the stored config and the routes' input.
 type GemName = Annotated[str, AfterValidator(_check_name)]
-type GemInstructions = Annotated[str, Field(max_length=_INSTRUCTIONS_MAX_LENGTH)]
 # What the app shows of a gem, and how its replies are to be spoken. The backend keeps
 # these and gives them back. None of them changes what a call or a chat does yet.
 type GemDescription = Annotated[str, Field(max_length=_DESCRIPTION_MAX_LENGTH)]
@@ -142,6 +141,10 @@ type GemTools = Annotated[
 # names a tool which has since gone must still load: that tool is just not offered.
 type GemToolsToSave = Annotated[GemTools, AfterValidator(_check_known_tools)]
 _TOOLS_TO_SAVE: TypeAdapter[list[str]] = TypeAdapter(GemToolsToSave)
+# The same for the instructions: the limit is on what a user saves. A stored config whose
+# instructions a newer version made longer (see `_version_2_to_3`) must still load.
+type GemInstructionsToSave = Annotated[str, Field(max_length=_INSTRUCTIONS_MAX_LENGTH)]
+_INSTRUCTIONS_TO_SAVE: TypeAdapter[str] = TypeAdapter(GemInstructionsToSave)
 # The same for the model: a name that is not offered is refused when a gem is made or
 # changed. One already stored is read as no model at all (see `GemConfig._upgrade`).
 _MODEL_TO_SAVE: TypeAdapter[GemModelName | None] = TypeAdapter(GemModelName | None)
@@ -216,7 +219,7 @@ class GemConfig(BaseModel):
     image: GemImage | None = None
     # Who this gem is and how it behaves, in plain words. A gem made without any is given
     # `DEFAULT_GEM_INSTRUCTIONS`.
-    instructions: GemInstructions = ""
+    instructions: str = ""
     # The model that answers. None means the configured default.
     model: GemModelName | None = None
     # Whether the gem greets the user when a call connects.
@@ -299,7 +302,9 @@ class GemEntityClass:
                 "name": name,
                 "description": description,
                 "image": image,
-                "instructions": instructions if instructions.strip() else DEFAULT_GEM_INSTRUCTIONS,
+                "instructions": _INSTRUCTIONS_TO_SAVE.validate_python(instructions)
+                if instructions.strip()
+                else DEFAULT_GEM_INSTRUCTIONS,
                 "model": _MODEL_TO_SAVE.validate_python(model),
                 "speaks_first": speaks_first,
                 "tools": _TOOLS_TO_SAVE.validate_python(
@@ -338,6 +343,11 @@ class GemEntityClass:
             changes = {**changes, "tools": _TOOLS_TO_SAVE.validate_python(changes["tools"])}
         if "model" in changes:
             changes = {**changes, "model": _MODEL_TO_SAVE.validate_python(changes["model"])}
+        if "instructions" in changes:
+            changes = {
+                **changes,
+                "instructions": _INSTRUCTIONS_TO_SAVE.validate_python(changes["instructions"]),
+            }
         current = await self.get(gem_id)
         # Checked as a whole, so a change can never leave a config that would not load.
         updated = GemConfig.model_validate(

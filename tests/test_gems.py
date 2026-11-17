@@ -379,6 +379,26 @@ def test_a_version_2_config_has_the_default_instructions_after_its_own(
     assert gem.instructions == instructions
 
 
+async def test_an_older_gem_with_long_instructions_still_loads_and_can_be_changed() -> None:
+    # The limit is on what a user saves. The step to version 3 adds the defaults after
+    # the gem's own text, which can take it past the limit: it must load all the same,
+    # or the whole list of gems fails with it.
+    gems, docdb = _gems()
+    own = "x" * 19_900
+    document = _stored(version=2, instructions=own)
+    docdb.documents[document["_id"]] = document
+
+    (listed,) = await gems.list_all()
+    renamed = await gems.update(str(document["_id"]), {"name": "Gem Three"})
+
+    assert len(listed.instructions) > 20_000
+    assert renamed.instructions == listed.instructions == f"{own}\n\n{DEFAULT_GEM_INSTRUCTIONS}"
+    with pytest.raises(ValidationError):
+        await gems.update(str(document["_id"]), {"instructions": "x" * 20_001})
+    with pytest.raises(ValidationError):
+        await gems.create(name="Gem Two", instructions="x" * 20_001)
+
+
 @pytest.mark.parametrize("version", [2, None])
 async def test_an_older_gem_changed_twice_has_the_default_instructions_once(
     version: int | None,
