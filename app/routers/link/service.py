@@ -52,8 +52,10 @@ class LinkServiceV1Class:
         finally:
             for turn in turns:
                 turn.cut()
-            # Each reply is stored before its turn is over. Shielded, so a server that
-            # is shutting down still waits for that.
+            # Each reply is stored before its turn is over, so a socket that closes
+            # returns once its replies are stored. If this handler is itself cancelled,
+            # it stops waiting, but the turns run on in tasks of their own and are
+            # stored all the same, unless the whole process ends first.
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.shield(asyncio.gather(*(turn.over.wait() for turn in turns)))
             with contextlib.suppress(Exception):
