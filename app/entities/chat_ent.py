@@ -121,6 +121,10 @@ class ChatTurn:
         self._conversation: WrittenConversation | None = None
         # The task answering it. Kept so it is not lost while it runs.
         self.task: asyncio.Task[None] | None = None
+        # For a reply with no message: the client it is being written for. A reply to a
+        # message is cut by whoever sent it. This one nobody asked for, so it is cut
+        # when that client is known to have gone (see `ChatEntityClass.left`).
+        self.unasked_for: Deliver | None = None
 
     @property
     def was_cut(self) -> bool:
@@ -228,7 +232,6 @@ class ChatEntityClass:
         """
         at = datetime.now(UTC)
         key = _key(gem_id)
-        self._state(key).latest = (gem_id, deliver)
         turn = ChatTurn()
         previous = self._turns.get(key)
         self._turns[key] = turn
@@ -258,6 +261,10 @@ class ChatEntityClass:
             if isinstance(ready, str):
                 await tell("chat.error", ready)
                 return
+            # Noted only for a gem that is there, so an id that names none keeps nothing.
+            # Messages are answered in the order they came, so the last to note is the
+            # latest.
+            self._state(key).latest = (gem_id, deliver)
             stored = await self._store.load(ready.gem.id)
             history = [item.item for item in stored]
             # A search lost to a restart is closed before the new message.
@@ -363,14 +370,15 @@ class ChatEntityClass:
             _stop(conversation.left_running)
             await tell("chat.error", f"the reply could not be stored: {exc}")
             return
+        # Tracked from here on, whatever fails next: its placeholder is stored, so its
+        # result has to be taken when it comes.
+        for call in conversation.left_running:
+            self._outlive(key, call)
         if not await self._gems.exists(gem_id):
             # The gem was deleted while its reply was being written. Its conversation
             # went with it, so what was just added goes too, and so do its searches.
             await self._store.forget(gem.id)
             _stop(conversation.left_running)
-        else:
-            for call in conversation.left_running:
-                self._outlive(key, call)
         if failure is not None:
             await tell("chat.error", f"reply failed: {failure}")
         elif ended is not None:
@@ -383,9 +391,31 @@ class ChatEntityClass:
             del self._turns[key]
         # Results that came in while it was written are told now.
         self._tell_when_quiet(key)
+        self._forget_if_idle(key)
+
+    def left(self, deliver: Deliver) -> None:
+        """A client has gone: `deliver` is the function its frames were sent with.
+
+        Nothing more is written for it. A reply nobody asked for that is being written
+        for it is cut, as its replies to messages are cut by whoever holds them, and
+        later results for the gems it wrote to are only stored until someone writes again.
+        """
+        for key, state in list(self._outliving.items()):
+            if state.latest is not None and state.latest[1] is deliver:
+                state.latest = None
+                self._forget_if_idle(key)
+        for turn in self._turns.values():
+            if turn.unasked_for is deliver:
+                turn.cut()
 
     def _state(self, key: str) -> _Outliving:
         return self._outliving.setdefault(key, _Outliving())
+
+    def _forget_if_idle(self, key: str) -> None:
+        """Keep nothing for a gem with no search running, no result waiting and no client."""
+        state = self._outliving.get(key)
+        if state is not None and not state.pending and state.latest is None:
+            del self._outliving[key]
 
     def _outlive(self, key: str, call: ToolCall) -> None:
         """Let a call left running at a cut carry on. Its placeholder is stored."""
@@ -396,10 +426,15 @@ class ChatEntityClass:
         running.add_done_callback(functools.partial(self._finished_late, key, call))
 
     def _finished_late(self, key: str, call: ToolCall, finished: asyncio.Task[str]) -> None:
-        state = self._state(key)
-        state.running.pop(call.call_id, None)
+        state = self._outliving.get(key)
+        if state is None or state.running.pop(call.call_id, None) is None:
+            # `cancel_tool_call` took it first. It may have finished in that same
+            # instant, too late to be stopped: its result is dropped all the same, since
+            # the gem has been told it was cancelled.
+            return
         if finished.cancelled():
-            return  # stopped by cancel_tool_call, or because its gem went
+            self._forget_if_idle(key)
+            return  # stopped because its gem went
         state.waiting.append((call, finished.result()))
         self._tell_when_quiet(key)
 
@@ -410,13 +445,13 @@ class ChatEntityClass:
         between them, so a message that arrives at that instant waits for this reply.
         """
         state = self._outliving.get(key)
-        if state is None or not state.waiting or state.latest is None or key in self._turns:
+        if state is None or not state.waiting or key in self._turns:
             return
         turn = ChatTurn()
         self._turns[key] = turn
-        turn.task = asyncio.create_task(self._tell(turn, key, *state.latest))
+        turn.task = asyncio.create_task(self._tell(turn, key))
 
-    async def _tell(self, turn: ChatTurn, key: str, gem_id: str, deliver: Deliver) -> None:
+    async def _tell(self, turn: ChatTurn, key: str) -> None:
         """Add the waiting results to the stored conversation, then have the gem tell them.
 
         The reply has no new message. It goes to the client of the latest message to the
@@ -424,42 +459,51 @@ class ChatEntityClass:
         the gem's instructions tell it to bring them up when it next answers.
         """
         state = self._state(key)
-        # Whether the client has been sent `chat.result`, and so is owed a last frame.
-        begun = False
+        # The client the reply is for, once `chat.result` has reached it: it is then owed
+        # a last frame. `gem_id` is the gem's id as that client spelled it.
+        owed: Deliver | None = None
+        gem_id = key
         try:
             if turn.was_cut:
                 return  # a message came first: the results wait until it is answered
             # Taken at once, so that whatever happens next they are not taken again.
             told, state.waiting = state.waiting, []
-            if not await self._gems.exists(gem_id):
+            if not await self._gems.exists(key):
                 return  # the gem went, and its conversation with it: they are dropped
             gem_oid = ObjectId(key)
             history = [item.item for item in await self._store.load(gem_oid)]
             lost = self._lost(key, history, also_here=[call for call, _ in told])
             stubs = [*lost, *(late_stub(call, output) for call, output in told)]
             history += await self._add_stubs(gem_oid, history, stubs)
-            if not await self._gems.exists(gem_id):
+            if not await self._gems.exists(key):
                 await self._store.forget(gem_oid)  # deleted while they were stored
                 return
-            ready = await self._ready(gem_id)
+            if state.latest is None:
+                return  # nobody is there to read a reply: the results are only stored
+            gem_id, deliver = state.latest
+            # Noted with no `await` since the client was read, so that if it goes from
+            # here on, `left` finds this reply and cuts it.
+            turn.unasked_for = deliver
+            ready = await self._ready(key)
             if isinstance(ready, str) or turn.was_cut:
-                # No reply can be made, or a message came first: the results are stored,
-                # and the gem's instructions tell it to bring them up when it answers.
+                # No reply can be made, or a message came first (or the client went): the
+                # results are stored, and the gem's instructions tell it to bring them up
+                # when it answers.
                 return
             try:
                 for call, _ in told:
                     await deliver(ChatEvent(type="chat.result", gem=gem_id, text=shown(call) or ""))
             except Exception:
                 return  # the client has gone: the results stay stored, untold
-            begun = True
+            owed = deliver
             await self._write(turn, key, ready, history, None, datetime.now(UTC), gem_id, deliver)
         except Exception as exc:
             # As when the store is out of reach. A result taken and not stored is lost:
             # its placeholder is closed as lost before the next reply. A client sent
             # `chat.result` is owed a last frame: `_write` sends one only once nothing
             # after it can fail.
-            if begun:
-                await _teller(gem_id, deliver)("chat.error", f"no reply could be made: {exc}")
+            if owed is not None:
+                await _teller(gem_id, owed)("chat.error", f"no reply could be made: {exc}")
         finally:
             self._release(turn, key)
 
@@ -531,6 +575,9 @@ class ChatEntityClass:
         if waiting:
             state.waiting.remove(waiting[0])
             return CANCELLED
+        # Taken out of the running ones here and now. If it finishes in this same
+        # instant, too late to be stopped, `_finished_late` finds it gone and drops its
+        # result: the gem is told "Cancelled." either way, and that has to stay true.
         call = state.running.pop(call_id, None)
         if call is None or call.running is None:
             return NOTHING_RUNNING
