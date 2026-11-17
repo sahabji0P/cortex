@@ -6,7 +6,7 @@ from fastapi import Depends, WebSocket
 from pydantic import ValidationError
 
 from app.entities import EntitiesRegistry
-from app.entities.call_ent import CallEntityClass, CallRefused, fault_reason
+from app.entities.call_ent import CallEntityClass, CallFault, CallRefused
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
@@ -76,12 +76,13 @@ class VoiceServiceV1Class:
             # offered but its provider has no key here.
             await websocket.close(code=1008, reason=exc.reason)
             return
-        except Exception as exc:
+        except CallFault as exc:
             # 1011: internal error — the gem's config cannot be read, or a speech service
-            # is unreachable or not configured.
+            # is unreachable or not configured. The failure itself is raised, as it
+            # always was.
             with contextlib.suppress(Exception):
-                await websocket.close(code=1011, reason=fault_reason(exc))
-            raise
+                await websocket.close(code=1011, reason=exc.reason)
+            raise exc.cause from None
 
         uplink = asyncio.create_task(self._relay_mic(websocket, conversation))
         downlink = asyncio.create_task(self._relay_outputs(websocket, conversation))

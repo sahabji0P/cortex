@@ -11,9 +11,9 @@ Two kinds of "no" are told apart, because the app is told them apart:
 - a refusal (`CallRefused`): the call was not opened because of what was asked, such as
   a gem that is not there or a model whose provider has no key. Asking again the same
   way gets the same answer.
-- a fault: any other exception, raised as it is. The backend could not open the call,
-  as when a gem's stored config cannot be read or a speech service is out of reach.
-  `fault_reason` puts it in words for the app.
+- a fault (`CallFault`): the backend could not open the call, as when a gem's stored
+  config cannot be read or a speech service is out of reach. It says which in words,
+  for the app, and carries the failure itself.
 """
 
 from pydantic import ValidationError
@@ -24,7 +24,7 @@ from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.model import ModelName
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
 
-__all__ = ["CallEntityClass", "CallRefused", "fault_reason"]
+__all__ = ["CallEntityClass", "CallFault", "CallRefused"]
 
 
 class CallRefused(Exception):
@@ -35,13 +35,16 @@ class CallRefused(Exception):
         self.reason = reason
 
 
-def fault_reason(exc: BaseException) -> str:
-    """What to tell the app when a call could not be opened through a fault of ours."""
-    if isinstance(exc, ValidationError):
-        # The gem is there, but its stored config cannot be read here, as when a newer
-        # cortex wrote it.
-        return "the gem's config cannot be read"
-    return "speech services unavailable"
+class CallFault(Exception):
+    """The call could not be opened through a fault of ours.
+
+    `reason` says what could not be done, in words. `cause` is the failure itself.
+    """
+
+    def __init__(self, reason: str, cause: Exception) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.cause = cause
 
 
 class CallEntityClass:
@@ -70,7 +73,8 @@ class CallEntityClass:
         without a gem they are the configured model and the user speaking first.
 
         Raises `CallRefused` for a gem that is not there (or an id that is not an id) and
-        for a model whose provider has no key. Anything else is a fault, raised as it is.
+        for a model whose provider has no key. Anything else that goes wrong is raised as
+        a `CallFault`, which says what could not be read or reached.
         """
         config: GemConfig | None = None
         # Read once, here, so the call keeps the text it opened with. A call without a
@@ -81,7 +85,16 @@ class CallEntityClass:
                 config = await self._gems.get(gem)
             except NotFoundError:
                 raise CallRefused("unknown gem") from None
-            darbar = (await self._darbar.read()).text
+            except ValidationError as exc:
+                # The gem is there, but its stored config cannot be read here, as when a
+                # newer cortex wrote it.
+                raise CallFault("the gem's config cannot be read", exc) from exc
+            except Exception as exc:
+                raise CallFault("the gem could not be read", exc) from exc
+            try:
+                darbar = (await self._darbar.read()).text
+            except Exception as exc:
+                raise CallFault("the Darbar text could not be read", exc) from exc
         try:
             # Nothing is awaited after this returns, so a caller that cancels the opening
             # either gets the conversation back, to close, or none was made.
@@ -91,3 +104,6 @@ class CallEntityClass:
         except LookupError as exc:
             # The model is offered, but its provider has no key here.
             raise CallRefused(str(exc)) from exc
+        except Exception as exc:
+            # A speech service is unreachable or not configured.
+            raise CallFault("speech services unavailable", exc) from exc

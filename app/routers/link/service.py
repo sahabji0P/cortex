@@ -9,7 +9,7 @@ from fastapi import Depends, WebSocket
 from pydantic import BaseModel, ValidationError
 
 from app.entities import EntitiesRegistry
-from app.entities.call_ent import CallEntityClass, CallRefused, fault_reason
+from app.entities.call_ent import CallEntityClass, CallFault, CallRefused
 from app.entities.chat_ent import ChatEntityClass, ChatTurn
 from app.entities.voice_ent import VoiceConversation
 from app.routers.link.models import LinkModels
@@ -292,13 +292,19 @@ class _Call:
                 self._conversation = opening.result()
                 if self._delay is not None:
                     self._conversation.set_output_delay(self._delay)
-        if self._hung_up.is_set() or opening.cancelled():
+        if self._hung_up.is_set():
             return None
+        if opening.cancelled():
+            # Not by a hang-up: something it waited on was cancelled under it.
+            return LinkModels.V1.Output.CallFailed(text="the call could not be opened")
         if isinstance(exc := opening.exception(), CallRefused):
             return LinkModels.V1.Output.CallRefused(text=exc.reason)
+        if isinstance(exc, CallFault):
+            _log.warning("a call on the link could not be opened", exc_info=exc.cause)
+            return LinkModels.V1.Output.CallFailed(text=exc.reason)
         if exc is not None:
             _log.warning("a call on the link could not be opened", exc_info=exc)
-            return LinkModels.V1.Output.CallFailed(text=fault_reason(exc))
+            return LinkModels.V1.Output.CallFailed(text="the call could not be opened")
         return None
 
     async def _pump(self, conversation: VoiceConversation) -> None:
