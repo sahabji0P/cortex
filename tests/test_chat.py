@@ -24,7 +24,9 @@ from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.instructions import instruction_layers, instructions
 from app.routers.gems.service import GemsServiceV1Class
 from app.routers.link.service import LinkServiceV1Class
+from tests.test_model import _call_starts, _Claude, _final, _text
 from tests.test_voice_conversation import _completed, _delta, _Search, _search_call, _starts
+from tests.test_voice_gem import _SEARCH_RULES as _CALL_SEARCH_RULES
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -55,6 +57,16 @@ _WRITTEN_SEARCH_RULES = (
     "- When what you are about to do will keep the user waiting, such as looking something "
     "up, first say in a few words what you are going to do, the way a person would.\n"
     "- When you answer from search results, name the source.\n"
+    "- If the user sends a new message while a search is running, the search carries on in "
+    "the background. Do not search for the same thing again: say it is still coming, and "
+    "answer whatever else they asked. Only if they say they no longer want it, call "
+    "cancel_tool_call: nothing is cancelled unless you make that call. The result reaches "
+    'you by itself, as a call with "deferred_result_for" in its arguments. You did not make '
+    "that call: it only delivers the late result. When it arrives, tell the user what it "
+    "found straight away, without being asked, unless they have said they no longer want "
+    "it. If they say something else before you have told them, answer that and then tell "
+    "them. If you have already told them the same thing, do not repeat it: say in a few "
+    "words that the search confirms it.\n"
 )
 _TODAY = "\nToday is Tuesday, 17 November 2026.\n"
 
@@ -103,9 +115,18 @@ def test_the_written_layers_take_the_place_of_the_spoken_ones() -> None:
         "date",
     ]
     told = "".join(layer.text for layer in layers)
-    # Nothing of a call's: no speech, and no searches that carry on in the background.
+    # Nothing of a call's speech.
     assert "spoken" not in told
-    assert "cancel_tool_call" not in told
+
+
+def test_the_written_rule_for_a_search_that_carries_on_is_the_calls_with_a_new_opening() -> None:
+    call = _CALL_SEARCH_RULES.split("\n- ")[-1]
+    written = _WRITTEN_SEARCH_RULES.rsplit("\n- ", maxsplit=1)[-1]
+    opening = "If the user interrupts while a search is running,"
+    assert call.startswith(opening)
+    assert written == call.replace(
+        opening, "If the user sends a new message while a search is running,", 1
+    )
 
 
 def test_writing_is_always_with_a_gem() -> None:
@@ -487,7 +508,7 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
 
-    assert socket.frames[0] == {"type": "link.ready", "version": 2}
+    assert socket.frames[0] == {"type": "link.ready", "version": 3}
     assert socket.frames[1:] == [
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "Hi "},
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "there."},
@@ -503,8 +524,8 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     assert request["instructions"] == (
         _KUBER_IN_WRITING + _WRITTEN_SEARCH_RULES + f"\nToday is {today}.\n"
     )
-    # Search, but nothing about searches that carry on in the background.
-    assert _tool_names(request) == ["web_search"]
+    # Search, and as in a call, a way to stop one that carries on in the background.
+    assert _tool_names(request) == ["web_search", "cancel_tool_call"]
     await _close(socket, linked)
 
 
@@ -861,7 +882,7 @@ async def test_a_changed_gem_applies_from_the_next_message() -> None:
     )
     assert "You are Lakshmi.\n\nYou keep the household accounts.\n\n" in second["instructions"]
     assert "search" not in second["instructions"]
-    assert _tool_names(first) == ["web_search"]
+    assert _tool_names(first) == ["web_search", "cancel_tool_call"]
     assert _tool_names(second) == []
     # The conversation carries on as it was stored.
     assert second["input"][:2] == [
@@ -1055,3 +1076,698 @@ async def test_a_gem_deleted_while_its_reply_is_written_leaves_no_conversation()
 
     assert setup.docdb.collections.get("ChatItems", []) == []
     await _close(socket, linked)
+
+
+# ---- a search that carries on after a cut, and its result told later
+
+
+def _placeholder(call_id: str) -> str:
+    return (
+        f"Still running in the background, under call_id {call_id}. It has not failed. Only "
+        "if the user says they no longer want this, stop it with cancel_tool_call and that "
+        "call_id. Otherwise leave it alone: its result will reach you by itself, as a "
+        f'separate call with "deferred_result_for": "{call_id}". Until then, do not search '
+        "for this again, in any wording."
+    )
+
+
+class _Searches:
+    """Web search, with a gate of its own for each query that is given one."""
+
+    configured = True
+
+    def __init__(self, *gated: str) -> None:
+        self.gates = {query: asyncio.Event() for query in gated}
+        self.queries: list[str] = []
+        self.cancelled: list[str] = []
+        self.finished: list[str] = []
+
+    async def search(self, *, objective: str, queries: list[str], mode: str) -> Any:
+        self.queries.append(objective)
+        try:
+            if (gate := self.gates.get(objective)) is not None:
+                await gate.wait()
+        except asyncio.CancelledError:
+            self.cancelled.append(objective)
+            raise
+        self.finished.append(objective)
+        page = SimpleNamespace(
+            title="Weather", url="https://example.com", publish_date=None, excerpts=[objective]
+        )
+        return SimpleNamespace(results=[page])
+
+    def found(self, query: str) -> str:
+        """The result the model is given for `query`."""
+        return f"Weather (https://example.com)\n{query}"
+
+
+def _cancel_call(call_id: str, named: str) -> Any:
+    return SimpleNamespace(
+        type="function_call",
+        call_id=call_id,
+        name="cancel_tool_call",
+        arguments=json.dumps({"call_id": named}),
+    )
+
+
+def _kinds(items: Sequence[Any]) -> list[str]:
+    return [item.get("role") or item["type"] for item in items]
+
+
+def _stub_of(item: Any) -> str:
+    """The call a stub item delivers for."""
+    assert item["type"] == "function_call"
+    assert item["call_id"].startswith("late_")
+    assert len(item["call_id"]) == len("late_") + 16
+    return json.loads(item["arguments"])["deferred_result_for"]
+
+
+def _thinks(setup: _Chat) -> list[bool]:
+    """Whether each request so far asked the model to think a little."""
+    return [request["reasoning"] == {"effort": "low"} for request in setup.llm.requests]
+
+
+class _Grows:
+    """Checks that the stored conversation is only ever added to."""
+
+    def __init__(self, setup: _Chat) -> None:
+        self._setup = setup
+        self._seen: list[Any] = []
+
+    async def check(self) -> list[Any]:
+        now = await self._setup.stored()
+        assert now[: len(self._seen)] == self._seen, "a stored item was changed or removed"
+        self._seen = now
+        return now
+
+
+def _a_valid_chain(items: Sequence[Any]) -> None:
+    """Every call has exactly one result, directly after the calls of its round."""
+    open_calls: list[str] = []
+    answered: set[str] = set()
+    for item in items:
+        kind = item.get("type")
+        if kind == "function_call":
+            open_calls.append(item["call_id"])
+        elif kind == "function_call_output":
+            assert item["call_id"] in open_calls, "a result with no call before it"
+            assert item["call_id"] not in answered, "a call with two results"
+            answered.add(item["call_id"])
+        else:
+            assert set(open_calls) <= answered, "a message between a call and its result"
+    assert set(open_calls) == answered
+
+
+async def _settle() -> None:
+    """Let what is running now finish its steps."""
+    await asyncio.sleep(0.05)
+
+
+async def _until_stored(setup: _Chat, count: int) -> list[Any]:
+    for _ in range(200):
+        stored = await setup.stored()
+        if len(stored) >= count:
+            return stored
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"fewer than {count} items were stored")
+
+
+_WEATHER = "Pune weather"
+
+
+def _looks() -> list[Any]:
+    """A first reply that says a word and then searches for the weather."""
+    call = _search_call(_WEATHER)
+    return [_delta("Let me look."), _starts(call), _completed(call)]
+
+
+async def _cut_while_searching(
+    setup: _Chat, socket: _Socket, cutting: str = "and the time?"
+) -> None:
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+    socket.send(setup.gem.id, cutting)
+    await socket.until("chat.done")
+
+
+async def test_a_message_that_cuts_a_reply_while_a_search_runs_leaves_the_search_running() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(
+        _looks(), _said("It is noon. The weather is still coming."), search=searches
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+
+    await _cut_while_searching(setup, socket)
+
+    assert socket.chat() == [
+        ("chat.text", "Let me look."),
+        ("chat.tool", _WEATHER),
+        ("chat.cut", "Let me look."),
+        ("chat.text", "It is noon. The weather is still coming."),
+        ("chat.done", "It is noon. The weather is still coming."),
+    ]
+    assert searches.cancelled == [] and searches.finished == []
+    stored = await grows.check()
+    assert _kinds(stored) == [
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+        "user",
+        "assistant",
+    ]
+    assert stored[3] == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": _placeholder("call_1"),
+    }
+    # The new message is answered first, from a history that ends that way.
+    assert setup.llm.requests[1]["input"] == stored[:5]
+    assert _thinks(setup) == [False, True]
+    await _close(socket, linked)
+    searches.gates[_WEATHER].set()
+
+
+async def test_a_finished_search_is_stored_after_the_conversation_and_told_unasked() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(
+        _looks(), _said("Noon."), _said("It is sunny in Pune."), _said("Bye."), search=searches
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    await grows.check()
+
+    searches.gates[_WEATHER].set()
+    await socket.until("chat.done", 2)
+
+    assert socket.chat()[-3:] == [
+        ("chat.result", _WEATHER),
+        ("chat.text", "It is sunny in Pune."),
+        ("chat.done", "It is sunny in Pune."),
+    ]
+    assert socket.frames[-3] == {"type": "chat.result", "gem": str(setup.gem.id), "text": _WEATHER}
+    stored = await grows.check()
+    assert _kinds(stored[6:]) == ["function_call", "function_call_output", "assistant"]
+    stub, result, told = stored[6:]
+    assert _stub_of(stub) == "call_1"
+    assert stub["name"] == "web_search"
+    assert result == {
+        "type": "function_call_output",
+        "call_id": stub["call_id"],
+        "output": searches.found(_WEATHER),
+    }
+    assert told == {"role": "assistant", "content": "It is sunny in Pune."}
+    # The reply about it is asked for with no new message: the history ends in the result.
+    assert setup.llm.requests[2]["input"] == stored[:8]
+    assert _thinks(setup) == [False, True, False]
+    _a_valid_chain(stored)
+    # Neither the placeholder's call nor the stub is shown twice: the stub is not shown.
+    assert await setup.shown() == [
+        ("user", "weather?"),
+        ("gem", "Let me look."),
+        ("tool", _WEATHER),
+        ("user", "and the time?"),
+        ("gem", "Noon."),
+        ("gem", "It is sunny in Pune."),
+    ]
+
+    # The next message carries on from it.
+    socket.send(setup.gem.id, "thanks")
+    await socket.until("chat.done", 3)
+    assert setup.llm.requests[3]["input"] == [*stored, {"role": "user", "content": "thanks"}]
+    await grows.check()
+    await _close(socket, linked)
+
+
+async def test_a_result_that_comes_while_a_reply_is_written_waits_for_it() -> None:
+    searches = _Searches(_WEATHER)
+    held = asyncio.Event()
+    setup = await _chat(
+        _looks(),
+        [_delta("Once upon "), held, _delta("a time."), _completed()],
+        _said("And it is sunny in Pune."),
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+    socket.send(setup.gem.id, "a story while we wait")
+    await socket.until("chat.text", 2)
+
+    searches.gates[_WEATHER].set()
+    await _settle()
+    # Not slipped into the reply in progress, and not told before it is stored.
+    assert ("chat.result", _WEATHER) not in socket.chat()
+    assert len(setup.llm.requests) == 2
+
+    held.set()
+    await socket.until("chat.done", 2)
+    assert socket.chat()[-5:] == [
+        ("chat.text", "a time."),
+        ("chat.done", "Once upon a time."),
+        ("chat.result", _WEATHER),
+        ("chat.text", "And it is sunny in Pune."),
+        ("chat.done", "And it is sunny in Pune."),
+    ]
+    stored = await grows.check()
+    assert _kinds(stored[4:]) == [
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+        "assistant",
+    ]
+    assert _stub_of(stored[6]) == "call_1"
+    assert setup.llm.requests[2]["input"] == stored[:8]
+    await _close(socket, linked)
+
+
+async def test_two_late_results_are_told_in_one_reply() -> None:
+    searches = _Searches("Pune weather", "Delhi weather")
+    pune, delhi = _search_call("Pune weather", "call_1"), _search_call("Delhi weather", "call_2")
+    held = asyncio.Event()
+    setup = await _chat(
+        [_delta("Looking at both."), _starts(pune), _starts(delhi), _completed(pune, delhi)],
+        [_delta("Sure, "), held, _delta("one moment."), _completed()],
+        _said("Pune is sunny and Delhi is hazy."),
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather in Pune and Delhi?")
+    await socket.until("chat.tool", 2)
+    socket.send(setup.gem.id, "hurry")
+    await socket.until("chat.text", 2)
+
+    searches.gates["Delhi weather"].set()
+    searches.gates["Pune weather"].set()
+    await _settle()
+    held.set()
+    await socket.until("chat.done", 2)
+
+    assert socket.chat()[-4:] == [
+        ("chat.result", "Delhi weather"),
+        ("chat.result", "Pune weather"),
+        ("chat.text", "Pune is sunny and Delhi is hazy."),
+        ("chat.done", "Pune is sunny and Delhi is hazy."),
+    ]
+    stored = await grows.check()
+    assert _kinds(stored[8:]) == [
+        "function_call",
+        "function_call_output",
+        "function_call",
+        "function_call_output",
+        "assistant",
+    ]
+    assert [_stub_of(stored[8]), _stub_of(stored[10])] == ["call_2", "call_1"]
+    assert len(setup.llm.requests) == 3
+    assert setup.llm.requests[2]["input"] == stored[:12]
+    _a_valid_chain(stored)
+    await _close(socket, linked)
+
+
+async def test_with_the_latest_sender_gone_the_result_is_only_stored() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), _said("Also, it is sunny."), search=searches)
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    await _close(socket, linked)
+
+    searches.gates[_WEATHER].set()
+    stored = await _until_stored(setup, 8)
+    await _settle()
+
+    await grows.check()
+    assert _kinds(stored[6:]) == ["function_call", "function_call_output"]
+    assert _stub_of(stored[6]) == "call_1"
+    # No reply was written: nobody was there to read it.
+    assert len(setup.llm.requests) == 2
+
+    other, other_linked = await _open(setup.service())
+    other.send(setup.gem.id, "so?")
+    await other.until("chat.done")
+    assert setup.llm.requests[2]["input"] == [*stored, {"role": "user", "content": "so?"}]
+    assert other.chat() == [
+        ("chat.text", "Also, it is sunny."),
+        ("chat.done", "Also, it is sunny."),
+    ]
+    await grows.check()
+    await _close(other, other_linked)
+
+
+async def test_a_socket_that_closes_while_a_search_runs_leaves_it_running() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), search=searches)
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+    await _close(socket, linked)
+
+    stored = await grows.check()
+    assert _kinds(stored) == ["user", "assistant", "function_call", "function_call_output"]
+    assert stored[3]["output"] == _placeholder("call_1")
+    assert searches.cancelled == []
+
+    searches.gates[_WEATHER].set()
+    stored = await _until_stored(setup, 6)
+    await grows.check()
+    assert _stub_of(stored[4]) == "call_1"
+    assert stored[5]["output"] == searches.found(_WEATHER)
+    assert len(setup.llm.requests) == 1
+
+
+async def test_a_new_message_cuts_the_reply_about_a_late_result() -> None:
+    searches = _Searches(_WEATHER)
+    never = asyncio.Event()
+    setup = await _chat(
+        _looks(),
+        _said("Noon."),
+        [_delta("It is sunny "), never],
+        _said("You are welcome."),
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+
+    searches.gates[_WEATHER].set()
+    await socket.until("chat.text", 3)
+    socket.send(setup.gem.id, "thanks")
+    await socket.until("chat.done", 2)
+
+    assert socket.chat()[-5:] == [
+        ("chat.result", _WEATHER),
+        ("chat.text", "It is sunny "),
+        ("chat.cut", "It is sunny…"),
+        ("chat.text", "You are welcome."),
+        ("chat.done", "You are welcome."),
+    ]
+    stored = await grows.check()
+    assert _kinds(stored[6:]) == [
+        "function_call",
+        "function_call_output",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert stored[8] == {"role": "assistant", "content": "It is sunny…"}
+    # The new message waited until the cut reply was stored.
+    assert setup.llm.requests[3]["input"] == stored[:10]
+    await _close(socket, linked)
+
+
+async def test_a_message_that_comes_while_the_result_is_stored_is_answered_with_it() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), _said("Hello. And it is sunny."), search=searches)
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+
+    # The result comes in, and is being stored when a message arrives.
+    setup.docdb.slow = asyncio.Event()
+    searches.gates[_WEATHER].set()
+    await _settle()
+    socket.send(setup.gem.id, "hello")
+    await _settle()
+    assert len(setup.llm.requests) == 2
+    setup.docdb.slow.set()
+    await socket.until("chat.done", 2)
+    await _settle()
+
+    stored = await grows.check()
+    # The result is stored first, and only one reply is written: the one to the
+    # message, made with the result in front of the model.
+    assert len(setup.llm.requests) == 3
+    assert ("chat.result", _WEATHER) not in socket.chat()
+    assert socket.chat()[-2:] == [
+        ("chat.text", "Hello. And it is sunny."),
+        ("chat.done", "Hello. And it is sunny."),
+    ]
+    assert _kinds(stored[6:]) == ["function_call", "function_call_output", "user", "assistant"]
+    assert setup.llm.requests[2]["input"] == stored[:9]
+    await _close(socket, linked)
+
+
+async def test_cancel_tool_call_stops_a_search_still_running() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(
+        _looks(),
+        [_starts(_cancel_call("call_9", "call_1")), _completed(_cancel_call("call_9", "call_1"))],
+        _said("Okay, I stopped it."),
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+
+    await _cut_while_searching(setup, socket, "never mind the weather")
+
+    await _settle()
+    assert searches.cancelled == [_WEATHER]
+    stored = await grows.check()
+    assert stored[5:7] == [
+        {
+            "type": "function_call",
+            "call_id": "call_9",
+            "name": "cancel_tool_call",
+            "arguments": json.dumps({"call_id": "call_1"}),
+        },
+        {"type": "function_call_output", "call_id": "call_9", "output": "Cancelled."},
+    ]
+    # Thinking stops with it, nothing is told later, and the cancel is not shown.
+    assert _thinks(setup) == [False, True, False]
+    assert len(setup.llm.requests) == 3
+    assert ("chat.tool", "") not in socket.chat()
+    assert await setup.shown() == [
+        ("user", "weather?"),
+        ("gem", "Let me look."),
+        ("tool", _WEATHER),
+        ("user", "never mind the weather"),
+        ("gem", "Okay, I stopped it."),
+    ]
+    await _close(socket, linked)
+
+
+async def test_cancel_tool_call_drops_a_result_that_has_not_been_told() -> None:
+    searches = _Searches(_WEATHER)
+    held = asyncio.Event()
+    cancel = _cancel_call("call_9", "call_1")
+    setup = await _chat(
+        _looks(),
+        [held, _starts(cancel), _completed(cancel)],
+        _said("Okay."),
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+    socket.send(setup.gem.id, "never mind the weather")
+    await _settle()
+
+    # The search finishes while the reply that will cancel it is being written.
+    searches.gates[_WEATHER].set()
+    await _settle()
+    held.set()
+    await socket.until("chat.done")
+    await _settle()
+
+    stored = await grows.check()
+    assert stored[6] == {
+        "type": "function_call_output",
+        "call_id": "call_9",
+        "output": "Cancelled.",
+    }
+    assert ("chat.result", _WEATHER) not in socket.chat()
+    assert not any(item.get("call_id", "").startswith("late_") for item in stored)
+    assert len(setup.llm.requests) == 3
+    # It was waiting, with no result in the history, so the model thought until it went.
+    assert _thinks(setup) == [False, True, False]
+    await _close(socket, linked)
+
+
+@pytest.mark.parametrize("named", ["stub", "call_1", "call_unknown"])
+async def test_cancel_tool_call_with_nothing_running_says_so(named: str) -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), _said("It is sunny."), search=searches)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    searches.gates[_WEATHER].set()
+    await socket.until("chat.done", 2)
+    stub_id = (await setup.stored())[6]["call_id"]
+    target = stub_id if named == "stub" else named
+    cancel = _cancel_call("call_9", target)
+    setup.llm.then([_starts(cancel), _completed(cancel)], _said("It had already come."))
+
+    socket.send(setup.gem.id, "stop that search")
+    await socket.until("chat.done", 3)
+
+    assert (await setup.stored())[-2] == {
+        "type": "function_call_output",
+        "call_id": "call_9",
+        "output": "Nothing is running under that call_id.",
+    }
+    await _close(socket, linked)
+
+
+async def test_thinking_lasts_while_a_search_has_no_result_in_the_history() -> None:
+    searches = _Searches("Pune weather", "Pune time")
+    time_call = _search_call("Pune time", "call_2")
+    setup = await _chat(
+        _looks(),
+        [_starts(time_call), _completed(time_call)],
+        _said("It is noon."),
+        _said("And it is sunny."),
+        search=searches,
+    )
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+    socket.send(setup.gem.id, "and the time?")
+    await socket.until("chat.tool", 2)
+
+    # The weather comes in while the time is looked up: it waits, still not in the history.
+    searches.gates["Pune weather"].set()
+    await _settle()
+    searches.gates["Pune time"].set()
+    await socket.until("chat.done", 2)
+
+    # Before any search; while the weather ran; while it waited; once it was told.
+    assert _thinks(setup) == [False, True, True, False]
+    await _close(socket, linked)
+
+
+async def test_a_reply_about_a_result_that_fails_to_begin_ends_in_chat_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), search=searches)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+
+    class _Gone:
+        async def read(self) -> None:
+            raise ConnectionError("the database went away")
+
+    # The Darbar text cannot be read: the reply fails after `chat.result` was sent.
+    monkeypatch.setattr(setup.chat, "_darbar", _Gone())
+    searches.gates[_WEATHER].set()
+    await socket.until("chat.error")
+
+    assert socket.chat()[-2:] == [
+        ("chat.result", _WEATHER),
+        ("chat.error", "no reply could be made: the database went away"),
+    ]
+    # The result is stored all the same.
+    assert _stub_of((await setup.stored())[6]) == "call_1"
+    await _close(socket, linked)
+
+
+async def test_a_deleted_gems_late_result_is_dropped() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), search=searches)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+
+    await setup.gems.delete(str(setup.gem.id))
+    searches.gates[_WEATHER].set()
+    await _settle()
+
+    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert ("chat.result", _WEATHER) not in socket.chat()
+    assert len(setup.llm.requests) == 2
+    await _close(socket, linked)
+
+
+async def test_a_gem_that_lost_its_search_still_declares_cancel_tool_call_if_it_used_it() -> None:
+    searches = _Searches(_WEATHER)
+    cancel = _cancel_call("call_9", "call_1")
+    setup = await _chat(
+        _looks(),
+        [_starts(cancel), _completed(cancel)],
+        _said("Stopped."),
+        _said("Hi."),
+        search=searches,
+    )
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+
+    await setup.gems.update(str(setup.gem.id), {"tools": []})
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done", 2)
+
+    asked = setup.llm.requests[-1]
+    assert _tool_names(asked) == ["web_search", "cancel_tool_call"]
+    assert "cancel_tool_call" not in asked["instructions"]
+    await _close(socket, linked)
+
+
+# ---- the same on an Anthropic model
+
+
+class _KeyedClaude(_Claude):
+    configured = True
+
+
+async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> None:
+    searches = _Searches(_WEATHER)
+    claude = _KeyedClaude(
+        [_text("Let me look."), _call_starts(), _final(("toolu_1", _WEATHER))],
+        [_text("Noon."), _final()],
+        [_text("It is sunny."), _final()],
+        [_text("Hi."), _final()],
+    )
+    setup = await _chat(model="Haiku 5.5", search=searches)
+    setup.chat = ChatEntityClass(
+        gems=setup.gems,
+        darbar=DarbarEntityClass(cast("Any", setup.docdb)),
+        store=setup.store,
+        openai=cast("Any", _NoKey()),
+        anthropic=cast("Any", claude),
+        search=cast("Any", searches),
+    )
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    searches.gates[_WEATHER].set()
+    await socket.until("chat.done", 2)
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done", 3)
+
+    stored = await setup.stored()
+    assert _kinds(stored) == [
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert stored[3]["output"] == _placeholder("toolu_1")
+    assert _stub_of(stored[6]) == "toolu_1"
+    _a_valid_chain(stored)
+    for request in claude.requests:
+        _a_valid_anthropic_request(request["messages"])
+    # The reply about the result was asked for with the result last, on the user side.
+    told = claude.requests[2]["messages"][-1]
+    assert told["role"] == "user"
+    assert [block["type"] for block in told["content"]] == ["tool_result"]
+    await _close(socket, linked)
+
+
+def _a_valid_anthropic_request(messages: list[Any]) -> None:
+    """Alternating sides, opening and closing on the user's, each tool use answered next."""
+    assert [m["role"] for m in messages] == ["user", "assistant"] * (len(messages) // 2) + ["user"]
+    for index, message in enumerate(messages):
+        used = [b["id"] for b in message["content"] if b["type"] == "tool_use"]
+        if used:
+            answer = messages[index + 1]["content"]
+            assert [b["tool_use_id"] for b in answer[: len(used)]] == used
