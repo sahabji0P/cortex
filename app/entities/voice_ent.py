@@ -188,7 +188,6 @@ class VoiceConversation:
         self._instructions = instructions(
             darbar=darbar,
             gem=gem,
-            search=offers_search,
             model_needs=self._model.own_instructions,
         )
         # The task producing a reply, while one is being produced.

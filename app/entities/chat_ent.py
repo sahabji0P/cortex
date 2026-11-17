@@ -326,8 +326,6 @@ class ChatEntityClass:
             instructions=instructions(
                 darbar=darbar,
                 gem=gem,
-                search=offers_search,
-                written=True,
                 model_needs=model.own_instructions,
             ),
             # A FIRST RULE, TO BE TRIED OUT, NOT A SETTLED ONE: the whole stored
