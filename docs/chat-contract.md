@@ -233,7 +233,8 @@ carries the text as it is written.
    search is kept whole once the search has come back, heard or not.
 6. **On `call.assistant.done`,** show nothing new. It arrives when the last of the audio
    is sent, long before it is heard: the words still to be heard keep coming up at their
-   moments. Once the last of them is shown, `text` may take their place, as the reply
+   moments. Every word of a reply is sent before its `call.assistant.done`, so the app
+   then holds them all. Once the last of them is shown, `text` may take their place, as the reply
    the history will hold.
 7. **`call.tool.call` is not timed.** It arrives when the search starts, which can be
    before the words said ahead of it have been heard.

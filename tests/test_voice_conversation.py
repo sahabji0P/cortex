@@ -434,6 +434,32 @@ async def test_a_word_is_sent_only_after_the_audio_it_starts_in() -> None:
     assert ("there.", int(1.5 * _RATE)) not in sent
 
 
+async def test_a_timing_that_comes_after_its_audio_goes_out_at_once() -> None:
+    tts = _TTS()
+    words: list[tuple[str, int]] = []
+    speech = Speech(
+        tts,  # type: ignore[arg-type]
+        lambda audio: None,
+        Playback(_Clock()),
+        asyncio.create_task(tts.connect()),
+        word=lambda text, start: words.append((text, start)),
+    )
+    await speech.say("Hi")
+    [context] = tts.contexts
+    context._events.put_nowait(b"\x00" * _BYTES_PER_SECOND)
+    await _let_audio_out()
+    assert words == [("Hi", 0)]
+
+    context._events.put_nowait([CartesiaTTSWord("there.", 1.0, 2.0)])
+    await _let_audio_out()
+
+    assert words == [("Hi", 0), ("there.", _RATE)]
+    # One timed past the end of the audio is placed on its last sample.
+    context._events.put_nowait([CartesiaTTSWord("Bye.", 2.5, 3.0)])
+    await speech.finish()
+    assert words[-1] == ("Bye.", 2 * _RATE - 1)
+
+
 async def test_a_reply_heard_to_the_end_is_stored_whole() -> None:
     llm = _LLM(
         [_delta("Hi there."), _completed(_message("Hi there."))],

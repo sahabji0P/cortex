@@ -300,9 +300,11 @@ class Speech:
             sent = self._playback.sent // _BYTES_PER_SAMPLE
             while waiting and waiting[0][1] < sent:
                 self._word(*waiting.popleft())
-        # A timing that points past the end of the audio is off by a rounding at most.
-        for word in waiting:
-            self._word(*word)
+        # A timing that points past the end of the audio is off by a rounding at most:
+        # the word is placed on the last sample sent.
+        last = max(begins_at, self._playback.sent // _BYTES_PER_SAMPLE - 1)
+        for text, _ in waiting:
+            self._word(text, last)
         utterance.complete = True
 
     async def end_part(self) -> None:
