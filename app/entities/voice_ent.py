@@ -57,7 +57,7 @@ from app.adapters.anthropic_adp import AnthropicAdapterClass
 from app.adapters.cartesia_stt_adp import CartesiaSTTAdapterClass, CartesiaSTTSession
 from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
-from app.adapters.parallel_adp import ParallelAdapterClass, SearchResult
+from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.model import (
     LLM,
@@ -72,6 +72,7 @@ from app.entities.model import (
     is_openai,
     model_for,
 )
+from app.entities.tools import Tool, Toolbox, web_search_tool
 from app.entities.voice_speech import Clock, Playback, Speech, Standby, Utterance
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
@@ -196,6 +197,8 @@ class _ToolCall:
     call_id: str
     name: str
     arguments: str
+    # The tool called, or None if the conversation has no tool of that name.
+    tool: Tool | None = None
     output: str | None = None  # None while the tool is still running
     running: asyncio.Task[str] | None = None
     # Whether `output` is a placeholder standing in for a result that comes later.
@@ -224,9 +227,9 @@ class _ToolCall:
 
     @property
     def search_result(self) -> CallResult | None:
-        """The item holding this call's search result, if it has a real one."""
-        real = self.name == "web_search" and not self.placeholder
-        return self.result_item if real else None
+        """The item holding this call's result, if it is a real one that may be cleared."""
+        clearable = self.tool is not None and self.tool.clearable
+        return self.result_item if clearable and not self.placeholder else None
 
 
 @dataclass(slots=True)
@@ -326,7 +329,6 @@ class VoiceConversation:
     ) -> None:
         self._stt = stt
         self._tts = tts
-        self._search = search
         self._clock = clock
         self._playback = Playback(clock)
         # Everything the model sees, oldest first. It only ever grows at the end, and
@@ -347,8 +349,12 @@ class VoiceConversation:
         self._user_scripts: set[str] = set()
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
         # `llm` has to be the adapter of the provider that `model` belongs to.
-        tools = [_WEB_SEARCH_TOOL, _CANCEL_TOOL] if search.configured else []
-        self._model = model_for(llm, model, tools)
+        self._tools = Toolbox(
+            [web_search_tool(search), Tool(_CANCEL_TOOL, self._cancel_call)]
+            if search.configured
+            else []
+        )
+        self._model = model_for(llm, model, self._tools.specs)
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
         # stays the same. The date goes last, after whatever the model adds of its own.
@@ -567,6 +573,7 @@ class VoiceConversation:
                 call_id=f"late_{uuid.uuid4().hex[:16]}",
                 name=call.name,
                 arguments=json.dumps({"deferred_result_for": call.call_id}),
+                tool=call.tool,
                 output=output,
             )
             self._stubs[stub.call_id] = call.call_id
@@ -664,7 +671,13 @@ class VoiceConversation:
                     self._emit("assistant.delta", event.text)
                 elif isinstance(event, RoundDone):
                     calls = [
-                        _ToolCall(call.call_id, call.name, call.arguments) for call in event.calls
+                        _ToolCall(
+                            call.call_id,
+                            call.name,
+                            call.arguments,
+                            tool=self._tools.get(call.name),
+                        )
+                        for call in event.calls
                     ]
         if not calls:
             return False
@@ -673,7 +686,9 @@ class VoiceConversation:
         # Each call runs as its own task, so that interrupting the reply does not stop it.
         for call in calls:
             reply.add_call(call)
-            call.running = asyncio.create_task(self._run_tool(call.name, call.arguments))
+            call.running = asyncio.create_task(
+                self._tools.run(call.name, call.arguments, show=self._show_call)
+            )
         for call in calls:
             if call.running is not None:
                 call.output = await asyncio.shield(call.running)
@@ -707,23 +722,17 @@ class VoiceConversation:
         """The user's unanswered turn as one message, for a model call."""
         return [{"role": "user", "content": "\n".join(self._turn)}] if self._turn else []
 
-    async def _run_tool(self, name: str, arguments: str) -> str:
-        """Run one tool call. A failure goes back to the model as text, so it can say so."""
-        try:
-            if name == "web_search":
-                query = str(json.loads(arguments)["query"])
-                self._emit("tool.call", query)
-                # The fastest mode: the user is waiting in silence while this runs.
-                found = await self._search.search(objective=query, queries=[query], mode="turbo")
-                return _format_search(found)
-            if name == "cancel_tool_call":
-                return self._cancel_call(str(json.loads(arguments)["call_id"]))
-        except Exception as exc:
-            return f"{name} failed: {exc}"
-        return f"Unknown tool: {name}"
+    def _show_call(self, text: str) -> None:
+        """Tell the client what a tool call is doing, such as what a search looks up."""
+        self._emit("tool.call", text)
 
-    def _cancel_call(self, call_id: str) -> str:
-        """Stop a call that outlived its reply. Its result will never arrive."""
+    async def _cancel_call(self, arguments: str) -> str:
+        """Stop a call that outlived its reply. Its result will never arrive.
+
+        This is the `cancel_tool_call` tool. It needs the conversation's own state, so the
+        conversation makes it, not the tools module.
+        """
+        call_id = str(json.loads(arguments)["call_id"])
         # The model may name the call by a stub that already delivered its result.
         call_id = self._stubs.get(call_id, call_id)
         waiting = [late for late in self._late if late[0].call_id == call_id]
@@ -784,23 +793,6 @@ class VoiceEntityClass:
             model=model,
             speaks_first=speaks_first,
         )
-
-
-_WEB_SEARCH_TOOL = ToolSpec(
-    name="web_search",
-    description=(
-        "Search the web for current or factual information. Never call this for something "
-        "a search is already running for: that result arrives by itself."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "What to look up, as a full question."}
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    },
-)
 
 
 _CANCEL_TOOL = ToolSpec(
@@ -872,20 +864,3 @@ def _scripts(text: str) -> set[str]:
         if letter.isalpha()
     }
     return {_SAME_WRITING_SYSTEM.get(name, name) for name in names}
-
-
-def _format_search(result: SearchResult) -> str:
-    """Render search results as plain text for the model."""
-    if not result.results:
-        return "No results."
-    pages = [
-        "\n".join(
-            [
-                f"{page.title or page.url} ({page.url})",
-                *([f"Published: {page.publish_date}"] if page.publish_date else []),
-                *page.excerpts,
-            ]
-        )
-        for page in result.results
-    ]
-    return "\n\n".join(pages)
