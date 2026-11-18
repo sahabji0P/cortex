@@ -14,7 +14,7 @@ import pytest
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig
 from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
-from app.entities.voice_speech import Playback, Utterance
+from app.entities.voice_speech import Playback, Speech, Utterance
 
 # The fake speech is 24 kHz 16-bit mono, like the real one.
 _BYTES_PER_SECOND = 48000
@@ -120,7 +120,10 @@ class _TTSContext:
         words = text.split()
         if not words:
             return
-        timings = [CartesiaTTSWord(word, self._seconds + n + 1) for n, word in enumerate(words)]
+        timings = [
+            CartesiaTTSWord(word, self._seconds + n, self._seconds + n + 1)
+            for n, word in enumerate(words)
+        ]
         self._seconds += len(words)
         self._events.put_nowait(timings)
         self._events.put_nowait(b"\x00" * (_BYTES_PER_SECOND * len(words)))
@@ -337,6 +340,126 @@ async def test_a_finished_turn_is_answered_in_speech() -> None:
     await f.conversation.close()
 
 
+def _words(outputs: list[VoiceEvent | bytes]) -> list[tuple[str, int | None]]:
+    """Each word the client was sent, with the sample it starts at in the call's audio."""
+    return [
+        (output.text, output.start)
+        for output in outputs
+        if isinstance(output, VoiceEvent) and output.type == "assistant.word"
+    ]
+
+
+_RATE = _BYTES_PER_SECOND // 2  # samples in a second of speech
+
+
+async def test_a_reply_reaches_the_client_as_words_timed_to_its_audio() -> None:
+    llm = _LLM([_delta("Hi "), _delta("there."), _completed(_message("Hi there."))])
+    f = _conversation(llm)
+
+    f.stt.say("hello")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    # The stand-in voice takes a second a word. The model's text is not sent by itself.
+    assert _words(outputs) == [("Hi", 0), ("there.", _RATE)]
+    assert outputs[-1] == VoiceEvent(type="assistant.done", text="Hi there.")
+    await f.conversation.close()
+
+
+async def test_a_word_is_placed_in_the_audio_of_the_whole_call() -> None:
+    call = _search_call("who won the last F1 race")
+    llm = _LLM(
+        [_delta("Hi there."), _completed(_message("Hi there."))],
+        [_delta("One moment."), _starts(call), _completed(_message("One moment."), call)],
+        [_delta("Norris won."), _completed(_message("Norris won."))],
+    )
+    f = _conversation(llm)
+
+    f.stt.say("hello")
+    first = await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    f.stt.say("who won the last race")
+    second = await _read_until(f.conversation, "assistant.done")
+
+    # The count carries on from one reply to the next, and from the speech before a
+    # search to the speech after it: it is every sample sent since the call opened.
+    assert _words(first) == [("Hi", 0), ("there.", _RATE)]
+    assert _words(second) == [
+        ("One", 2 * _RATE),
+        ("moment.", 3 * _RATE),
+        ("Norris", 4 * _RATE),
+        ("won.", 5 * _RATE),
+    ]
+    assert _audio_seconds(first + second) == 6
+    await f.conversation.close()
+
+
+async def test_the_count_carries_on_past_audio_the_client_dropped() -> None:
+    never = asyncio.Event()
+    llm = _LLM([_delta(_STORY), never], [_delta("Sure."), _completed(_message("Sure."))])
+    f = _conversation(llm)
+
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.word")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 2.5)
+    f.stt.say("stop")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    # All of the story's audio was sent before the cut, and the client counts what it
+    # receives, played or not. So the next reply's word starts after all of it.
+    sent_before = len(_STORY.split())
+    assert _words(outputs)[-1] == ("Sure.", sent_before * _RATE)
+    await f.conversation.close()
+
+
+async def test_a_word_is_sent_only_after_the_audio_it_starts_in() -> None:
+    tts = _TTS()
+    sent: list[bytes | tuple[str, int]] = []
+    speech = Speech(
+        tts,  # type: ignore[arg-type]
+        sent.append,
+        Playback(_Clock()),
+        asyncio.create_task(tts.connect()),
+        word=lambda text, start: sent.append((text, start)),
+    )
+    await speech.say("Hi")
+    [context] = tts.contexts
+    # The timing of a second word comes in, and half a second of its audio never does.
+    context._events.put_nowait([CartesiaTTSWord("there.", 1.5, 2.0)])
+    await _let_audio_out()
+
+    assert [one for one in sent if not isinstance(one, bytes)] == [("Hi", 0)]
+    assert isinstance(sent[0], bytes)  # the word followed its audio
+    await speech.stop()
+    assert ("there.", int(1.5 * _RATE)) not in sent
+
+
+async def test_a_timing_that_comes_after_its_audio_goes_out_at_once() -> None:
+    tts = _TTS()
+    words: list[tuple[str, int]] = []
+    speech = Speech(
+        tts,  # type: ignore[arg-type]
+        lambda audio: None,
+        Playback(_Clock()),
+        asyncio.create_task(tts.connect()),
+        word=lambda text, start: words.append((text, start)),
+    )
+    await speech.say("Hi")
+    [context] = tts.contexts
+    context._events.put_nowait(b"\x00" * _BYTES_PER_SECOND)
+    await _let_audio_out()
+    assert words == [("Hi", 0)]
+
+    context._events.put_nowait([CartesiaTTSWord("there.", 1.0, 2.0)])
+    await _let_audio_out()
+
+    assert words == [("Hi", 0), ("there.", _RATE)]
+    # One timed past the end of the audio is placed on its last sample.
+    context._events.put_nowait([CartesiaTTSWord("Bye.", 2.5, 3.0)])
+    await speech.finish()
+    assert words[-1] == ("Bye.", 2 * _RATE - 1)
+
+
 async def test_a_reply_heard_to_the_end_is_stored_whole() -> None:
     llm = _LLM(
         [_delta("Hi there."), _completed(_message("Hi there."))],
@@ -406,7 +529,7 @@ async def test_speaking_over_a_reply_keeps_only_the_words_that_were_heard() -> N
     f = _conversation(llm)
 
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 3.5)  # three and a half words in
     f.stt.turn_start()
@@ -462,7 +585,7 @@ async def test_a_reply_cut_before_any_of_it_played_leaves_no_trace() -> None:
     f = _conversation(llm)
 
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.stt.say("never mind")
     outputs = await _read_until(f.conversation, "assistant.done")
@@ -496,7 +619,7 @@ async def test_closing_mid_reply_releases_both_speech_connections() -> None:
     f = _conversation(llm)
 
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await f.conversation.close()
 
     assert f.stt.closed
@@ -600,7 +723,7 @@ async def test_a_greeting_cut_off_before_a_word_of_it_was_heard_leaves_no_trace(
     )
     f = _conversation(llm, speaks_first=True)
 
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("capital of France?")  # before the greeting's first word has played
     outputs = await _read_until(f.conversation, "assistant.done")
 
@@ -735,7 +858,7 @@ _STORY = "Once upon a time there was a dragon who lived in a cave and guarded a 
 async def _cut_the_story(f: _Fixture, then: str) -> list[dict]:
     """Start the story, cut it four words in, end the turn with `then`. Return the next request."""
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 4.5)
     f.stt.turn_start()
@@ -770,12 +893,14 @@ async def test_the_recognizer_opening_an_empty_turn_first_adds_only_that_it_had_
     f = _conversation(llm)
 
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 4.5)
     # Some recognizer settings report the start of speech as an empty turn of its own.
     f.stt.say("")
-    await _read_until(f.conversation, "assistant.delta")
+    # The rest of the story's words are still waiting to be read, ahead of the cut.
+    await _read_until(f.conversation, "interrupt")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("stop")
     await _read_until(f.conversation, "assistant.done")
 
@@ -792,7 +917,7 @@ async def test_a_turn_that_ends_without_starting_still_cuts_the_reply() -> None:
     f = _conversation(llm)
 
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 4.5)
     f.stt.turn_end("stop")
@@ -816,7 +941,7 @@ async def test_words_that_trail_a_sentence_join_the_same_turn_on_a_new_line() ->
 
     # Speech recognition split one sentence into two turns.
     f.stt.say("Hello, what's")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("happening?")
     outputs = await _read_until(f.conversation, "assistant.done")
 
@@ -846,7 +971,7 @@ async def test_a_stray_word_in_another_script_is_dropped_and_the_reply_starts_ag
     f = _conversation(llm)
 
     f.stt.say("What is the capital of France?")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("हूँ")  # a noise, heard as one Devanagari word
     outputs = await _read_until(f.conversation, "assistant.done")
 
@@ -868,7 +993,7 @@ async def test_a_turn_with_no_words_does_not_leave_the_user_unanswered() -> None
     f = _conversation(llm)
 
     f.stt.say("What is the capital of France?")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("")  # a cough: a turn starts, cutting the reply, and ends with nothing in it
     outputs = await _read_until(f.conversation, "assistant.done")
 
@@ -888,7 +1013,7 @@ async def test_a_reply_cut_off_by_a_noise_is_picked_up_again() -> None:
     f = _conversation(llm)
 
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 4.5)
     f.stt.say("")
@@ -911,7 +1036,7 @@ async def test_a_stray_word_just_after_the_reply_starts_is_dropped_and_the_reply
     f = _conversation(llm)
 
     f.stt.say("What is the capital of France?")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 2.5)  # two words of the reply heard, 2.65 s after the question
     f.stt.say("हूँ")
@@ -934,7 +1059,7 @@ async def test_the_same_word_well_into_the_reply_is_taken_as_the_user_speaking()
     f = _conversation(llm)
 
     f.stt.say("Tell me a story.")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 6.5)
     f.stt.say("रुको")  # "stop", six seconds in: far too late to be a trailing noise
@@ -975,7 +1100,7 @@ async def test_a_language_the_user_has_already_spoken_is_never_noise() -> None:
     await _read_until(f.conversation, "assistant.done")
     f.clock.advance(60)
     f.stt.say("What is the capital of France?")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("रुको")
     outputs = await _read_until(f.conversation, "assistant.done")
 
@@ -1044,7 +1169,7 @@ async def test_a_noise_turn_that_starts_with_punctuation_is_still_dropped() -> N
     f = _conversation(llm)
 
     f.stt.say("What is the capital of France?")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("? हूँ")
     outputs = await _read_until(f.conversation, "assistant.done")
 
@@ -1166,7 +1291,7 @@ async def test_interrupting_the_answer_keeps_the_search_and_the_words_heard() ->
 
     f.stt.say("who won the last race")
     await _read_until(f.conversation, "tool.call")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 1.5)
     f.stt.say("stop")
@@ -1376,7 +1501,7 @@ async def test_a_result_whose_reply_was_cut_off_unheard_by_noise_is_told_again()
 
     await _interrupted_search_then_hello(f, finish)
     # The reply about the result starts, and a noise cuts it off before a word is heard.
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("")
     outputs = await _read_until(f.conversation, "assistant.done")
 
@@ -1401,7 +1526,7 @@ async def test_a_result_whose_reply_the_user_talked_over_is_left_to_the_model() 
     f = _conversation(llm, _Search(gate=finish))
 
     await _interrupted_search_then_hello(f, finish)
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("what is two plus two?")
     outputs = await _read_until(f.conversation, "assistant.done")
     assert outputs[-1].text == "Four."
@@ -1432,7 +1557,7 @@ async def test_words_said_before_a_search_but_never_heard_do_not_count_as_tellin
     # The reply about the result says it, searches again and goes on, all before any of
     # it has played. Then a noise cuts it off.
     await _read_until(f.conversation, "tool.call")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     f.stt.say("")
 
     # "It is sunny." is in the history, because the model was sent it. The user never
@@ -1588,7 +1713,7 @@ async def test_a_wordless_turn_after_an_unanswered_one_is_not_blamed_on_noise() 
     f.stt.say("what's the weather")
     await _read_until(f.conversation, "tool.call")
     f.stt.say("hello?")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     # The user is heard to start again, the search finishes, and nothing was said.
     f.stt.turn_start()
     await _read_until(f.conversation, "interrupt")
@@ -1888,7 +2013,9 @@ def _utterance(text: str, seconds_per_word: float = 1.0, *, complete: bool = Tru
     utterance = Utterance(context=None)
     utterance.text = text
     for n, word in enumerate(text.split()):
-        utterance.add_words([CartesiaTTSWord(word, (n + 1) * seconds_per_word)])
+        utterance.add_words(
+            [CartesiaTTSWord(word, n * seconds_per_word, (n + 1) * seconds_per_word)]
+        )
         utterance.add_audio(n * seconds_per_word, seconds_per_word)
     utterance.complete = complete
     return utterance
@@ -1935,7 +2062,7 @@ def test_a_word_timing_that_does_not_match_the_text_ends_the_count_there() -> No
     utterance.add_audio(0.0, 5.0)
     # The speech service spelled the amount out, so its words stop lining up with ours.
     spoken = ["It", "costs", "five", "dollars", "million."]
-    utterance.add_words([CartesiaTTSWord(word, n + 1.0) for n, word in enumerate(spoken)])
+    utterance.add_words([CartesiaTTSWord(word, float(n), n + 1.0) for n, word in enumerate(spoken)])
 
     assert utterance.heard(4.5) == ("It costs", False)
 
@@ -1969,7 +2096,7 @@ async def test_a_delay_reported_mid_reply_counts_for_the_words_already_sent() ->
     f = _conversation(llm)
 
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     # All eight words have been sent. Only now does the browser know its real delay.
     f.conversation.set_output_delay(1.0)

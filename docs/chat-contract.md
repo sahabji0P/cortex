@@ -33,7 +33,7 @@ a `type`. Binary frames are a call's audio.
 
 | `type` | Fields | Meaning |
 | --- | --- | --- |
-| `link.ready` | `version` (3) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later |
+| `link.ready` | `version` (4) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later. Version 4: a call's reply comes as words timed to its audio (`call.assistant.word`), and `call.assistant.delta` is gone |
 | `chat.result` | `gem`, `text` | A search the gem started in an earlier reply has come back, and a reply about it follows, unasked. `text` is what the search looked up, as its `chat.tool` said, or "" |
 | `chat.text` | `gem`, `text` | The next piece of the reply, as it is written |
 | `chat.tool` | `gem`, `text` | The gem is using a tool. `text` says what, such as what a search looks up |
@@ -123,8 +123,8 @@ text frames like the rest.
 | binary | raw 16-bit mono PCM at 24 kHz | Speech audio of the open call (see [Audio](#audio)) |
 | `call.user.partial` (JSON) | `text` | The user's words so far, while they are still speaking |
 | `call.user.final` (JSON) | `text` | The user's finished sentence. A reply follows |
-| `call.assistant.delta` (JSON) | `text` | The next piece of the reply's text |
-| `call.assistant.done` (JSON) | `text` | All of the reply's audio has been sent. `text` is the whole reply |
+| `call.assistant.word` (JSON) | `text`, `start` (a whole number of samples) | The next word of the reply, as it is spoken. `start` is where the word begins in the call's speech audio (see [Words](#words)) |
+| `call.assistant.done` (JSON) | `text` | All of the reply's audio has been sent, which is well before it has all been heard. `text` is the whole reply, as the gem wrote it |
 | `call.tool.call` (JSON) | `text` | A web search has started. `text` is what it looks up |
 | `call.interrupt` (JSON) | `text` | The user started speaking: stop playback and drop the speech not yet played. If that cut a reply short, `text` is what the gem remembers of it, the words heard ending in "…" (just "…" if none were); otherwise it is empty |
 | `call.error` (JSON) | `text` | Something failed inside a call that carries on. `text` says what |
@@ -133,7 +133,8 @@ text frames like the rest.
 | `call.failed` (JSON) | `text` (the reason) | The call could not be opened, or broke, through a fault on the backend's side: the gem's config or the Darbar text cannot be read, speech services are unavailable, the gem's conversation cannot be read ("the conversation could not be read") or what was said cannot be kept ("the conversation could not be stored"), a failure mid-call, or mic audio that is not being taken (see the rules). `text` says which, in words |
 
 The events from `call.user.partial` to `call.error` are the conversation's
-`VoiceEvent`s (`app/entities/voice_ent.py`) with `call.` put before their type.
+`VoiceEvent`s (`app/entities/voice_ent.py`) with `call.` put before their type. Only
+`call.assistant.word` carries a `start`.
 
 ### Rules
 
@@ -200,6 +201,47 @@ they are part of the contract, not advice.
    most 1 second of it.
 6. **Echo.** Cancel echo on the app's side. Without it the mic hears the gem's own
    speech as the user talking, and the gem interrupts itself.
+
+### Words
+
+In a call the app is not sent the reply's text as the gem writes it: that runs seconds
+ahead of the audio. It is sent each word with the place in the audio where it is spoken,
+so it can show the word at the moment it is heard. Written chat is as it was: `chat.text`
+carries the text as it is written.
+
+1. **A word.** `call.assistant.word` carries one word in `text`, as the speech service
+   timed it: the reply's text split at its spaces, punctuation kept with its word. Show
+   the words of a reply in the order they come, with a space between them.
+2. **Where it starts.** `start` is a whole number of samples at 24 kHz. It counts every
+   sample of speech the backend has sent in this call, from nought at `call.ready`. The
+   app counts the same thing: add up the binary frames as they arrive, two bytes to a
+   sample, whether they are then played or dropped. The count is never set back: not at
+   the end of a reply, not at `call.interrupt`, not when a reply pauses for a search. So
+   there is one running count for the whole call, and no rule for where a reply begins.
+3. **When to show it.** The app knows when each frame of audio plays (rule 3 of
+   [Audio](#audio)), so it knows when the sample at `start` plays. Show the word then,
+   later by the sound device's delay if the app knows it.
+4. **A word comes after the audio it starts in.** The backend sends a word once the
+   frame holding its first sample has been sent, so `start` is always inside audio the
+   app already has. That is usually well before the sample plays. A word whose sample
+   has already played when it arrives is shown at once. No audio is held back for a
+   word.
+5. **On `call.interrupt`,** drop the words not yet shown, with the audio. If `text` is
+   not empty, it is what the gem remembers of the reply: put it in place of the words
+   shown. It can be a word or two shorter than what was shown, because the backend's
+   count of what was heard leans short. It can also be longer: what a gem says before a
+   search is kept whole once the search has come back, heard or not.
+6. **On `call.assistant.done`,** show nothing new. It arrives when the last of the audio
+   is sent, long before it is heard: the words still to be heard keep coming up at their
+   moments. Every word of a reply is sent before its `call.assistant.done`, so the app
+   then holds them all. Once the last of them is shown, `text` may take their place, as the reply
+   the history will hold.
+7. **`call.tool.call` is not timed.** It arrives when the search starts, which can be
+   before the words said ahead of it have been heard.
+
+The backend works out what was heard at a cut from the same word timings (each word's
+end) and its copy of the playback schedule, as before. The words sent to the app do not
+replace that: they are the same timings, shown.
 
 After the app hangs up, frames of that call, audio included, may still arrive until its
 last frame. Drop them all, up to and including that last frame, so the end of one call

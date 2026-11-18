@@ -297,7 +297,7 @@ async def test_a_reply_cut_in_a_call_is_stored_as_heard_and_sent_so_to_chat() ->
 
     call, f, keeping = await world.call()
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 3.5)  # three and a half words in
     f.stt.turn_start()
@@ -325,7 +325,7 @@ async def test_a_reply_cut_by_hanging_up_is_stored_as_heard() -> None:
 
     call, f, keeping = await world.call()
     f.stt.say("tell me a story")
-    await _read_until(f.conversation, "assistant.delta")
+    await _read_until(f.conversation, "assistant.word")
     await _let_audio_out()
     f.clock.advance(_DELAY + 2.5)
     await _hang_up(call, keeping)
@@ -343,7 +343,7 @@ async def test_a_call_in_which_nothing_was_said_stores_nothing(how: str) -> None
     if how == "reply unheard":
         f.stt.say("hello")
     if how != "silence":
-        await _read_until(f.conversation, "assistant.delta")
+        await _read_until(f.conversation, "assistant.word")
     await _hang_up(call, keeping)
 
     # Our lines wait for something to follow them, and the user's open turn, with no

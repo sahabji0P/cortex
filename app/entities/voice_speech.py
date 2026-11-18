@@ -8,12 +8,17 @@ actually heard is worked out here from two things:
 - Cartesia's word timings: when each word ends within its utterance's audio.
 - `Playback`: the server's picture of the client's speaker, kept by applying the
   client's own scheduling rule to every chunk that is sent.
+
+The same timings are what the client shows a reply's words by. Each word is handed on
+with where it starts in the call's speech audio, so the client can show it at the moment
+it is heard (see `Speech`).
 """
 
 import asyncio
 import contextlib
 import re
 import time
+from collections import deque
 from collections.abc import Callable
 
 from app.adapters.cartesia_tts_adp import (
@@ -27,8 +32,11 @@ __all__ = ["Clock", "Playback", "Speech", "Standby", "Utterance"]
 
 type Clock = Callable[[], float]
 
-# Speech audio is raw 16-bit mono PCM, so this converts a byte count to playing time.
-_BYTES_PER_SECOND = CartesiaTTSAdapterClass.sample_rate * 2
+# Speech audio is raw 16-bit mono PCM, so these convert a byte count to samples and to
+# playing time.
+_SAMPLE_RATE = CartesiaTTSAdapterClass.sample_rate
+_BYTES_PER_SAMPLE = 2
+_BYTES_PER_SECOND = _SAMPLE_RATE * _BYTES_PER_SAMPLE
 
 # The soonest the client can be playing a chunk after it is sent: the trip there plus the
 # client's own scheduling margin. Set on the long side on purpose. A wrong guess should
@@ -109,6 +117,10 @@ class Playback:
         self.clock = clock
         self._free_at = 0.0
         self._device_delay = 0.0
+        # How much speech audio the call has sent so far, in bytes. It is never set
+        # back: the client counts the audio it receives the same way, so a place in the
+        # call's audio means the same to both.
+        self.sent = 0
 
     def set_output_delay(self, seconds: float) -> None:
         """Take the client's word for how long its sound device holds audio before it is heard.
@@ -207,9 +219,14 @@ class Speech:
         send: Callable[[bytes], None],
         playback: Playback,
         connecting: asyncio.Task[CartesiaTTSSession],
+        word: Callable[[str, int], None] = lambda text, start: None,
     ) -> None:
+        # `word` is given each word as Cartesia timed it, and the sample of the call's
+        # speech audio it starts at: counted at the audio's own rate, over all the
+        # speech sent since the call opened.
         self._tts = tts
         self._send = send
+        self._word = word
         self._playback = playback
         self._connecting = connecting
         # Whether the connection has carried anything yet. One that was opened ahead of
@@ -259,15 +276,35 @@ class Speech:
         return utterance
 
     async def _forward(self, utterance: Utterance) -> None:
+        # Where this utterance's audio begins in the call's. Nothing else sends audio
+        # while it is forwarded: the utterance before it has all gone out, and a reply
+        # that was cut sends no more.
+        begins_at = self._playback.sent // _BYTES_PER_SAMPLE
+        # Words whose audio has not been sent yet, each with the sample it starts at. A
+        # word goes out only after the audio it starts in, so the client is never given
+        # a place in audio that a cut then keeps from being sent.
+        waiting: deque[tuple[str, int]] = deque()
         async for event in utterance.context.events():
             if self._silenced:
                 return
             if isinstance(event, bytes):
                 seconds = len(event) / _BYTES_PER_SECOND
                 utterance.add_audio(self._playback.schedule(seconds), seconds)
+                self._playback.sent += len(event)
                 self._send(event)
             else:
                 utterance.add_words(event)
+                waiting.extend(
+                    (word.text, begins_at + round(word.start * _SAMPLE_RATE)) for word in event
+                )
+            sent = self._playback.sent // _BYTES_PER_SAMPLE
+            while waiting and waiting[0][1] < sent:
+                self._word(*waiting.popleft())
+        # A timing that points past the end of the audio is off by a rounding at most:
+        # the word is placed on the last sample sent.
+        last = max(begins_at, self._playback.sent // _BYTES_PER_SAMPLE - 1)
+        for text, _ in waiting:
+            self._word(text, last)
         utterance.complete = True
 
     async def end_part(self) -> None:

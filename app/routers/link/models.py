@@ -61,7 +61,8 @@ class LinkModels:
                 type: Literal["link.ready"] = "link.ready"
                 # 2: the link carries calls as well as chat.
                 # 3: a search carries on after a cut, and its result is told later.
-                version: Literal[3] = 3
+                # 4: a call's reply comes as words timed to its audio, not as text.
+                version: Literal[4] = 4
 
             class CallReady(BaseModel):
                 """The call is open. Its audio and events follow."""
@@ -74,13 +75,23 @@ class LinkModels:
                 type: Literal[
                     "call.user.partial",
                     "call.user.final",
-                    "call.assistant.delta",
                     "call.assistant.done",
                     "call.tool.call",
                     "call.interrupt",
                     "call.error",
                 ]
                 text: str = ""
+
+            class CallWord(BaseModel):
+                """One word of a call's reply, as it is spoken.
+
+                `start` is the sample the word begins at in the call's speech audio: at
+                24 kHz, counted over all the speech sent since `call.ready`.
+                """
+
+                type: Literal["call.assistant.word"] = "call.assistant.word"
+                text: str
+                start: int
 
             class CallEnded(BaseModel):
                 """The call is over: the app hung up, or the conversation ended by itself."""

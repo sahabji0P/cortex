@@ -101,6 +101,9 @@ The history holds what the user heard, not what the model wrote.
    Cartesia's timing for each word, a copy of the client's playback schedule kept on the
    server, and the sound-device delay the client reports (capped at 1 second). The
    estimate leans short: it may say the user heard less than they did, never more.
+   The client is sent the same words, each with where it starts in the call's audio and
+   only once that audio has been sent. It shows each as it is heard. It is not sent the
+   model's text as it is written.
 3. **A reply joins the history late.** (Enforced) A reply is added only when it has been
    heard to its end, or when it is cut off.
 4. **A cut reply is stored as the words heard, plus "…".** (Enforced) The rest is
@@ -409,7 +412,8 @@ A fourth, added on 16 November 2026:
   late result is told.
 - `app/entities/late_results.py`: tool calls that outlive their reply, the same for a
   call and for chat.
-- `app/entities/voice_speech.py`: speaking, and working out what was heard.
+- `app/entities/voice_speech.py`: speaking, working out what was heard, and timing the
+  words the client shows.
 - `app/entities/model.py`: the two providers behind one interface.
 - `app/entities/call_ent.py`: opening a call, and storing what it adds.
 - `app/entities/conversation_ent.py`: what is kept of each gem's one conversation: its

@@ -176,7 +176,10 @@ class Utter:
         if not words:
             return
         self._events.put_nowait(
-            [CartesiaTTSWord(w, self._seconds + n + 1) for n, w in enumerate(words)]
+            [
+                CartesiaTTSWord(w, self._seconds + n, self._seconds + n + 1)
+                for n, w in enumerate(words)
+            ]
         )
         self._seconds += len(words)
         self._events.put_nowait(b"\x00" * (48000 * len(words)))
@@ -316,7 +319,7 @@ async def scenario_3(llm, par, replies):
     """a cut reply: the model only knows the words that were heard"""
     t = Talk(llm, par)
     t.stt.say(STORY)
-    await t.until("assistant.delta")
+    await t.until("assistant.word")
     full = await t.until("assistant.done")
     t.clock.advance(DELAY + 6.5)
     t.stt.turn_start()
@@ -421,7 +424,7 @@ async def scenario_7(llm, par, replies):
     """a wordless turn: the reply is picked up where it stopped"""
     t = Talk(llm, par)
     t.stt.say(STORY)
-    await t.until("assistant.delta")
+    await t.until("assistant.word")
     full = await t.until("assistant.done")
     t.clock.advance(DELAY + 6.5)
     t.stt.turn_start()
@@ -442,7 +445,7 @@ async def scenario_8(llm, par, replies):
     """one sentence split in two by the recognizer"""
     t = Talk(llm, par)
     t.stt.say("Tell me the name of")
-    await t.until("assistant.delta")
+    await t.until("assistant.word")
     t.stt.say("the capital of France.")
     a = await t.until("assistant.done")
     replies.append(a)
@@ -465,7 +468,7 @@ async def scenario_9(llm, par, replies):
     await t.until("assistant.done")
     t.search.gate.set()
     t.clock.advance(600)
-    await t.until("assistant.delta")  # the reply about the result has begun
+    await t.until("assistant.word")  # the reply about the result has begun
     t.stt.say("Quick question: what is three plus three?")
     a = await t.until("assistant.done")
     replies.append(a)
@@ -550,7 +553,7 @@ async def scenario_14(llm, par, replies):
     """a stray word in another script never reaches the model"""
     t = Talk(llm, par)
     t.stt.say("What is the capital of France?")
-    await t.until("assistant.delta")
+    await t.until("assistant.word")
     t.stt.say("हूँ")
     a = await t.until("assistant.done")
     replies.append(a)

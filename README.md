@@ -104,7 +104,7 @@ The desktop app is the client: it keeps one socket open to `/v1/link` and holds 
 
 ## Calls
 
-A call goes over the standing socket, `WS /v1/link`, which carries chat too. The app sends `call.start`, mic audio as binary frames, `call.playback` and `call.end`. It gets `call.ready`, speech as binary frames, the call's events with `call.` put before their type, and one last frame: `call.ended`, `call.refused` or `call.failed`. The socket stays open through all of it.
+A call goes over the standing socket, `WS /v1/link`, which carries chat too. The app sends `call.start`, mic audio as binary frames, `call.playback` and `call.end`. It gets `call.ready`, speech as binary frames, the call's events with `call.` put before their type (a reply comes as words timed to its audio, not as text), and one last frame: `call.ended`, `call.refused` or `call.failed`. The socket stays open through all of it.
 
 A call is always with a gem (see [Gems](#gems)): `call.start` names it, and may say who speaks first. The gem's model answers. A `first` that is sent wins over the gem's for that call, and one that is left out leaves the gem's. A `call.start` with no gem or a value that is not offered, a gem that is not there or an id that is not an id, a gem already in a call, or a gem whose model's provider has no key, gets `call.refused` with the reason in words. A gem whose stored config cannot be read, as when a newer cortex wrote it, gets `call.failed`, and so does a call whose conversation cannot be read or stored. Opening a call, and storing what it adds, is in [`app/entities/call_ent.py`](app/entities/call_ent.py).
 
