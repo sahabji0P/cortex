@@ -306,7 +306,12 @@ function openChat(gem) {
 
   function onFrame(frame) {
     if (frame.gem !== undefined && frame.gem !== gem) return;
-    if (frame.type === "chat.text") {
+    if (frame.type === "chat.result") {
+      // A search from an earlier reply came back. The gem's reply about it follows,
+      // unasked, as a line of its own.
+      say("meta", "", `a search came back: ${frame.text}`);
+      writing = null;
+    } else if (frame.type === "chat.text") {
       writing ??= say("cortex", name, "");
       writing.textContent += frame.text;
     } else if (frame.type === "chat.tool") {

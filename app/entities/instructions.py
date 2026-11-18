@@ -87,30 +87,41 @@ Never end a reply with "…" yourself.
 
 _WRITTEN_RULES = _WRITING_STYLE + _PLAIN_TEXT + _CUT_IN_WRITING
 
-# The search rules for writing. Nothing carries on in the background there, so none of
-# the call's rules about a search that outlives its reply apply.
-_WRITTEN_SEARCH_RULES = """\
+# What follows the opening of the last search rule, the same in a call and in writing:
+# a search carries on after the user has cut its reply, and its result comes later.
+_SEARCH_CARRIES_ON = """\
+the search carries on in the background. Do not search for the same thing again: say it \
+is still coming, and answer whatever else they asked. Only if they say they no longer \
+want it, call cancel_tool_call: nothing is cancelled unless you make that call. The \
+result reaches you by itself, as a call with "deferred_result_for" in its arguments. You \
+did not make that call: it only delivers the late result. When it arrives, tell the user \
+what it found straight away, without being asked, unless they have said they no longer \
+want it. If they say something else before you have told them, answer that and then tell \
+them. If you have already told them the same thing, do not repeat it: say in a few words \
+that the search confirms it.
+"""
+
+# The search rules for writing. As in a call, a search carries on in the background
+# when a new message cuts the reply that made it, so the last rule is the call's, with
+# a new message in place of an interruption.
+_WRITTEN_SEARCH_RULES = (
+    """\
 - When what you are about to do will keep the user waiting, such as looking something \
 up, first say in a few words what you are going to do, the way a person would.
 - When you answer from search results, name the source.
-"""
+- If the user sends a new message while a search is running, """
+    + _SEARCH_CARRIES_ON
+)
 
-_SEARCH_RULES = """\
+_SEARCH_RULES = (
+    """\
 - When what you are about to do will keep the user waiting for more than a second, such \
 as looking something up, first say in a few words what you are going to do, the way a \
 person would, and do it in that same turn: the user hears nothing else while they wait.
 - When you answer from search results, name the source.
-- If the user interrupts while a search is running, the search carries on in the \
-background. Do not search for the same thing again: say it is still coming, and answer \
-whatever else they asked. Only if they say they no longer want it, call cancel_tool_call: \
-nothing is cancelled unless you make that call. The result reaches you by itself, as a \
-call with "deferred_result_for" in its arguments. You did not make that call: \
-it only delivers the late result. When it arrives, tell the user what it found straight \
-away, without being asked, unless they have said they no longer want it. If they say \
-something else before you have told them, answer that and then tell them. If you have \
-already told them the same thing, do not repeat it: say in a few words that the search \
-confirms it.
-"""
+- If the user interrupts while a search is running, """
+    + _SEARCH_CARRIES_ON
+)
 
 # The last line of the instructions. It is the one part that differs from one day to the
 # next, so everything before it is the same in every conversation.

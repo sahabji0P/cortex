@@ -157,6 +157,9 @@ class LinkServiceV1Class:
         finally:
             for turn in turns:
                 turn.cut()
+            # A reply nobody asked for, about a late search result, is in no list of
+            # this socket's. Chat is told the client has gone, and cuts it.
+            self.chat.left(send)
             waits: list[Awaitable[object]] = [turn.over.wait() for turn in turns]
             if call is not None:
                 call.hang_up()

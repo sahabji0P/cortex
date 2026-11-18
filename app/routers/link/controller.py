@@ -10,12 +10,14 @@ router = APIRouter(prefix="/v1/link", tags=["link"])
 async def link(websocket: WebSocket, service: LinkServiceRegistry.V1) -> None:
     """The app's standing socket. It carries written chat with the gems, and calls.
 
-    The server sends `{"type": "link.ready", "version": 2}` once it is open.
+    The server sends `{"type": "link.ready", "version": 3}` once it is open.
 
     Chat: send `{"type": "chat.send", "gem": <id>, "text": ...}` to write to a gem: a
     reply still being written to that gem is cut first. The reply comes as `chat.text`
     and `chat.tool` frames, then exactly one of `chat.done`, `chat.cut` or `chat.error`,
-    each with `gem` and `text`.
+    each with `gem` and `text`. A search that carries on after a cut is told later, in
+    a reply of its own that starts with `chat.result`, sent to the socket of the latest
+    message to that gem.
 
     A call, one at a time: send `{"type": "call.start"}` with optional `gem`, `model`
     and `first`, as on `/v1/voice/converse`. Send mic audio as binary frames (raw 16-bit

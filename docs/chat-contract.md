@@ -31,11 +31,12 @@ a `type`. Binary frames are a call's audio.
 
 | `type` | Fields | Meaning |
 | --- | --- | --- |
-| `link.ready` | `version` (2) | Sent once, as soon as the socket is open. Version 2 carries calls |
+| `link.ready` | `version` (3) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later |
+| `chat.result` | `gem`, `text` | A search the gem started in an earlier reply has come back, and a reply about it follows, unasked. `text` is what the search looked up, as its `chat.tool` said, or "" |
 | `chat.text` | `gem`, `text` | The next piece of the reply, as it is written |
 | `chat.tool` | `gem`, `text` | The gem is using a tool. `text` says what, such as what a search looks up |
 | `chat.done` | `gem`, `text` | The reply is complete. `text` is the whole reply as it is kept: its stretches of text, joined by a space |
-| `chat.cut` | `gem`, `text` | The reply was cut off by a new message. `text` is what is kept of it: what was sent, ending in "…". If it was cut while a tool was running, it is the text before the tool, whole. If nothing is kept, it is just "…" |
+| `chat.cut` | `gem`, `text` | The reply was cut off by a new message. `text` is what is kept of it: what was sent, ending in "…". If it was cut while a tool was running, it is the text before the tool, whole, and the tool carries on: its result comes later (see `chat.result`). If nothing is kept, it is just "…" |
 | `chat.error` | `gem`, `text` | No reply can be made, or the reply failed: the gem is not there, its model has no key, or the model call failed. `text` is the reason. What was sent before a failure is kept, ending in "…" |
 | `error` | `text` | A frame the backend could not read (not JSON, or a `type` it does not know), a message that is blank or longer than 20,000 characters, or a `call.start` while a call is open. Nothing is sent to the gem, no running reply is cut, and a running call carries on. The socket stays open |
 
@@ -43,6 +44,27 @@ One reply at a time for each gem, whichever socket asked. A `chat.send` that is 
 gets `chat.text` and `chat.tool` frames in the order they happen, then exactly one of
 `chat.done`, `chat.cut` or `chat.error`. After a
 `chat.cut`, the frames that follow for that gem belong to the new message.
+
+A `chat.send` is not the only thing that starts frames for a gem. A search still running
+when its reply is cut carries on. When it finishes, at the next moment no reply is being
+written to that gem, the gem tells the user what it found in a reply of its own, with no
+new message: one `chat.result` for each search that came back, then `chat.text` and
+`chat.tool` frames, then exactly one of `chat.done`, `chat.cut` or `chat.error`. A
+search that finishes while a reply is being written waits until that reply is stored,
+and several that are waiting are told in one reply. Show it as a reply of the gem's,
+under a line saying a search came back.
+
+That reply goes to the socket that sent the latest message to that gem, and nowhere
+else. If that socket has closed, nothing is sent and no reply is written: the result is
+only stored, and the gem brings it up when it next answers. A new message cuts that
+reply like any other, and is answered once it is stored. So does that socket closing
+while it is being written: it is kept as what was sent, ending in "…".
+
+How the app tells such a reply from the reply to a message: it always begins with
+`chat.result`, and everything for that gem from there to the next `chat.done`,
+`chat.cut` or `chat.error` belongs to it, even if the app has sent a message in the
+meantime. That message's own frames follow that last frame. A `chat.result` is never
+sent in the middle of a reply.
 
 A reply's text comes in stretches. What a gem writes before it uses a tool is one
 stretch, and what it writes after is another: start a new line after a `chat.tool`. The
@@ -52,9 +74,10 @@ Nothing is kept of a message that gets `chat.error` because the gem is not there
 config cannot be read, or its model has no key. When a reply fails part-way, the user's
 message and what was sent of the reply are kept.
 
-A reply is sent to the socket that asked for it. Another socket open on the same gem is
-not told: it reads the history again. If that socket closes while a reply is
-being written, the reply is cut, as if a new message had arrived.
+A reply to a message is sent to the socket that sent it. Another socket open on the same
+gem is not told: it reads the history again. If that socket closes while a reply is
+being written, the reply is cut, as if a new message had arrived, and a search it was
+running carries on.
 
 ## Calls
 
@@ -111,7 +134,7 @@ What each event means is in the README, under the old socket's contract. On
   `call.failed`. The old socket made the app wait instead.
 - A client that stops reading its frames for ten seconds counts as gone: the socket is
   closed on it, which ends its call and cuts its replies.
-- Chat frames (`chat.send` and the `chat.*` frames back) are unchanged.
+- Calls changed nothing about chat frames (`chat.send` and the `chat.*` frames back).
 
 A `call.start` whose `model` or `first` is not offered gets `call.refused` with "unknown
 model or setting", not `error`. A `call.playback` that cannot be read, such as one with a
@@ -123,6 +146,12 @@ The backend keeps each gem's written conversation in the database: what the user
 what the gem wrote as far as it was sent, and its tool calls. It is only ever added to.
 Every reply is made from the gem's config and the Darbar text as they are at that moment,
 so a change to either applies from the next message.
+
+A search cut off while it runs is kept with a result saying it is still running. When it
+comes back, its real result is added after everything else, as a second call that names
+the first. The gem can stop a search still running. Searches run in the backend's memory,
+so a restart loses them: before the next reply, a search lost that way is added a result
+saying so.
 
 A call does not read or add to this yet: a call still starts empty. Joining the two into
 one context is a later step.
@@ -145,7 +174,8 @@ The written conversation so far, oldest first, for showing on screen:
   stored, to show a time by: a user's message carries when it arrived, and the messages
   of one reply all carry when the reply ended. Do not sort by it.
 - `role` is `user`, `gem` or `tool`. A `tool` message's `text` is what a `chat.tool` frame
-  carried.
+  carried. The call that brings a late result, and a call that stops a search, are not
+  shown. A reply about a late result is a `gem` message like any other.
 - A reply that was cut mid-text ends in "…". One cut before any of it was sent is not
   there at all.
 - A gem that is not there is a 404.

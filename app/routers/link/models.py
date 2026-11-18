@@ -68,7 +68,8 @@ class LinkModels:
 
                 type: Literal["link.ready"] = "link.ready"
                 # 2: the link carries calls as well as chat.
-                version: Literal[2] = 2
+                # 3: a search carries on after a cut, and its result is told later.
+                version: Literal[3] = 3
 
             class CallReady(BaseModel):
                 """The call is open. Its audio and events follow."""

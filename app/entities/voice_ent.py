@@ -61,6 +61,8 @@ from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
 from app.entities.instructions import instructions
+from app.entities.late_results import CANCEL_TOOL as _CANCEL_TOOL
+from app.entities.late_results import PLACEHOLDER as _PLACEHOLDER
 from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import (
     LLM,
@@ -69,7 +71,6 @@ from app.entities.model import (
     Item,
     ModelInfo,
     ModelName,
-    ToolSpec,
     is_openai,
     model_for,
 )
@@ -77,15 +78,6 @@ from app.entities.tools import Tool, Toolbox, web_search_tool
 from app.entities.voice_speech import Clock, Playback, Speech, Standby
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
-
-# Stands in for the result of a call that was still running when the user spoke.
-_PLACEHOLDER = (
-    "Still running in the background, under call_id {call_id}. It has not failed. Only if "
-    "the user says they no longer want this, stop it with cancel_tool_call and that "
-    "call_id. Otherwise leave it alone: its result will reach you by itself, as a separate "
-    'call with "deferred_result_for": "{call_id}". Until then, do not search for this '
-    "again, in any wording."
-)
 
 # Search results are long. Once more than this many are in the history in full, all but
 # the newest few are replaced by the marker below, in one go.
@@ -619,24 +611,6 @@ class VoiceEntityClass:
             gem=gem,
             darbar=darbar,
         )
-
-
-_CANCEL_TOOL = ToolSpec(
-    name="cancel_tool_call",
-    description=(
-        "Stop a search that is still running in the background. Call this only when the "
-        "user says they no longer want its result, and always call it then: nothing is "
-        "cancelled unless this is called."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "call_id": {"type": "string", "description": "The call_id of the running call."}
-        },
-        "required": ["call_id"],
-        "additionalProperties": False,
-    },
-)
 
 
 def _is_stray(fragment: str, sentence_before: str, scripts_spoken: set[str]) -> bool:
