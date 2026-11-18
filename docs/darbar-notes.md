@@ -53,6 +53,11 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A gem is offered a copy of a server's tools, made when you ask. A server cannot change them behind your back.
 - Closing a tool to a gem holds at once, even in an open call: every call of it reads the connection again.
 - A gem's own `tools` are the built-in ones only.
+- A connection can sign in through the browser (OAuth): add it by address only, and Cortex gets the pass itself. Built.
+- The browser comes back to a route on the backend, on localhost: the backend runs on your Mac. Rethink when it is deployed or runs on another machine.
+- A pass is renewed by itself when it can. One that cannot is dropped when refused, the app is told, and the gem is told in plain words.
+- A tool call never waits on a browser.
+- Fixed headers stay, for servers that take a key.
 
 ## Base (next, order not fixed, no rush)
 
@@ -73,8 +78,10 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Vault: a gem without a secret asks the gem that has it to do the job. The secret is not handed over.
 - Permissions: allow, ask or block, per gem and tool. Built so far: which gems, per connection and per tool. No "ask".
 - Connections by local command (stdio): not until there is a sign-in. A route that starts a command is too open.
-- Connections that sign in through the browser (OAuth): needs the app. Only fixed headers work today.
-- Connection headers are kept in the database as given. They move to the vault.
+- Connection headers, passes and registrations are kept in the database as given. They move to the vault.
+- A pass running out: a badge in the app only. No pop-up, no notification.
+- Sign-in servers that do not let Cortex register itself, and scope step-up on a 403: not built.
+- Connections over SSE: not built.
 - A connection's pictures and sounds are not passed on to the model, only text.
 - A server telling us its tools changed: not listened to. You refresh.
 - A connection document that cannot be read stops every gem's reply. Skip it and say so instead.
