@@ -131,7 +131,7 @@ Something new (a voice, skills, looks) is added by raising the version and writi
 
 A call is held with a gem when the WebSocket names it with `?gem=`. The gem's name and its instructions open what the model is told, ahead of the rules for a spoken conversation. Its model answers, it greets the user if it speaks first, and it is offered web search only if its `tools` name `web_search` and the search key is set. A call without a gem is unchanged: it is Cortex, with the same instructions as before.
 
-What the model is told is put together in layers, in [`app/entities/instructions.py`](app/entities/instructions.py), from what changes least to what changes most: the Darbar (what is true for every gem, empty for now), the gem, the spoken rules, the tools' rules, what the model itself needs, and the date. The order keeps the start of every request the same for as long as possible, which is what a prompt cache needs.
+What the model is told is put together in layers, in [`app/entities/instructions.py`](app/entities/instructions.py), from what changes least to what changes most: the Darbar (what is true for every gem: a few plain lines on what a gem is and that the gems share a Darbar; a call without a gem is not sent it), the gem, the spoken rules, the tools' rules, what the model itself needs, and the date. The order keeps the start of every request the same for as long as possible, which is what a prompt cache needs.
 
 | Route | Does |
 | --- | --- |

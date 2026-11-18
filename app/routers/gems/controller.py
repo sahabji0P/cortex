@@ -3,7 +3,7 @@ from fastapi import APIRouter, Response
 from app.routers.gems.models import GemsModels
 from app.routers.gems.service import GemsServiceRegistry
 
-# No sign-in, like the voice and cortex routes: this backend has one user for now.
+# No sign-in, like the voice routes: this backend has one user for now.
 router = APIRouter(prefix="/v1/gems", tags=["gems"])
 
 
