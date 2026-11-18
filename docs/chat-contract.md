@@ -32,16 +32,26 @@ with a `type`.
 | `link.ready` | `version` (1) | Sent once, as soon as the socket is open |
 | `chat.text` | `gem`, `text` | The next piece of the reply, as it is written |
 | `chat.tool` | `gem`, `text` | The gem is using a tool. `text` says what, such as what a search looks up |
-| `chat.done` | `gem`, `text` | The reply is complete. `text` is the whole reply |
-| `chat.cut` | `gem`, `text` | The reply was cut off by a new message. `text` is what is kept of it: what was sent, ending in "…" (just "…" if nothing was) |
+| `chat.done` | `gem`, `text` | The reply is complete. `text` is the whole reply as it is kept: its stretches of text, joined by a space |
+| `chat.cut` | `gem`, `text` | The reply was cut off by a new message. `text` is what is kept of it: what was sent, ending in "…". If it was cut while a tool was running, it is the text before the tool, whole. If nothing is kept, it is just "…" |
 | `chat.error` | `gem`, `text` | No reply can be made, or the reply failed: the gem is not there, its model has no key, or the model call failed. `text` is the reason. What was sent before a failure is kept, ending in "…" |
-| `error` | `text` | A frame the backend could not read. The socket stays open |
+| `error` | `text` | A frame the backend could not read, or a message that is blank or longer than 20,000 characters. Nothing is sent to the gem and no running reply is cut. The socket stays open |
 
-One reply at a time for each gem. A `chat.send` gets `chat.text` and `chat.tool` frames in
-the order they happen, then exactly one of `chat.done`, `chat.cut` or `chat.error`. After a
+One reply at a time for each gem, whichever socket asked. A `chat.send` that is accepted
+gets `chat.text` and `chat.tool` frames in the order they happen, then exactly one of
+`chat.done`, `chat.cut` or `chat.error`. After a
 `chat.cut`, the frames that follow for that gem belong to the new message.
 
-A reply is sent to the socket that asked for it. If that socket closes while a reply is
+A reply's text comes in stretches. What a gem writes before it uses a tool is one
+stretch, and what it writes after is another: start a new line after a `chat.tool`. The
+history keeps each stretch as a message of its own.
+
+Nothing is kept of a message that gets `chat.error` because the gem is not there, its
+config cannot be read, or its model has no key. When a reply fails part-way, the user's
+message and what was sent of the reply are kept.
+
+A reply is sent to the socket that asked for it. Another socket open on the same gem is
+not told: it reads the history again. If that socket closes while a reply is
 being written, the reply is cut, as if a new message had arrived.
 
 ## What a gem remembers of a chat
@@ -68,9 +78,13 @@ The written conversation so far, oldest first, for showing on screen:
 }
 ```
 
+- The order of the list is the order of the conversation. `at` is when each message was
+  stored, to show a time by: a user's message carries when it arrived, and the messages
+  of one reply all carry when the reply ended. Do not sort by it.
 - `role` is `user`, `gem` or `tool`. A `tool` message's `text` is what a `chat.tool` frame
   carried.
-- A reply that was cut ends in "…".
+- A reply that was cut mid-text ends in "…". One cut before any of it was sent is not
+  there at all.
 - A gem that is not there is a 404.
 
 Deleting a gem deletes its written conversation.

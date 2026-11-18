@@ -26,6 +26,12 @@ async def get_gem(gem_id: str, service: GemsServiceRegistry.V1) -> GemsModels.V1
     return await service.get_gem(gem_id)
 
 
+@router.get("/{gem_id}/chat")
+async def get_chat(gem_id: str, service: GemsServiceRegistry.V1) -> GemsModels.V1.Output.Chat:
+    """The gem's written conversation so far, oldest first, for showing on screen."""
+    return await service.get_chat(gem_id)
+
+
 @router.patch("/{gem_id}")
 async def update_gem(
     gem_id: str,

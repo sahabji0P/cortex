@@ -7,7 +7,7 @@ layers go in order from what changes least to what changes most:
 
 1. the Darbar: what is true for every gem
 2. the gem: who this gem is
-3. how the conversation is carried: the spoken rules
+3. how the conversation is carried: the spoken rules, or the written ones
 4. the tools' rules, for the tools that are offered
 5. what the model itself needs
 6. the date
@@ -62,6 +62,39 @@ nothing after it, so do not assume they know the rest. When you carry on, contin
 there instead of starting again. Never end a reply with "…" yourself.
 """
 
+# How a written conversation is carried. Writing is always with a gem, which has
+# already said who it is.
+_WRITTEN = """\
+You are in a written conversation. The user reads what you write in a chat window.
+
+"""
+
+_WRITING_STYLE = """\
+- Write the way a person writes a message: plainly, and only as long as the answer needs.
+"""
+
+# This rule goes when the app can show formatting.
+_PLAIN_TEXT = """\
+- Write plain text, with no markdown or other formatting marks. The window shows your \
+words exactly as you write them.
+"""
+
+_CUT_IN_WRITING = """\
+- An earlier reply of yours that ends in "…" was cut off at that point, because the user \
+sent a new message. They read nothing after it, so do not assume they know the rest. \
+Never end a reply with "…" yourself.
+"""
+
+_WRITTEN_RULES = _WRITING_STYLE + _PLAIN_TEXT + _CUT_IN_WRITING
+
+# The search rules for writing. Nothing carries on in the background there, so none of
+# the call's rules about a search that outlives its reply apply.
+_WRITTEN_SEARCH_RULES = """\
+- When what you are about to do will keep the user waiting, such as looking something \
+up, first say in a few words what you are going to do, the way a person would.
+- When you answer from search results, name the source.
+"""
+
 _SEARCH_RULES = """\
 - When what you are about to do will keep the user waiting for more than a second, such \
 as looking something up, first say in a few words what you are going to do, the way a \
@@ -99,6 +132,7 @@ def instruction_layers(
     darbar: str | None = None,
     gem: GemConfig | None,
     search: bool,
+    written: bool = False,
     model_needs: str,
     now: datetime | None = None,
 ) -> list[Layer]:
@@ -109,7 +143,11 @@ def instruction_layers(
 
     `darbar` is the Darbar text the user wrote, or None for the built-in one. A gem is
     told it first. An empty one tells it nothing.
+    `written` gives the rules for writing in place of the spoken ones. Writing is always
+    with a gem.
     """
+    if written and gem is None:
+        raise ValueError("a written conversation is always with a gem")
     today = (now or datetime.now(UTC)).strftime("%A, %d %B %Y")
     return [
         # What is true for every gem. A call without a gem keeps the text it always had.
@@ -117,8 +155,10 @@ def instruction_layers(
         Layer("gem", _gem(gem)),
         # The text of a call without a gem is kept whole: that call's behaviour is
         # finished, and a gem's wording has not been tried on a live call yet.
-        Layer("spoken", (_CORTEX if gem is None else _SPOKEN) + _SPOKEN_RULES),
-        Layer("tools", _SEARCH_RULES if search else ""),
+        Layer("written", _WRITTEN + _WRITTEN_RULES)
+        if written
+        else Layer("spoken", (_CORTEX if gem is None else _SPOKEN) + _SPOKEN_RULES),
+        Layer("tools", "" if not search else _WRITTEN_SEARCH_RULES if written else _SEARCH_RULES),
         Layer("model", model_needs),
         Layer("date", _TODAY.format(today=today)),
     ]
@@ -129,12 +169,18 @@ def instructions(
     darbar: str | None = None,
     gem: GemConfig | None,
     search: bool,
+    written: bool = False,
     model_needs: str,
     now: datetime | None = None,
 ) -> str:
     """The whole instructions, as the model is sent them."""
     layers = instruction_layers(
-        darbar=darbar, gem=gem, search=search, model_needs=model_needs, now=now
+        darbar=darbar,
+        gem=gem,
+        search=search,
+        written=written,
+        model_needs=model_needs,
+        now=now,
     )
     return "".join(layer.text for layer in layers)
 

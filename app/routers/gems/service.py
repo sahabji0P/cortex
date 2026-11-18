@@ -4,14 +4,23 @@ from typing import Annotated
 from fastapi import Depends
 
 from app.entities import EntitiesRegistry
+from app.entities.chat_ent import ChatEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.routers.gems.models import GemsModels
 
 
 class GemsServiceV1Class:
-    def __init__(self, gems: GemEntityClass | None = None) -> None:
-        # Tests hand in their own. The app uses the one the registry made at startup.
+    def __init__(
+        self, gems: GemEntityClass | None = None, chat: ChatEntityClass | None = None
+    ) -> None:
+        # Tests hand in their own. The app uses the ones the registry made at startup.
         self.gems = EntitiesRegistry.Gems if gems is None else gems
+        self._chat = chat
+
+    @property
+    def chat(self) -> ChatEntityClass:
+        # Looked up when it is first needed, so a test of the gems alone need not make it.
+        return EntitiesRegistry.Chat if self._chat is None else self._chat
 
     @staticmethod
     def _gem_out(gem: GemConfig) -> GemsModels.V1.Output.Gem:
@@ -52,6 +61,16 @@ class GemsServiceV1Class:
 
     async def delete_gem(self, gem_id: str) -> None:
         await self.gems.delete(gem_id)
+
+    async def get_chat(self, gem_id: str) -> GemsModels.V1.Output.Chat:
+        return GemsModels.V1.Output.Chat(
+            messages=[
+                GemsModels.V1.Output.ChatMessage(
+                    role=message.role, text=message.text, at=message.at
+                )
+                for message in await self.chat.messages(gem_id)
+            ]
+        )
 
 
 # Cached, so every request gets the one service.

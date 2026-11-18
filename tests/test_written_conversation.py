@@ -1,17 +1,19 @@
 """The written conversation with the model and its one tool faked: messages in, text out.
 
 It runs on the same loop as a call, so these tests are about what is particular to
-writing: what counts as delivered when the reader stops, and one reply at a time.
+writing: what counts as delivered when the reader stops or the reply is cut, what is
+handed back to be stored, and one reply at a time.
 """
 
 import asyncio
 import contextlib
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
-from app.entities.model import ToolSpec
+from app.entities.model import Item, ToolSpec, model_for
 from app.entities.tools import Tool, Toolbox
 from app.entities.written_ent import WrittenConversation, WrittenEvent
 
@@ -97,9 +99,19 @@ class _LookUp:
         return Toolbox([Tool(spec, self.run, shown=lambda a: json.loads(a)["query"])])
 
 
-def _conversation(llm: _LLM, look_up: _LookUp | None = None) -> WrittenConversation:
-    tools = (look_up or _LookUp()).tools()
-    return WrittenConversation(llm=llm, model="6 Luna", tools=tools, instructions="Be brief.")
+def _conversation(
+    llm: _LLM, look_up: _LookUp | None = None, history: list[Item] | None = None
+) -> WrittenConversation:
+    return _with_tools(llm, (look_up or _LookUp()).tools(), history)
+
+
+def _with_tools(
+    llm: _LLM, tools: Toolbox, history: list[Item] | None = None
+) -> WrittenConversation:
+    model = model_for(llm, "6 Luna", tools.specs)
+    return WrittenConversation(
+        model=model, tools=tools, instructions="Be brief.", history=history or []
+    )
 
 
 async def _read(conversation: WrittenConversation, text: str) -> list[WrittenEvent]:
@@ -119,7 +131,7 @@ async def test_a_reply_is_streamed_and_joins_the_history_whole() -> None:
     assert events == [
         WrittenEvent("text", "Hi "),
         WrittenEvent("text", "there."),
-        WrittenEvent("done"),
+        WrittenEvent("done", "Hi there."),
     ]
     assert llm.requests[0]["instructions"] == "Be brief."
 
@@ -145,7 +157,7 @@ async def test_a_tool_call_is_shown_and_its_result_goes_back_to_the_model() -> N
         WrittenEvent("text", "Let me look."),
         WrittenEvent("tool.call", "Pune weather"),
         WrittenEvent("text", "Sunny."),
-        WrittenEvent("done"),
+        WrittenEvent("done", "Let me look. Sunny."),
     ]
     await _read(conversation, "thanks")
     assert llm.requests[2]["input"] == [
@@ -224,6 +236,7 @@ async def test_a_tool_still_running_at_a_cut_is_stopped_and_given_a_result() -> 
     assert sent[3]["type"] == "function_call_output"
     assert sent[3]["call_id"] == "call_1"
     assert sent[3]["output"].startswith("Stopped")
+    # Nothing is made up to mark the cut: the stopped call says it.
     assert sent[4] == {"role": "user", "content": "never mind"}
 
 
@@ -310,9 +323,7 @@ async def test_a_reader_cancelled_twice_still_leaves_the_reply_in_the_history() 
     tools = Toolbox([Tool(spec, slow_to_stop, shown=lambda a: json.loads(a)["query"])])
     call = _call("the weather")
     llm = _LLM([_delta("Let me look."), _starts(call), _completed(call)], _said("Sunny."))
-    conversation = WrittenConversation(
-        llm=llm, model="6 Luna", tools=tools, instructions="Be brief."
-    )
+    conversation = _with_tools(llm, tools)
     looking = asyncio.Event()
 
     async def reader() -> None:
@@ -351,3 +362,87 @@ async def test_a_reader_cancelled_twice_still_leaves_the_reply_in_the_history() 
     ]
     assert sent[1]["content"] == "Let me look."
     assert sent[3]["output"].startswith("Stopped:")
+
+
+# ---- given a history, handing back what was added, and cutting
+
+
+async def test_it_starts_from_the_history_it_is_given_and_hands_back_what_it_added() -> None:
+    call = _call("Pune weather")
+    llm = _LLM([_delta("Let me look."), _starts(call), _completed(call)], _said("Sunny."))
+    earlier: list[Item] = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi."},
+    ]
+    conversation = _conversation(llm, history=earlier)
+    sent_at = datetime(2020, 1, 1, 8, 0, tzinfo=UTC)
+
+    await _read_at(conversation, "weather?", sent_at)
+
+    assert llm.requests[0]["input"] == [*earlier, {"role": "user", "content": "weather?"}]
+    added = conversation.added
+    assert [entry.item for entry in added] == [
+        {"role": "user", "content": "weather?"},
+        {"role": "assistant", "content": "Let me look."},
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "look_up",
+            "arguments": call.arguments,
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "Found it."},
+        {"role": "assistant", "content": "Sunny."},
+    ]
+    # Only the call carries what its event showed.
+    assert [entry.shown for entry in added] == [None, None, "Pune weather", None, None]
+    assert added[0].at == sent_at
+    assert all(entry.at > sent_at for entry in added[1:])
+
+
+async def test_a_cut_ends_the_stream_with_what_is_kept() -> None:
+    gate = asyncio.Event()
+    llm = _LLM([_delta("Once upon "), gate, _delta("a time."), _completed()])
+    conversation = _conversation(llm)
+
+    async with asyncio.timeout(2):
+        stream = conversation.send("a story")
+        assert await anext(stream) == WrittenEvent("text", "Once upon ")
+        conversation.cut()
+        assert [event async for event in stream] == [WrittenEvent("cut", "Once upon…")]
+
+    assert [entry.item for entry in conversation.added] == [
+        {"role": "user", "content": "a story"},
+        {"role": "assistant", "content": "Once upon…"},
+    ]
+
+
+async def test_a_reply_cut_before_it_begins_leaves_no_reply_and_asks_nothing() -> None:
+    llm = _LLM()
+    conversation = _conversation(llm)
+
+    conversation.cut()
+    events = await _read(conversation, "hello")
+
+    assert events == [WrittenEvent("cut", "…")]
+    assert llm.requests == []
+    assert [entry.item for entry in conversation.added] == [
+        {"role": "user", "content": "hello"},
+    ]
+
+
+async def test_a_failed_reply_is_handed_back_as_delivered() -> None:
+    llm = _LLM([_delta("Half "), SimpleNamespace(type="error", message="boom")])
+    conversation = _conversation(llm)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _read(conversation, "go")
+
+    assert [entry.item for entry in conversation.added] == [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "Half…"},
+    ]
+
+
+async def _read_at(conversation: WrittenConversation, text: str, at: datetime) -> None:
+    async with asyncio.timeout(2):
+        assert [event.type async for event in conversation.send(text, at=at)][-1] == "done"

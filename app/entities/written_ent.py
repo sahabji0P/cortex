@@ -1,27 +1,35 @@
 """
-Written entity: a conversation with a gem in writing, the thinnest one that works.
+Written entity: a conversation with a gem in writing.
 
 One message in, one reply out. The reply is made by the same loop as a call's (see
 `loop.py`) and delivered as text: each piece reaches the reader as an event of the
-stream `send` returns. Nothing routes to it yet, and nothing is stored: the history
-lives as long as the object.
+stream `send` returns.
+
+A conversation is given the history to start from, and hands back what it added to it
+(`added`): the user's message, the reply as it was delivered, and its tool calls with
+their results. Keeping those is the caller's job. Chat makes one of these for every
+message, from what is stored (see `chat_ent.py`).
 
 The history follows the same rules as a call's. In writing, what was delivered is what
 the reader was handed, and the reply runs at most one piece of text ahead of them. A
-reader who stops part-way (closes the stream, or is cancelled) leaves the history with
-the text they were handed, ending in "…".
+reply that does not finish, because it was cut, the reader stopped part-way (closed the
+stream, or was cancelled), or it failed, leaves the history with the text the reader was
+handed, ending in "…". Nothing is made up to mark the cut: a reply cut before any of
+it was handed over leaves no reply at all, as a call's does, and one cut while a tool
+ran keeps the text before the call whole, with the call's result saying it was stopped.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 
-from app.entities.loop import Reply, RoundInput, ToolCall, run_reply
-from app.entities.model import LLM, Item, ModelName, model_for
+from app.entities.loop import CUT_MARK, Reply, RoundInput, ToolCall, run_reply
+from app.entities.model import Item, Model
 from app.entities.tools import Toolbox
 
-__all__ = ["WrittenConversation", "WrittenEvent"]
+__all__ = ["Added", "WrittenConversation", "WrittenEvent"]
 
 # The result of a tool call that was still running when its reply was cut off.
 _STOPPED = "Stopped: the reply that made this call was cut off before the call finished."
@@ -33,11 +41,28 @@ class WrittenEvent:
 
     - `text`       the next piece of the reply's text
     - `tool.call`  a tool call is being made (what it does in `text`, such as a query)
-    - `done`       the reply is complete
+    - `done`       the reply is complete. `text` is the whole reply
+    - `cut`        the reply was cut off. `text` is what is kept of it: ending in "…" if
+                   it was cut mid-text, whole if it was cut while a tool ran, and just
+                   "…" if nothing is kept
+
+    The text of `done` and `cut` is the reply's stretches of text, as the history keeps
+    them, joined by a space.
     """
 
-    type: Literal["text", "tool.call", "done"]
+    type: Literal["text", "tool.call", "done", "cut"]
     text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Added:
+    """One item a conversation added to its history."""
+
+    item: Item
+    # When it was added. The user's message carries when it was sent.
+    at: datetime
+    # For a tool call, the text of its `tool.call` event, if it had one.
+    shown: str | None = None
 
 
 class _Passage:
@@ -100,53 +125,84 @@ class _Page:
 class WrittenConversation:
     """One written conversation with a gem: send a message, read the reply as it is written."""
 
-    def __init__(self, *, llm: LLM, model: ModelName, tools: Toolbox, instructions: str) -> None:
-        # `llm` has to be the adapter of the provider that `model` belongs to.
-        self._model = model_for(llm, model, tools.specs)
+    def __init__(
+        self,
+        *,
+        model: Model,
+        tools: Toolbox,
+        instructions: str,
+        history: Sequence[Item] = (),
+    ) -> None:
+        # `model` has to be told of exactly the tools in `tools`, and `instructions` are
+        # the whole instructions, with what the model needs already in them.
+        self._model = model
         self._tools = tools
-        self._instructions = instructions + self._model.own_instructions
-        self._history: list[Item] = []
+        self._instructions = instructions
+        self._history: list[Item] = list(history)
+        # Everything added to the history since the conversation was made, in order.
+        self.added: list[Added] = []
+        # The user's message whose reply is being written, until the reply is settled.
+        self._open: Item | None = None
+        self._open_at = datetime.now(UTC)
         self._writing = False
+        self._cut = False
+        self._out: asyncio.Queue[_Handed] | None = None
         # Settling the latest reply into the history. Kept so the task is not lost if
         # the reader that started it is cancelled while it runs.
-        self._settling: asyncio.Task[None] | None = None
+        self._settling: asyncio.Task[WrittenEvent] | None = None
 
-    async def send(self, text: str) -> AsyncGenerator[WrittenEvent]:
-        """Send a message and yield its reply as it is written, ending with `done`.
+    async def send(self, text: str, *, at: datetime | None = None) -> AsyncGenerator[WrittenEvent]:
+        """Send a message and yield its reply as it is written, ending with `done` or `cut`.
 
-        Nothing happens until the stream is read. One reply at a time: reading a second
-        stream while a reply is being written raises `RuntimeError`. A reply that fails
-        raises its failure, after the text that was delivered.
+        `at` is when the message was sent, if not now. Nothing happens until the stream
+        is read. One reply at a time: reading a second stream while a reply is being
+        written raises `RuntimeError`. A reply that fails raises its failure, after the
+        text that was delivered, once it is settled.
 
-        To stop a reply part-way, close the stream (as with `contextlib.aclosing`). Only
-        then is the reply settled into the history: a stream left open holds it. A reply
-        read to its end is settled before `done` is yielded, so the next message can be
-        sent as soon as `done` is seen.
+        To stop a reply part-way, call `cut`, and the stream ends with `cut`. Closing
+        the stream (as with `contextlib.aclosing`) or cancelling its reader stops it the
+        same way, without the event. Only then is the reply settled into the history: a
+        stream left open holds it. A reply is settled before `done` or `cut` is yielded,
+        so the next message can be sent as soon as either is seen.
         """
         if self._writing:
             raise RuntimeError("a reply is still being written")
         self._writing = True
-        self._history.append({"role": "user", "content": text})
+        self._open = {"role": "user", "content": text}
+        self._open_at = at or datetime.now(UTC)
         out: asyncio.Queue[_Handed] = asyncio.Queue()
+        self._out = out
         reply = Reply(_Page(out))
-        producing = asyncio.create_task(self._produce(reply, out))
+        # A reply cut before it began is not begun at all: the model is not asked.
+        producing = None if self._cut else asyncio.create_task(self._produce(reply, out))
         try:
-            while (handed := await out.get()) is not None:
+            while not self._cut and (handed := await out.get()) is not None:
                 event, passage, taken = handed
                 if passage is not None:
                     passage.handed += len(event.text)
                 if taken is not None:
                     taken.set_result(None)
                 yield event
-            await producing
+            if producing is not None and not self._cut:
+                await producing
         finally:
             # Settled in a task of its own, and only waited for here. A reader that is
             # cancelled again while it waits then cannot leave the reply out of the
             # history, or its tool calls running. The next message is accepted once
             # that task is done, not before.
             self._settling = asyncio.create_task(self._settle(reply, producing))
-            await asyncio.shield(self._settling)
-        yield WrittenEvent("done")
+            ended = await asyncio.shield(self._settling)
+        yield ended
+
+    def cut(self) -> None:
+        """Cut the reply being written off where the reader is, as a new message does.
+
+        Its stream ends with `cut`. Called before `send`, the next reply is cut before
+        it begins: nothing is kept of it, and the model is not asked for it.
+        """
+        self._cut = True
+        if self._out is not None:
+            self._out.put_nowait(None)  # wakes the reader, if it is waiting for text
 
     async def _produce(self, reply: Reply, out: asyncio.Queue[_Handed]) -> None:
         try:
@@ -166,18 +222,58 @@ class WrittenConversation:
     def _next_round(self) -> RoundInput:
         # The least thinking the model allows, as in a call. Whether writing wants more
         # is not settled.
-        return RoundInput(self._history, think=False)
+        return RoundInput([*self._history, *([self._open] if self._open else [])], think=False)
 
-    async def _settle(self, reply: Reply, producing: asyncio.Task[None]) -> None:
-        """Stop what is still running, then move the reply into the history as delivered."""
+    async def _settle(self, reply: Reply, producing: asyncio.Task[None] | None) -> WrittenEvent:
+        """Stop what is still running, then move the reply into the history as delivered.
+
+        Return the event that ends the reply's stream, if it is not a failure.
+        """
         try:
-            producing.cancel()
-            await asyncio.gather(producing, return_exceptions=True)
+            if producing is not None:
+                producing.cancel()
+                await asyncio.gather(producing, return_exceptions=True)
             stopped = [task for call in reply.calls() if (task := _stop(call)) is not None]
             await asyncio.gather(*stopped, return_exceptions=True)
-            self._history.extend(reply.delivered(0.0).items)
+            delivered = reply.delivered(0.0)
+            items = delivered.items
+            whole = reply.finished and delivered.kept is None
+            now = datetime.now(UTC)
+            shown = {call.call_id: _shown(call) for call in reply.calls()}
+            if self._open is not None:
+                self._add(Added(self._open, self._open_at))
+            for item in items:
+                if "type" in item and item["type"] == "function_call":
+                    self._add(Added(item, now, shown.get(item["call_id"])))
+                else:
+                    self._add(Added(item, now))
+            kept = " ".join(item["content"] for item in items if "role" in item)
+            if whole:
+                return WrittenEvent("done", kept)
+            # The history keeps only what was written, as a call keeps only what was
+            # heard: a reply cut before any of it was sent leaves nothing there, and
+            # one cut while a tool ran keeps the text before it whole. The event still
+            # says something was cut.
+            return WrittenEvent("cut", kept or CUT_MARK)
         finally:
+            self._open = None
+            self._out = None
+            self._cut = False
             self._writing = False
+
+    def _add(self, added: Added) -> None:
+        self._history.append(added.item)
+        self.added.append(added)
+
+
+def _shown(call: ToolCall) -> str | None:
+    """The text of the `tool.call` event a call sent, worked out again from its arguments."""
+    if call.tool is None:
+        return None  # a tool the conversation does not have shows nothing
+    try:
+        return call.tool.shown(call.arguments)
+    except Exception:
+        return None  # arguments that cannot be read send no event
 
 
 def _stop(call: ToolCall) -> asyncio.Task[str] | None:

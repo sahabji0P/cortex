@@ -79,6 +79,13 @@ class _DocDBFake:
     async def delete(self, _collection: type[BaseModel], filters: MutableMapping[str, Any]) -> int:
         return 1 if self.documents.pop(self._id(filters), None) else 0
 
+    async def delete_many(
+        self, _collection: type[BaseModel], _filters: MutableMapping[str, Any]
+    ) -> int:
+        # Only a gem's written conversation is deleted this way, and this fake keeps
+        # none. Those are tested in `test_chat.py`.
+        return 0
+
 
 def _gems() -> tuple[GemEntityClass, _DocDBFake]:
     docdb = _DocDBFake()
@@ -307,7 +314,7 @@ def _service() -> GemsServiceV1Class:
     return GemsServiceV1Class(_gems()[0])
 
 
-def test_the_routes_are_the_five_a_client_expects() -> None:
+def test_the_routes_are_the_ones_a_client_expects() -> None:
     routes = {
         (method, route.path, route.status_code)
         for route in router.routes
@@ -319,6 +326,8 @@ def test_the_routes_are_the_five_a_client_expects() -> None:
         ("POST", "/v1/gems", 201),
         ("GET", "/v1/gems", None),
         ("GET", "/v1/gems/{gem_id}", None),
+        # The gem's written conversation, for showing on screen.
+        ("GET", "/v1/gems/{gem_id}/chat", None),
         ("PATCH", "/v1/gems/{gem_id}", None),
         ("DELETE", "/v1/gems/{gem_id}", 204),
     }
