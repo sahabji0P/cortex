@@ -1079,8 +1079,8 @@ async def test_without_a_search_key_the_tool_is_not_offered() -> None:
     await f.conversation.close()
 
 
-async def test_after_three_searches_the_model_has_to_answer() -> None:
-    searches = [[_completed(_search_call(f"query {n}", f"call_{n}"))] for n in range(3)]
+async def test_a_reply_may_search_as_often_as_the_model_needs() -> None:
+    searches = [[_completed(_search_call(f"query {n}", f"call_{n}"))] for n in range(4)]
     llm = _LLM(*searches, [_delta("Here it is."), _completed(_message("Here it is."))])
     search = _Search()
     f = _conversation(llm, search)
@@ -1088,8 +1088,13 @@ async def test_after_three_searches_the_model_has_to_answer() -> None:
     f.stt.say("dig into this")
     outputs = await _read_until(f.conversation, "assistant.done")
 
-    assert search.queries == ["query 0", "query 1", "query 2"]
-    assert [request["tool_choice"] for request in llm.requests] == ["auto", "auto", "auto", "none"]
+    # A fourth search runs, and the model answers with its result in front of it.
+    assert search.queries == ["query 0", "query 1", "query 2", "query 3"]
+    *_, call, result = llm.requests[-1]["input"]
+    assert call["call_id"] == result["call_id"] == "call_3"
+    assert "Norris won in Las Vegas." in result["output"]
+    # No round forbids the tool.
+    assert [request["tool_choice"] for request in llm.requests] == ["auto"] * 5
     # The start of every request is identical, so a prompt cache keeps working.
     assert len({request["instructions"] for request in llm.requests}) == 1
     assert all(request["tools"] == llm.requests[0]["tools"] for request in llm.requests)

@@ -77,9 +77,6 @@ from app.entities.voice_speech import Clock, Playback, Speech, Standby, Utteranc
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
 
-# How many times one reply may search before it has to answer.
-_MAX_SEARCHES = 3
-
 _INSTRUCTIONS = """\
 You are Cortex, a voice assistant in a live spoken conversation. Everything you write \
 is read aloud by a text-to-speech voice.
@@ -629,11 +626,10 @@ class VoiceConversation:
         reply = _Reply(speech, brings_results=brings_results)
         self._reply = reply
         try:
-            for round_number in range(_MAX_SEARCHES + 1):
-                # In the last round the model may not search again: it has to answer.
-                must_answer = round_number == _MAX_SEARCHES
-                if not await self._model_round(reply, must_answer=must_answer):
-                    break
+            # The model calls what it needs: there is no cap on how many rounds of tool
+            # calls one reply may make. It ends with a round that makes none.
+            while await self._model_round(reply):
+                pass
             await reply.speech.finish()
         except asyncio.CancelledError:
             await reply.speech.stop()
@@ -645,7 +641,7 @@ class VoiceConversation:
             reply.finished = True
             self._emit("assistant.done", reply.speech.text.strip())
 
-    async def _model_round(self, reply: _Reply, *, must_answer: bool) -> bool:
+    async def _model_round(self, reply: _Reply) -> bool:
         """Run one model call, speaking its text. Return True if it searched (so: call again)."""
         self._results_sent = len(self._results)
         # No thinking before it speaks: in a conversation the wait is worse than the gain.
@@ -660,7 +656,6 @@ class VoiceConversation:
             [*self._history, *self._open_turn(), *reply.send_back()],
             instructions=self._instructions,
             think=bool(self._outliving or self._late),
-            must_answer=must_answer,
         )
         calls: list[_ToolCall] = []
         # Closed on the way out whatever happens, so the model call never outlives this.

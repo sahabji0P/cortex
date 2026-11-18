@@ -51,21 +51,18 @@ class Recorder:
         self._model = model
         return self
 
-    async def round(self, items, *, instructions, think, must_answer):
+    async def round(self, items, *, instructions, think):
         sent = [dict(i) for i in items]
         if self.requests:
             T._assert_only_grew(self.requests[-1]["input"], sent)
         record = {
             "input": sent,
-            "tool_choice": "none" if must_answer else "auto",
             "text": "",
             "calls": [],
             "usage": None,  # (input tokens, of which read from the cache)
         }
         self.requests.append(record)
-        events = self._model.round(
-            items, instructions=instructions, think=think, must_answer=must_answer
-        )
+        events = self._model.round(items, instructions=instructions, think=think)
         async with contextlib.aclosing(events):
             async for event in events:
                 if isinstance(event, TextDelta):
@@ -530,19 +527,17 @@ async def scenario_12(llm, par, replies):
 
 
 async def scenario_13(llm, par, replies):
-    """more searches than one reply is allowed"""
+    """a reply that needs several searches makes them all"""
     t = Talk(llm, par)
     a = await t.ask(
         "Search the web separately, one search each, for the population of Oslo, Lima, "
         "Cairo, Rome and Seoul, then tell me all five."
     )
     replies.append(a)
-    choices = [r["tool_choice"] for r in t.llm.requests]
     note(
-        "search limit: reply ends with an answer",
+        "many searches: reply ends with an answer",
         len(a) > 30 and not t.errors(),
-        f"{t.search.count} searches over {len(choices)} model calls, "
-        f"tool choice {choices}; {a[:110]!r}",
+        f"{t.search.count} searches over {len(t.llm.requests)} model calls; {a[:110]!r}",
     )
     await t.close()
 

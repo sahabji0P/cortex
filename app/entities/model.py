@@ -164,13 +164,12 @@ class Model(Protocol):
     own_instructions: str
 
     def round(
-        self, items: list[Item], *, instructions: str, think: bool, must_answer: bool
+        self, items: list[Item], *, instructions: str, think: bool
     ) -> AsyncGenerator[ModelEvent]:
         """Run one model call over the history and yield what it produces.
 
-        `think` asks for a little thinking before the reply. `must_answer` forbids tool
-        calls for this one call without changing the tool list. A call that fails,
-        is refused or stops early raises.
+        `think` asks for a little thinking before the reply. The model may call any of
+        its tools. A call that fails, is refused or stops early raises.
         """
         ...
 
@@ -231,7 +230,7 @@ class _OpenAIModel:
         ]
 
     async def round(
-        self, items: list[Item], *, instructions: str, think: bool, must_answer: bool
+        self, items: list[Item], *, instructions: str, think: bool
     ) -> AsyncGenerator[ModelEvent]:
         quiet, thinking = _OPENAI_EFFORT[self._name]
         stream = await self._llm.stream_response(
@@ -243,8 +242,7 @@ class _OpenAIModel:
             input=cast("list[ResponseInputItemParam]", items),
             instructions=instructions,
             tools=self._tools,
-            # Forbidding the tool this way leaves the tool list, and so the cache, intact.
-            tool_choice="none" if must_answer else "auto",
+            tool_choice="auto",
             store=False,
         )
         output = None
@@ -332,7 +330,7 @@ class _AnthropicModel:
         ]
 
     async def round(
-        self, items: list[Item], *, instructions: str, think: bool, must_answer: bool
+        self, items: list[Item], *, instructions: str, think: bool
     ) -> AsyncGenerator[ModelEvent]:
         # `think` is not acted on. Each change of the thinking setting makes this
         # provider read the whole conversation again once, and the gain it was measured
@@ -350,9 +348,7 @@ class _AnthropicModel:
             thinking=settings.thinking,
             output_config=settings.output_config,
             tools=self._tools,
-            # Forbidding the tools this way leaves the tool list as it is. On this
-            # provider the conversation is still read again in full for that request.
-            tool_choice={"type": "none"} if must_answer else {"type": "auto"},
+            tool_choice={"type": "auto"},
             # Nothing is cached unless asked for. This caches up to the end of the
             # request, so the next one, which starts with all of this one, is read from
             # the cache. Short conversations are below the size the provider caches.

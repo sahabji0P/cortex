@@ -19,7 +19,7 @@ mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ─�
 - **The speech connection is opened early.** One is opened when the call starts and again each time the user starts speaking, so it is there before the reply. Opening takes about 0.12 s and used to run while the model was thinking, so this only matters when opening is slow.
 - **Who speaks first.** The user, unless the client asks otherwise: with `?first=assistant` on the WebSocket URL the assistant greets the user as soon as the call connects.
 - **Interrupting.** When the user starts speaking, the server cancels the model call and the speech stream, then sends an `interrupt` event. The client must stop playback and drop audio it has not played yet: speech is generated several times faster than it plays, so the client always holds some.
-- **Searching.** With `PARALLEL_API_KEY` set, the model gets a `web_search` tool. Without it the tool is not offered and everything else works.
+- **Searching.** With `PARALLEL_API_KEY` set, the model gets a `web_search` tool. Without it the tool is not offered and everything else works. One reply may search as many times as the model needs: there is no limit.
 
 ### Which model answers
 
@@ -41,7 +41,6 @@ Everything below is the same for either provider. The conversation keeps one his
 - **Thinking is fixed for the conversation.** It is off on Haiku 5.5, on Sonnet 5.5 it is set to the nearest that model allows, and Opus 5.5 is asked for as little as it will do. What a model writes as thinking is never sent back to it, because the history is cut down to what the user heard. The switch to a little thinking while a search is pending (rule 2 below) is not made, and is not needed: asked "hello?" over a running search, Haiku 5.5 and Opus 5.5 each started no second search in 20 runs of 20.
 - **Notes from the server travel in a user message**, wrapped in `<note>` tags that the instructions explain. The Messages API has no place for them where they fall, which is after a reply of the model's own.
 - **Caching is asked for on every request.** Conversations shorter than the provider's minimum are not cached at all.
-- **Forbidding a search in the last round costs a full read** of the conversation for that one request.
 
 Fable 5.2 is not offered: its thinking cannot be turned off, which is a wait before every reply. Opus 5.5 has the same limit and is offered anyway, for comparing.
 
