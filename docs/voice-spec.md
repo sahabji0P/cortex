@@ -66,6 +66,12 @@ mic ─▶ speech to text ─▶ conversation ─▶ model ─▶ text to speech
   not change, but each call of a connection's tool reads the connection again. One that
   is no longer open to the gem gets "This tool is not available to you now." as its
   result.
+- **A tool whose connection needs a sign-in says so.** (Enforced) A connection that
+  signs in through the browser keeps offering its tools when its pass runs out, so the
+  tool list still does not change. A call of one, when the pass cannot be renewed, gets
+  "This tool needs the user to sign in to {connection name} again." (or "... to sign in
+  to {connection name}." if it was never signed in) as its result within seconds,
+  never waiting on the user, so the gem can tell the user why.
 - **A line says the user has called.** (Enforced) The instructions are the same in a
   call and in writing, so a line in the history is what tells the model the conversation
   is spoken. It follows the stored conversation when that ends in writing (or opens an
