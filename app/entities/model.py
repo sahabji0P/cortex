@@ -396,7 +396,7 @@ def to_messages(items: Sequence[Item]) -> list[MessageParam]:
                 "type": "tool_use",
                 "id": item["call_id"],
                 "name": item["name"],
-                "input": json.loads(item["arguments"]),
+                "input": _input(item["arguments"]),
             }
         else:
             role = "user"
@@ -410,3 +410,18 @@ def to_messages(items: Sequence[Item]) -> list[MessageParam]:
         else:
             messages.append({"role": role, "content": [block]})
     return cast("list[MessageParam]", messages)
+
+
+def _input(arguments: str) -> dict[str, object]:
+    """A stored call's arguments as the object the Messages API wants.
+
+    A tool that is not strict (a connection's) may have been called with arguments that
+    are no object, or cannot be read. That call was answered with a failure and is in
+    the history for good, so it is sent with no arguments rather than fail every reply
+    from then on.
+    """
+    try:
+        found = json.loads(arguments)
+    except ValueError:
+        return {}
+    return cast("dict[str, object]", found) if isinstance(found, dict) else {}

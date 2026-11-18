@@ -14,6 +14,7 @@ from typing import Any, cast
 import pytest
 from bson import ObjectId
 from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
 from pydantic import ValidationError
@@ -28,12 +29,16 @@ from app.entities.conversation_store import ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.late_results import CANCEL_TOOL
-from app.entities.model import Item, ToolSpec
+from app.entities.model import Item, ToolSpec, to_messages
 from app.entities.tools import Tool, gem_toolbox
+from app.main import app
 from app.routers.connections.controller import router
 from app.routers.connections.models import ConnectionsModels
-from app.routers.connections.service import ConnectionsServiceV1Class
-from app.routers.gems.service import GemsServiceV1Class
+from app.routers.connections.service import (
+    ConnectionsServiceV1Class,
+    get_connections_service_v1,
+)
+from app.routers.gems.service import GemsServiceV1Class, get_gems_service_v1
 from tests.test_chat import _DocDB, _docdb, _NoKey, _said, _tool_names
 from tests.test_one_conversation import _Client, _hang_up, _Model, _said_and_heard, _spoken, _Voice
 from tests.test_voice_conversation import _completed, _delta, _Item, _Search, _starts
@@ -473,7 +478,6 @@ async def test_a_new_address_asks_the_new_server_and_a_dead_one_changes_nothing(
 
 
 async def test_a_refresh_keeps_what_the_server_lists_now_and_the_limits(setup: _Setup) -> None:
-    one = str(setup.one.id)
     made = await setup.connections.create(name="Tracker", url=_URL, gems="all")
     await setup.connections.update(str(made.id), {"tool_gems": {"close_issue": []}})
     # A change at the server reaches no gem until the user asks for it.
@@ -492,7 +496,12 @@ async def test_a_refresh_keeps_what_the_server_lists_now_and_the_limits(setup: _
     assert refreshed.checked_at > made.checked_at
     assert refreshed.limit("close_issue") == []
     assert "tracker__close_issue" not in await setup.names(setup.one)
-    assert refreshed.gems == "all" and one  # who it is open to is untouched
+    assert refreshed.gems == "all"  # who it is open to is untouched
+    assert await setup.names(setup.one) == [
+        "tracker__find_issues",
+        "tracker__files_read_601e4e",
+        "tracker__delete_everything",
+    ]
 
 
 async def test_a_limit_outlives_a_tool_that_goes_and_comes_back(setup: _Setup) -> None:
@@ -880,3 +889,212 @@ async def test_a_stored_connection_reads_back_as_it_was_kept(setup: _Setup) -> N
     assert isinstance(document["tools"][0]["input_schema"], str)
     assert document["headers"] == [{"name": "Authorization", "value": "Bearer secret"}]
     assert Connection.model_validate(document) == made
+
+
+# ---- found in review
+
+
+class _SlowLists:
+    """The adapter, with a server that takes its time to list its tools."""
+
+    def __init__(self) -> None:
+        self.asked = asyncio.Event()
+        self.answer = asyncio.Event()
+
+    async def list_tools(self, server: McpServer) -> list[Any]:
+        self.asked.set()
+        await self.answer.wait()
+        return [
+            SimpleNamespace(name="close_issue", title=None, description="", input_schema=_OBJECT)
+        ]
+
+    async def forget(self, server: McpServer) -> None:
+        pass
+
+
+@pytest.mark.parametrize("slow", ["refresh", "new address"])
+async def test_closing_a_connection_while_its_server_is_asked_is_not_undone(
+    setup: _Setup, slow: str
+) -> None:
+    # Asking a server can take many seconds. What is closed meanwhile stays closed.
+    made = await setup.connections.create(name="Tracker", url=_URL, gems="all")
+    lists = _SlowLists()
+    connections = ConnectionEntityClass(
+        docdb=cast("Any", setup.docdb), mcp=cast("Any", lists), gems=setup.gems
+    )
+    asking = asyncio.create_task(
+        connections.refresh(str(made.id))
+        if slow == "refresh"
+        else connections.update(str(made.id), {"url": "https://other.example.com/mcp"})
+    )
+    await lists.asked.wait()
+
+    await setup.connections.update(
+        str(made.id), {"gems": [], "enabled": False, "tool_gems": {"close_issue": []}}
+    )
+    lists.answer.set()
+    await asking
+
+    after = await setup.connections.get(str(made.id))
+    assert (after.gems, after.enabled, after.limit("close_issue")) == ([], False, [])
+    assert [tool.name for tool in after.tools] == ["close_issue"]
+    assert await setup.names(setup.one) == []
+
+
+async def test_two_tools_the_model_would_be_told_by_one_name_are_not_both_kept(
+    setup: _Setup,
+) -> None:
+    # Both would be told as `odd__files_read_601e4e`, and a toolbox refuses that.
+    listed = [
+        SimpleNamespace(name=name, title=None, description="", input_schema=_OBJECT)
+        for name in ("files.read", "files_read_601e4e")
+    ]
+
+    class _Lists:
+        async def list_tools(self, server: McpServer) -> list[Any]:
+            return listed
+
+    connections = ConnectionEntityClass(
+        docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
+    )
+
+    made = await connections.create(name="Odd", url=_URL, gems="all")
+
+    assert [tool.name for tool in made.tools] == ["files.read"]
+    assert made.tools_left_out == 1
+    gem_toolbox(
+        (), cast("Any", _Search()), _cancel(), [], await connections.tools_for(setup.one.id)
+    )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "anyOf": [{"required": ["a"]}, {"required": ["b"]}]},
+        {"type": "object", "properties": {"first name!": {"type": "string"}}},
+        {"type": "object", "properties": {"a": {"type": "str"}}},
+        {"type": "object", "properties": {"a": {"type": "string"}}, "required": "a"},
+        {"type": "object", "properties": []},
+        {"type": "array"},
+        {"properties": {}},
+    ],
+)
+async def test_a_schema_a_provider_would_refuse_is_left_out(
+    setup: _Setup, schema: dict[str, object]
+) -> None:
+    # One refused tool fails the whole request, for every gem the connection is open to.
+    listed = [
+        SimpleNamespace(name="bad", title=None, description="", input_schema=schema),
+        SimpleNamespace(name="good", title=None, description="", input_schema=_OBJECT),
+    ]
+
+    class _Lists:
+        async def list_tools(self, server: McpServer) -> list[Any]:
+            return listed
+
+    connections = ConnectionEntityClass(
+        docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
+    )
+
+    made = await connections.create(name="Odd", url=_URL)
+
+    assert ([tool.name for tool in made.tools], made.tools_left_out) == (["good"], 1)
+
+
+async def test_a_gem_is_offered_no_more_tools_than_a_provider_takes(setup: _Setup) -> None:
+    listed = [
+        SimpleNamespace(name=f"tool_{n}", title=None, description="", input_schema=_OBJECT)
+        for n in range(70)
+    ]
+
+    class _Lists:
+        async def list_tools(self, server: McpServer) -> list[Any]:
+            return listed
+
+    connections = ConnectionEntityClass(
+        docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
+    )
+    await connections.create(name="First", url=_URL, gems="all")
+    await connections.create(name="Second", url=_URL, gems="all")
+
+    names = [tool.name for tool in await connections.tools_for(setup.one.id)]
+
+    assert len(names) == 100
+    assert (names[0], names[69], names[70], names[-1]) == (
+        "first__tool_0",
+        "first__tool_69",
+        "second__tool_0",
+        "second__tool_29",
+    )
+
+
+def test_a_refused_connection_does_not_send_back_what_was_sent() -> None:
+    # No lifespan, and services that are never reached: the request is refused first.
+    app.dependency_overrides[get_connections_service_v1] = lambda: None
+    app.dependency_overrides[get_gems_service_v1] = lambda: None
+    client = TestClient(app)
+    answer = client.post(
+        "/v1/connections",
+        json={
+            "name": "Tracker",
+            "url": _URL,
+            "headers": {"Authorization": "Bearer s3cret ", "X-Other": "alsosecret"},
+        },
+    )
+
+    assert answer.status_code == 422
+    assert "s3cret" not in answer.text and "alsosecret" not in answer.text
+    assert "Authorization header's value" in answer.json()["detail"][0]["msg"]
+    # Elsewhere FastAPI's answer is as it was.
+    assert "input" in client.post("/v1/gems", json={"name": ""}).json()["detail"][0]
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("arguments", ["", "{", "[1]", '"x"'])
+def test_a_stored_call_whose_arguments_are_no_object_is_sent_with_none(arguments: str) -> None:
+    # A tool that is not strict can be called so. The call stays in the history, and
+    # must not fail every later reply on a model that wants an object.
+    messages = to_messages(
+        [
+            {"role": "user", "content": "close it"},
+            {"type": "function_call", "call_id": "c1", "name": "t__close", "arguments": arguments},
+            {"type": "function_call_output", "call_id": "c1", "output": "t__close failed"},
+        ]
+    )
+
+    block = cast("Any", messages[1]["content"])[0]
+    assert (block["type"], block["input"]) == ("tool_use", {})
+
+
+async def test_a_forgotten_server_s_client_in_use_is_closed_when_the_adapter_closes() -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    server = MCPServer("slow")
+
+    @server.tool()
+    async def wait() -> str:
+        """Wait."""
+        started.set()
+        await release.wait()
+        return "done"
+
+    closed: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def opener(_: McpServer) -> AsyncGenerator[Client]:
+        try:
+            async with Client(server) as client:
+                yield client
+        finally:
+            closed.append("closed")
+
+    mcp = McpAdapterClass(opener)
+    calling = asyncio.create_task(mcp.call_tool(McpServer(_URL), "wait", {}))
+    await started.wait()
+
+    await mcp.forget(McpServer(_URL))
+    assert closed == []  # the call still running on it is left to finish
+    release.set()
+    await mcp.close()
+
+    assert closed == ["closed"]
+    await asyncio.gather(calling, return_exceptions=True)

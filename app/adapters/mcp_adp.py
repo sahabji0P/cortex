@@ -38,6 +38,8 @@ __all__ = ["McpAdapterClass", "McpFailure", "McpResult", "McpServer", "McpTool"]
 _OPEN_SECONDS = 20.0
 _LIST_SECONDS = 20.0
 _CALL_SECONDS = 60.0
+# How long closing a client waits for what is still running on it.
+_CLOSE_SECONDS = 5.0
 # A tool list that never ends cannot hold a request up for ever.
 _LIST_PAGES_MAX = 50
 
@@ -115,6 +117,11 @@ class _Link:
         if not self._client.done():
             # Still opening, perhaps on a server that never answers: not waited for.
             self._task.cancel()
+        # A client closes once what is running on it has ended. A call that a server
+        # never answers is not to hold up closing, such as when the app stops.
+        _, running = await asyncio.wait({self._task}, timeout=_CLOSE_SECONDS)
+        if running:
+            self._task.cancel()
         await asyncio.gather(self._task, return_exceptions=True)
         if self._client.done() and not self._client.cancelled():
             # Read, so a failure nobody waited for is not reported as never retrieved.
@@ -149,12 +156,15 @@ class McpAdapterClass:
         self._links: dict[McpServer, _Link] = {}
         # Links being closed in the background, kept so the tasks are not lost.
         self._closing: set[asyncio.Task[None]] = set()
+        # Links no longer handed out that a call is still running on.
+        self._retired: set[_Link] = set()
 
     async def initialize(self) -> None:
         pass
 
     async def close(self) -> None:
-        links, self._links = list(self._links.values()), {}
+        links, self._links = [*self._links.values(), *self._retired], {}
+        self._retired.clear()
         await asyncio.gather(*(link.close() for link in links))
         await asyncio.gather(*self._closing, return_exceptions=True)
 
@@ -250,7 +260,9 @@ class McpAdapterClass:
         """Close a link once nothing is using it. It is no longer handed out."""
         link.retired = True
         if link.users > 0:
+            self._retired.add(link)
             return
+        self._retired.discard(link)
         closing = asyncio.create_task(link.close())
         self._closing.add(closing)
         closing.add_done_callback(self._closing.discard)

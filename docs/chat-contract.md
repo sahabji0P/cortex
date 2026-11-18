@@ -394,5 +394,6 @@ A connection, as every route but `DELETE` answers:
   401: its headers do not let us in"}`, and nothing is added or changed. A gem id that
   names no gem, or a tool name the connection does not have, is a 422, `{"code":
   "invalid", "message": "..."}`. A field that breaks a rule (a blank name, an address
-  that is not http or https) is FastAPI's 422. An id that names no connection is a 404.
+  that is not http or https) is FastAPI's 422, without its `input`: what was sent may
+  hold a header's value. An id that names no connection is a 404.
 - Deleting a gem takes it out of every connection's `gems` and every limit.

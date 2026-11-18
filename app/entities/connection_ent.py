@@ -29,14 +29,17 @@ call that is already open.
 
 import hashlib
 import json
+import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any, ClassVar, Literal, cast
 from urllib.parse import urlsplit
 
 from bson import ObjectId
 from bson.errors import InvalidId
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from pydantic_mongo import PydanticObjectId
 
@@ -78,6 +81,12 @@ _SCHEMA_MAX_LENGTH = 20_000
 # A result is kept whole in the conversation and sent with every request after it, so one
 # is cut at this length. A FIRST NUMBER, TO BE TRIED OUT.
 _RESULT_MAX_LENGTH = 20_000
+
+# How many tools of its connections one gem is offered at most. A provider takes 128
+# tools in one request, and the built-in ones and the ones only declared need room too.
+_OFFERED_MAX = 100
+
+_log = logging.getLogger(__name__)
 
 # What HTTP allows in a header's name.
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
@@ -244,31 +253,77 @@ def _key_from(name: str) -> str:
     return key or "connection"
 
 
-def _kept(listed: Sequence[McpTool]) -> tuple[list[ConnectionTool], int]:
+def _kept(key: str, listed: Sequence[McpTool]) -> tuple[list[ConnectionTool], int]:
     """The tools kept of a server's list, and how many were left out.
 
-    Left out: a tool with no name or a name already listed, one whose schema is not an
-    object's or is too long to send with every request, and whatever comes after the
-    first `_TOOLS_MAX`.
+    Left out: a tool with no name, one whose name (as it is listed, or as the model
+    would be told it) another tool already has, one whose schema cannot be sent (see
+    `_sendable`), and whatever comes after the first `_TOOLS_MAX`. One tool a provider
+    refuses fails the whole request, and with it every reply of every gem the
+    connection is open to, so a doubtful one is left out rather than tried.
     """
     kept: dict[str, ConnectionTool] = {}
+    offered: set[str] = set()
     for tool in listed:
-        schema = json.dumps(tool.input_schema, ensure_ascii=False)
+        told = offered_name(key, tool.name)
         usable = (
             tool.name
             and tool.name not in kept
-            and tool.input_schema.get("type") == "object"
-            and len(schema) <= _SCHEMA_MAX_LENGTH
+            and told not in offered
             and len(kept) < _TOOLS_MAX
+            and _sendable(tool.input_schema)
         )
         if usable:
+            offered.add(told)
             kept[tool.name] = ConnectionTool(
                 name=tool.name,
                 title=tool.title,
                 description=tool.description.strip()[:_DESCRIPTION_MAX_LENGTH],
-                input_schema=schema,
+                input_schema=json.dumps(tool.input_schema, ensure_ascii=False),
             )
     return list(kept.values()), len(listed) - len(kept)
+
+
+# What a provider takes as the name of one of a tool's arguments.
+_ARGUMENT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+# What neither provider takes at the top of a tool's schema.
+_NOT_AT_THE_TOP = ("anyOf", "oneOf", "allOf", "enum", "not")
+
+
+def _sendable(schema: Mapping[str, object]) -> bool:
+    """Whether a tool's schema can be sent to a model with every request.
+
+    It has to be an object's, a valid JSON schema, short enough, with nothing at its
+    top that a provider refuses there, and with arguments named as a provider allows.
+    NOT YET TRIED AGAINST EITHER PROVIDER: these are the rules as they are documented.
+    """
+    if schema.get("type") != "object" or any(word in schema for word in _NOT_AT_THE_TOP):
+        return False
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return False
+    names = cast("dict[object, object]", properties)
+    if not all(isinstance(name, str) and _ARGUMENT_NAME.fullmatch(name) for name in names):
+        return False
+    try:
+        Draft202012Validator.check_schema(schema)
+        text = json.dumps(schema, ensure_ascii=False)
+    except (SchemaError, TypeError, ValueError):
+        return False
+    return len(text) <= _SCHEMA_MAX_LENGTH
+
+
+# The fields that hold what a server listed. Asking it again writes these and no others.
+_LISTED = ("tools", "tools_left_out", "checked_at", "updated_at")
+
+
+def _with_tools(connection: Connection, listed: Sequence[McpTool]) -> Connection:
+    """The connection with the tools its server listed just now."""
+    tools, left_out = _kept(connection.key, listed)
+    now = datetime.now(UTC)
+    return connection.model_copy(
+        update={"tools": tools, "tools_left_out": left_out, "checked_at": now, "updated_at": now}
+    )
 
 
 def _cut(text: str) -> str:
@@ -306,7 +361,9 @@ class ConnectionEntityClass:
         """
         now = datetime.now(UTC)
         connection = Connection(
-            key=await self._free_key(_key_from(_check_name(name))),
+            # Chosen below, once the server has answered: asking can take a while, and
+            # a key chosen before it could be taken by then.
+            key=_key_from(_check_name(name)),
             name=name,
             url=url,
             headers=_headers(headers or {}),
@@ -316,7 +373,11 @@ class ConnectionEntityClass:
             created_at=now,
             updated_at=now,
         )
-        return await self._docdb.insert(await self._checked(connection))
+        listed = await self._listed(connection)
+        key = await self._free_key(connection.key)
+        return await self._docdb.insert(
+            _with_tools(connection.model_copy(update={"key": key}), listed)
+        )
 
     async def list_all(self) -> list[Connection]:
         """Every connection, in the order they were added."""
@@ -329,7 +390,7 @@ class ConnectionEntityClass:
         return found
 
     async def update(self, connection_id: str, changes: Mapping[str, Any]) -> Connection:
-        """Change only the fields given.
+        """Change only the fields given, and write only those.
 
         `headers` replaces every header. `tool_gems` maps a tool's name to the gems it
         is limited to, or to None to lift its limit; tools it does not name keep theirs.
@@ -338,34 +399,45 @@ class ConnectionEntityClass:
         """
         if unknown := set(changes) - _EDITABLE:
             raise ValueError(f"These fields of a connection cannot be changed: {sorted(unknown)}")
-        current = await self.get(connection_id)
+        before = await self.get(connection_id)
         fields: dict[str, Any] = {
             field: changes[field] for field in ("name", "url", "enabled") if field in changes
         }
         if "headers" in changes:
             fields["headers"] = _headers(changes["headers"])
+        moved = Connection.model_validate({**before.model_dump(by_alias=True), **fields})
+        listed = await self._listed(moved) if moved.server != before.server else None
+        # Read again: asking the server can take a while, and who the connection is
+        # open to may have been changed meanwhile. That change is not to be undone.
+        current = await self.get(connection_id)
         if "gems" in changes:
             fields["gems"] = await self._scope(changes["gems"])
-        if "tool_gems" in changes:
-            fields["limits"] = await self._limits(current, changes["tool_gems"])
         # Checked as a whole, so a change can never leave a connection that would not load.
         updated = Connection.model_validate(
             {**current.model_dump(by_alias=True), **fields, "updated_at": datetime.now(UTC)}
         )
-        if updated.server != current.server:
-            updated = await self._checked(updated)
-        await self._store(updated)
-        if updated.server != current.server:
-            await self._mcp.forget(current.server)
+        if listed is not None:
+            updated = _with_tools(updated, listed)
+            fields |= dict.fromkeys(_LISTED)
+        if "tool_gems" in changes:
+            limits = await self._limits(updated, changes["tool_gems"])
+            updated = updated.model_copy(update={"limits": limits})
+            fields["limits"] = limits
+        await self._store(updated, {*fields, "updated_at"})
+        if listed is not None:
+            await self._mcp.forget(before.server)
         return updated
 
     async def refresh(self, connection_id: str) -> Connection:
         """Ask the server for its tools again, and keep what it lists now.
 
         Raises `UpstreamError` if it does not answer. What was kept before stays then.
+        Only the tools are written: who the connection is open to is not touched, even
+        if it was changed while the server was being asked.
         """
-        updated = await self._checked(await self.get(connection_id))
-        await self._store(updated)
+        listed = await self._listed(await self.get(connection_id))
+        updated = _with_tools(await self.get(connection_id), listed)
+        await self._store(updated, _LISTED)
         return updated
 
     async def delete(self, connection_id: str) -> None:
@@ -385,7 +457,8 @@ class ConnectionEntityClass:
             if gems != "all":
                 gems = [gem for gem in gems if gem != gem_id]
             if gems != connection.gems or limits != connection.limits:
-                await self._store(connection.model_copy(update={"gems": gems, "limits": limits}))
+                changed = connection.model_copy(update={"gems": gems, "limits": limits})
+                await self._store(changed, {"gems", "limits"})
 
     async def tools_for(self, gem_id: ObjectId) -> list[Tool]:
         """The connections' tools a gem is offered now, always in the same order.
@@ -397,12 +470,22 @@ class ConnectionEntityClass:
         connections = await self._docdb.get_many(
             Connection, filters={"enabled": True}, sort=[("created_at", 1)]
         )
-        return [
+        tools = [
             self._tool(connection, tool, gem)
             for connection in connections
             for tool in connection.tools
             if connection.open_to(gem, tool.name)
         ]
+        if len(tools) > _OFFERED_MAX:
+            # A provider refuses a request with more tools than it takes, and then the
+            # gem could not answer at all. The last ones are passed over instead.
+            _log.warning(
+                "gem %s is open to %d tools of its connections: only the first %d are offered",
+                gem,
+                len(tools),
+                _OFFERED_MAX,
+            )
+        return tools[:_OFFERED_MAX]
 
     def _tool(self, connection: Connection, tool: ConnectionTool, gem: str) -> Tool:
         """One tool of a connection, for the gem's toolbox."""
@@ -435,28 +518,22 @@ class ConnectionEntityClass:
 
         return Tool(spec, run, shown=lambda arguments: label)
 
-    async def _checked(self, connection: Connection) -> Connection:
-        """The connection with the tools its server lists now."""
+    async def _listed(self, connection: Connection) -> list[McpTool]:
+        """The tools the connection's server lists now."""
         try:
-            listed = await self._mcp.list_tools(connection.server)
+            return await self._mcp.list_tools(connection.server)
         except McpFailure as exc:
             raise UpstreamError(
                 f"The server at {connection.url} could not be asked for its tools: {exc.reason}"
             ) from exc
-        tools, left_out = _kept(listed)
-        now = datetime.now(UTC)
-        return connection.model_copy(
-            update={
-                "tools": tools,
-                "tools_left_out": left_out,
-                "checked_at": now,
-                "updated_at": now,
-            }
-        )
 
-    async def _store(self, connection: Connection) -> None:
-        # The whole document is written, as a gem's config is.
-        document = connection.model_dump(by_alias=True, exclude={"id"})
+    async def _store(self, connection: Connection, fields: Collection[str]) -> None:
+        """Write these fields of a connection, and no others.
+
+        Each change writes only what it owns, so that one that waited on a server does
+        not write back who the connection was open to before it waited.
+        """
+        document = connection.model_dump(by_alias=True, include=set(fields))
         if await self._docdb.update(Connection, {"id": connection.id}, document) == 0:
             raise NotFoundError("Connection")
 

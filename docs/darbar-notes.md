@@ -77,6 +77,8 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Connection headers are kept in the database as given. They move to the vault.
 - A connection's pictures and sounds are not passed on to the model, only text.
 - A server telling us its tools changed: not listened to. You refresh.
+- A connection document that cannot be read stops every gem's reply. Skip it and say so instead.
+- A deleted connection's key is free again: a new one of the same name takes over its tools' names in old conversations.
 - The app has no screen for connections yet.
 - Sandbox: what a tool can reach even when it is allowed.
 - Hooks: our own code run at fixed moments of the loop.
