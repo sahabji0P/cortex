@@ -22,14 +22,14 @@ from datetime import UTC, datetime
 
 from app.entities.gem_ent import GemConfig
 
-__all__ = ["Layer", "instruction_layers", "instructions"]
+__all__ = ["DEFAULT_DARBAR", "Layer", "instruction_layers", "instructions"]
 
-# What every gem is told of where it is. A call without a gem is not told this.
-_DARBAR = """\
+# What every gem is told of where it is, until the user writes their own (see
+# `darbar_ent.py`). A call without a gem is not told this. The blank line after it is
+# added where it is put in, so a text the user writes gets the same.
+DEFAULT_DARBAR = """\
 The user keeps a few assistants of their own, which they call gems. Each gem has its \
-own name and its own work. The place they share is called the Darbar.
-
-"""
+own name and its own work. The place they share is called the Darbar."""
 
 # How a call without a gem opens. Its rules follow after a blank line.
 _CORTEX = """\
@@ -96,6 +96,7 @@ class Layer:
 
 def instruction_layers(
     *,
+    darbar: str | None = None,
     gem: GemConfig | None,
     search: bool,
     model_needs: str,
@@ -105,11 +106,14 @@ def instruction_layers(
 
     `search` says whether web search is offered, and `model_needs` is what the model
     adds of its own. Without a gem the result is the text a call has always been sent.
+
+    `darbar` is the Darbar text the user wrote, or None for the built-in one. A gem is
+    told it first. An empty one tells it nothing.
     """
     today = (now or datetime.now(UTC)).strftime("%A, %d %B %Y")
     return [
         # What is true for every gem. A call without a gem keeps the text it always had.
-        Layer("darbar", "" if gem is None else _DARBAR),
+        Layer("darbar", "" if gem is None else _darbar(darbar)),
         Layer("gem", _gem(gem)),
         # The text of a call without a gem is kept whole: that call's behaviour is
         # finished, and a gem's wording has not been tried on a live call yet.
@@ -122,14 +126,25 @@ def instruction_layers(
 
 def instructions(
     *,
+    darbar: str | None = None,
     gem: GemConfig | None,
     search: bool,
     model_needs: str,
     now: datetime | None = None,
 ) -> str:
     """The whole instructions, as the model is sent them."""
-    layers = instruction_layers(gem=gem, search=search, model_needs=model_needs, now=now)
+    layers = instruction_layers(
+        darbar=darbar, gem=gem, search=search, model_needs=model_needs, now=now
+    )
     return "".join(layer.text for layer in layers)
+
+
+def _darbar(darbar: str | None) -> str:
+    """The Darbar text, as one paragraph: the built-in one when the user has written none."""
+    # Space around it is dropped, as for a gem's own text, so the layers stay one blank
+    # line apart. An empty text adds nothing, not even the blank line.
+    text = (DEFAULT_DARBAR if darbar is None else darbar).strip()
+    return f"{text}\n\n" if text else ""
 
 
 def _gem(gem: GemConfig | None) -> str:

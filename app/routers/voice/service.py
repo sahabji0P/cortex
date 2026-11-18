@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.core.errors import NotFoundError
 from app.entities import EntitiesRegistry
+from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
 from app.routers.voice.models import VoiceModels
@@ -14,11 +15,15 @@ from app.routers.voice.models import VoiceModels
 
 class VoiceServiceV1Class:
     def __init__(
-        self, voice: VoiceEntityClass | None = None, gems: GemEntityClass | None = None
+        self,
+        voice: VoiceEntityClass | None = None,
+        gems: GemEntityClass | None = None,
+        darbar: DarbarEntityClass | None = None,
     ) -> None:
         # Tests hand in their own. The app uses the ones the registry made at startup.
         self.voice = EntitiesRegistry.Voice if voice is None else voice
         self.gems = EntitiesRegistry.Gems if gems is None else gems
+        self.darbar = EntitiesRegistry.Darbar if darbar is None else darbar
 
     def models(self) -> list[VoiceModels.V1.Output.Model]:
         """Every model a conversation can be held with, in the order to show them."""
@@ -57,6 +62,9 @@ class VoiceServiceV1Class:
             await websocket.close(code=1008, reason="unknown model or setting")
             return
         gem: GemConfig | None = None
+        # Read once, here, so the call keeps the text it opened with. A call without a
+        # gem is not told it, so it does not read it.
+        darbar: str | None = None
         if asked.gem is not None:
             try:
                 gem = await self.gems.get(asked.gem)
@@ -70,11 +78,12 @@ class VoiceServiceV1Class:
                 with contextlib.suppress(Exception):
                     await websocket.close(code=1011, reason="the gem's config cannot be read")
                 raise
+            darbar = (await self.darbar.read()).text
         # Left out, it is the gem's to say. Without a gem, that means the user.
         first = asked.first == "assistant" if "first" in asked.model_fields_set else None
         try:
             conversation = await self.voice.open_conversation(
-                asked.model, speaks_first=first, gem=gem
+                asked.model, speaks_first=first, gem=gem, darbar=darbar
             )
         except LookupError as exc:
             # 1008 again: the model is offered, but its provider has no key here.
