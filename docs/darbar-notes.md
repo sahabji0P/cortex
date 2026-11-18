@@ -38,7 +38,6 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A tool registry, then skills.
 - The standing WebSocket, with the call moved onto it.
 - Chat.
-- The call code still stops a reply at 3 searches. Take the cap out, as decided above.
 - A sound before the greeting's first word leaves the call silent. Small fix.
 
 ## Deferred

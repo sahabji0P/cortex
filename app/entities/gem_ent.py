@@ -7,7 +7,9 @@ app shows of it and wants spoken (its description, picture, voice and speed), wh
 backend only keeps. Anything new is added by raising `GEM_CONFIG_VERSION` and writing one
 step in `upgrade_gem_document` that brings older documents up to the new shape.
 
-A call is held with a gem when the voice WebSocket names it with `?gem=`.
+A call is held with a gem when it is opened with the gem's id: `call.start` on the
+standing socket, or `?gem=` on the old call socket. A chat names the gem in every
+`chat.send`.
 """
 
 from collections.abc import Callable, Mapping
@@ -21,6 +23,7 @@ from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.core.errors import NotFoundError
+from app.core.times import UtcDatetime
 from app.entities.chat_store import ChatStoreClass
 
 # The one place the model names are imported. Everything else uses `GemModelName`.
@@ -180,8 +183,8 @@ class GemConfig(BaseModel):
     # so they have one home. A call does not use them yet.
     voice: GemVoice | None = None
     speech_speed: GemSpeechSpeed = 1.0
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
     @model_validator(mode="before")
     @classmethod

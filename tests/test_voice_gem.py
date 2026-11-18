@@ -164,12 +164,12 @@ def test_the_layers_go_from_what_changes_least_to_what_changes_most() -> None:
 
 
 def test_a_gem_is_named_and_its_own_instructions_come_before_the_spoken_rules() -> None:
-    gem = _gem(name="Kuber", instructions="You look after the user's personal finances.")
+    gem = _gem(name="Gem One", instructions="You look after the user's personal finances.")
 
     text = instructions(gem=gem, search=True, model_needs="", now=_NOW)
 
     assert text == (
-        _DARBAR + "You are Kuber.\n"
+        _DARBAR + "You are Gem One.\n"
         "\n"
         "You look after the user's personal finances.\n"
         "\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _SEARCH_RULES + _DATE
@@ -178,20 +178,20 @@ def test_a_gem_is_named_and_its_own_instructions_come_before_the_spoken_rules() 
 
 @pytest.mark.parametrize("own", ["", "  ", "\n\n"])
 def test_a_gem_without_instructions_is_only_named(own: str) -> None:
-    gem = _gem(name="Kuber", instructions=own)
+    gem = _gem(name="Gem One", instructions=own)
 
     text = instructions(gem=gem, search=False, model_needs="", now=_NOW)
 
-    assert text == _DARBAR + "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+    assert text == _DARBAR + "You are Gem One.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
 
 
 def test_a_gem_s_instructions_are_sent_as_stored_without_the_space_around_them() -> None:
     own = "You look after money.\n\n- Never guess a balance.\n-  Ask first."
-    gem = _gem(name="Kuber", instructions=f"\n  {own}  \n\n")
+    gem = _gem(name="Gem One", instructions=f"\n  {own}  \n\n")
 
     text = instructions(gem=gem, search=False, model_needs="", now=_NOW)
 
-    assert text.startswith(f"{_DARBAR}You are Kuber.\n\n{own}\n\n{_GEM_OPENING}\n")
+    assert text.startswith(f"{_DARBAR}You are Gem One.\n\n{own}\n\n{_GEM_OPENING}\n")
     assert "\n\n\n" not in text
 
 
@@ -199,48 +199,50 @@ def test_a_gem_s_instructions_are_sent_as_stored_without_the_space_around_them()
 
 
 def test_a_gem_is_told_the_darbar_text_the_user_wrote_first() -> None:
-    gem = _gem(name="Kuber")
+    gem = _gem(name="Gem One")
 
-    text = instructions(darbar="Every gem works for Asha.", gem=gem, search=False, model_needs="")
+    text = instructions(
+        darbar="Every gem works for one person.", gem=gem, search=False, model_needs=""
+    )
 
     assert _dated(text) == (
-        "Every gem works for Asha.\n"
+        "Every gem works for one person.\n"
         "\n"
-        "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+        "You are Gem One.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
     )
 
 
 @pytest.mark.parametrize("darbar", ["", "  ", "\n\n"])
 def test_an_empty_darbar_text_tells_a_gem_nothing_not_even_a_blank_line(darbar: str) -> None:
-    gem = _gem(name="Kuber")
+    gem = _gem(name="Gem One")
 
     text = instructions(darbar=darbar, gem=gem, search=False, model_needs="", now=_NOW)
 
-    assert text == "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+    assert text == "You are Gem One.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
 
 
 def test_no_darbar_text_is_the_built_in_one() -> None:
-    gem = _gem(name="Kuber")
+    gem = _gem(name="Gem One")
 
     assert instructions(darbar=None, gem=gem, search=True, model_needs="", now=_NOW) == (
         instructions(gem=gem, search=True, model_needs="", now=_NOW)
     )
     assert instructions(gem=gem, search=True, model_needs="", now=_NOW).startswith(
-        _DARBAR + "You are Kuber.\n\n"
+        _DARBAR + "You are Gem One.\n\n"
     )
 
 
 def test_the_darbar_text_is_sent_without_the_space_around_it() -> None:
-    own = "Every gem works for Asha.\n\n- Speak Hindi when she does."
-    gem = _gem(name="Kuber")
+    own = "Every gem works for one person.\n\n- Speak Hindi when the user does."
+    gem = _gem(name="Gem One")
 
     text = instructions(darbar=f"\n  {own}  \n\n", gem=gem, search=False, model_needs="")
 
-    assert text.startswith(f"{own}\n\nYou are Kuber.\n\n")
+    assert text.startswith(f"{own}\n\nYou are Gem One.\n\n")
     assert "\n\n\n" not in text
 
 
-@pytest.mark.parametrize("darbar", [None, "", "Every gem works for Asha."])
+@pytest.mark.parametrize("darbar", [None, "", "Every gem works for one person."])
 def test_a_call_without_a_gem_is_told_no_darbar_text_whatever_it_is(darbar: str | None) -> None:
     text = instructions(darbar=darbar, gem=None, search=True, model_needs="", now=_NOW)
 
@@ -250,8 +252,8 @@ def test_a_call_without_a_gem_is_told_no_darbar_text_whatever_it_is(darbar: str 
 # ---- a conversation held with a gem
 
 
-_KUBER_WITH_SEARCH = (
-    _DARBAR + "You are Kuber.\n"
+_GEM_WITH_SEARCH = (
+    _DARBAR + "You are Gem One.\n"
     "\n"
     "You look after the user's personal finances.\n"
     "\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _SEARCH_RULES + _DATE
@@ -280,7 +282,7 @@ async def test_a_gem_is_sent_the_same_instructions_and_tools_on_every_request() 
         [_delta("Here."), _completed(_message("Here."))],
         [_delta("Bye."), _completed(_message("Bye."))],
     )
-    gem = _gem(name="Kuber", instructions="You look after the user's personal finances.")
+    gem = _gem(name="Gem One", instructions="You look after the user's personal finances.")
     f = _with_gem(llm, gem)
 
     f.stt.say("what is my balance")
@@ -295,7 +297,7 @@ async def test_a_gem_is_sent_the_same_instructions_and_tools_on_every_request() 
         llm.requests[0]["instructions"]
     }
     assert all(request["tools"] == llm.requests[0]["tools"] for request in llm.requests)
-    assert _dated(llm.requests[0]["instructions"]) == _KUBER_WITH_SEARCH
+    assert _dated(llm.requests[0]["instructions"]) == _GEM_WITH_SEARCH
     assert [tool["name"] for tool in llm.requests[0]["tools"]] == [
         "web_search",
         "cancel_tool_call",
@@ -309,21 +311,21 @@ async def test_a_gem_without_web_search_is_offered_no_tools_even_with_the_key(
 ) -> None:
     # "weather" is not a tool there is. A config that names it still opens a call.
     llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
-    f = _with_gem(llm, _gem(name="Kuber", tools=tools), _Search(configured=True))
+    f = _with_gem(llm, _gem(name="Gem One", tools=tools), _Search(configured=True))
 
     f.stt.say("hello")
     await _read_until(f.conversation, "assistant.done")
 
     assert llm.requests[0]["tools"] == []
     assert _dated(llm.requests[0]["instructions"]) == (
-        _DARBAR + "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+        _DARBAR + "You are Gem One.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
     )
     await f.conversation.close()
 
 
 async def test_a_gem_with_web_search_is_offered_nothing_without_the_key() -> None:
     llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
-    f = _with_gem(llm, _gem(name="Kuber"), _Search(configured=False))
+    f = _with_gem(llm, _gem(name="Gem One"), _Search(configured=False))
 
     f.stt.say("hello")
     await _read_until(f.conversation, "assistant.done")
@@ -339,12 +341,12 @@ async def test_a_gem_keeps_the_darbar_text_it_opened_with_even_if_it_changes_mid
         [_delta("Bye."), _completed(_message("Bye."))],
     )
     darbar, _ = _darbar()
-    await darbar.set("Every gem works for Asha.")
-    f = _with_gem(llm, _gem(name="Kuber"), _Search(configured=False), (await darbar.read()).text)
+    await darbar.set("Every gem works for one person.")
+    f = _with_gem(llm, _gem(name="Gem One"), _Search(configured=False), (await darbar.read()).text)
 
     f.stt.say("hello")
     await _read_until(f.conversation, "assistant.done")
-    await darbar.set("Every gem works for Ravi.")
+    await darbar.set("Every gem works for two people.")
     f.clock.advance(5)
     f.stt.say("thanks")
     await _read_until(f.conversation, "assistant.done")
@@ -353,9 +355,9 @@ async def test_a_gem_keeps_the_darbar_text_it_opened_with_even_if_it_changes_mid
     # The start of every request stays the same for the whole call.
     assert llm.requests[0]["instructions"] == llm.requests[1]["instructions"]
     assert _dated(llm.requests[1]["instructions"]) == (
-        "Every gem works for Asha.\n"
+        "Every gem works for one person.\n"
         "\n"
-        "You are Kuber.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
+        "You are Gem One.\n\n" + _GEM_OPENING + "\n" + _SPOKEN_RULES + _DATE
     )
     await f.conversation.close()
 
@@ -398,7 +400,7 @@ async def test_a_conversation_takes_its_model_and_who_speaks_first_from_the_gem_
     assert kwargs["gem"] is config
 
 
-@pytest.mark.parametrize("darbar", [None, "", "Every gem works for Asha."])
+@pytest.mark.parametrize("darbar", [None, "", "Every gem works for one person."])
 async def test_a_conversation_is_opened_with_the_darbar_text_it_is_handed(
     monkeypatch: pytest.MonkeyPatch, darbar: str | None
 ) -> None:
@@ -406,7 +408,7 @@ async def test_a_conversation_is_opened_with_the_darbar_text_it_is_handed(
     monkeypatch.setattr(voice_ent, "VoiceConversation", lambda **kwargs: opened.append(kwargs))
     entity = _entity(_adapters(openai_key=True, anthropic_key=True))
 
-    await entity.open_conversation(gem=_gem(name="Kuber"), darbar=darbar)
+    await entity.open_conversation(gem=_gem(name="Gem One"), darbar=darbar)
 
     [kwargs] = opened
     assert kwargs["darbar"] == darbar
@@ -477,7 +479,7 @@ async def _service_and_darbar() -> tuple[
     VoiceServiceV1Class, _Voice, GemConfig, _DocDBFake, tuple[DarbarEntityClass, _DarbarDocDB]
 ]:
     gems, docdb = _gems()
-    gem = await gems.create(name="Kuber", model="Sonnet 5.5", speaks_first=True)
+    gem = await gems.create(name="Gem One", model="Sonnet 5.5", speaks_first=True)
     voice = _Voice()
     darbar = _darbar()
     service = VoiceServiceV1Class(cast("VoiceEntityClass", voice), gems, darbar[0])
@@ -565,7 +567,7 @@ async def test_a_call_with_a_gem_is_opened_with_the_built_in_darbar_text_when_no
     assert darbar_db.reads == 1
 
 
-@pytest.mark.parametrize("text", ["", "Every gem works for Asha."])
+@pytest.mark.parametrize("text", ["", "Every gem works for one person."])
 async def test_a_call_with_a_gem_is_opened_with_the_darbar_text_that_is_set(text: str) -> None:
     service, voice, gem, _, (darbar, darbar_db) = await _service_and_darbar()
     await darbar.set(text)
@@ -581,18 +583,18 @@ async def test_a_change_to_the_darbar_text_reaches_the_next_call() -> None:
     service, voice, gem, _, (darbar, _) = await _service_and_darbar()
     socket = {"gem": str(gem.id)}
 
-    await darbar.set("Every gem works for Asha.")
+    await darbar.set("Every gem works for one person.")
     await service.converse(cast("WebSocket", _ServiceSocket(socket)))
-    await darbar.set("Every gem works for Ravi.")
+    await darbar.set("Every gem works for two people.")
     await service.converse(cast("WebSocket", _ServiceSocket(socket)))
 
-    assert voice.darbars == ["Every gem works for Asha.", "Every gem works for Ravi."]
+    assert voice.darbars == ["Every gem works for one person.", "Every gem works for two people."]
 
 
 @pytest.mark.parametrize("query", [{}, {"model": "Haiku 5.5", "first": "assistant"}])
 async def test_a_call_without_a_gem_does_not_read_the_darbar_text(query: dict[str, str]) -> None:
     service, voice, _, _, (darbar, darbar_db) = await _service_and_darbar()
-    await darbar.set("Every gem works for Asha.")
+    await darbar.set("Every gem works for one person.")
     darbar_db.reads = 0
 
     await service.converse(cast("WebSocket", _ServiceSocket(query)))

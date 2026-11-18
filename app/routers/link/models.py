@@ -57,11 +57,6 @@ class LinkModels:
                 type: Literal["call.playback"]
                 delay: float = Field(ge=0)
 
-            class CallEnd(BaseModel):
-                """Hang up."""
-
-                type: Literal["call.end"]
-
         class Output:
             class Ready(BaseModel):
                 """Sent once, as soon as the socket is open."""

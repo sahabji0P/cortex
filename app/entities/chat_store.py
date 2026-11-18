@@ -3,30 +3,25 @@ Chat store entity: each gem's written conversation, kept in the `ChatItems` coll
 
 The conversation is kept as the model is sent it: one document per item of the history
 (a message, a tool call, or a call's result), in order. It is only ever added to. That
-is what lets the database be the truth: every reply is made from what is stored, so
-nothing about a conversation needs to be kept in memory between messages.
+is what lets the database be the truth: every reply is made from what is stored. All
+that is kept in memory between messages is the searches still running (see `chat_ent.py`).
 
 A gem's conversation goes when the gem does (see `GemEntityClass.delete`).
 """
 
 import contextlib
 from collections.abc import Sequence
-from datetime import UTC, datetime
-from typing import Annotated, ClassVar
+from typing import ClassVar
 
 from bson import ObjectId
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
+from app.core.times import UtcDatetime
 from app.entities.model import Item
 
 __all__ = ["ChatItem", "ChatStoreClass"]
-
-
-def _in_utc(value: datetime) -> datetime:
-    # The database hands times back without a zone. They were written in UTC.
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 class ChatItem(BaseModel):
@@ -41,7 +36,7 @@ class ChatItem(BaseModel):
     # Its place in the gem's conversation: 0 for the first item, then one more each.
     place: int = Field(ge=0)
     # When it was added. The user's message carries when it arrived.
-    at: Annotated[datetime, AfterValidator(_in_utc)]
+    at: UtcDatetime
     # The item as the model is sent it.
     item: Item
     # For a tool call, what its `chat.tool` frame said, if it said anything.
