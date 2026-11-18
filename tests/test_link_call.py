@@ -87,16 +87,14 @@ class _Voice:
     """
 
     def __init__(self) -> None:
-        self.asked: list[tuple[object, object, object, object]] = []
+        self.asked: list[tuple[object, object, object]] = []
         self.made: list[_Conversation] = []
         self.gate: asyncio.Event | None = None
         self.finishes_anyway = False
         self.fails: Exception | None = None
 
-    async def open_conversation(
-        self, model=None, *, speaks_first=None, gem=None, darbar=None
-    ) -> _Conversation:
-        self.asked.append((model, speaks_first, gem, darbar))
+    async def open_conversation(self, gem, *, speaks_first=None, darbar=None) -> _Conversation:
+        self.asked.append((speaks_first, gem, darbar))
         try:
             if self.gate is not None:
                 await self.gate.wait()
@@ -204,6 +202,10 @@ class _Setup:
         )
         self.service = LinkServiceV1Class(chat.chat, calls)
 
+    def start(self, socket: "_Socket", **fields: Any) -> None:
+        """Send `call.start` with the gem's id, and any other fields given."""
+        socket.send(type="call.start", gem=str(self.gem.id), **fields)
+
 
 async def _setup(*rounds: list[Any]) -> _Setup:
     return _Setup(await _chat(*rounds), _Voice())
@@ -225,7 +227,7 @@ async def _close(socket: _Socket, linked: asyncio.Task[None]) -> None:
 async def _in_call(setup: _Setup, **start: Any) -> tuple[_Socket, asyncio.Task[None]]:
     """A link with a call open on it."""
     socket, linked = await _open(setup)
-    socket.send(type="call.start", **start)
+    setup.start(socket, **start)
     await socket.until("call.ready")
     return socket, linked
 
@@ -239,7 +241,7 @@ def _event(type_: str, text: str = "") -> VoiceEvent:
 
 async def test_a_call_carries_audio_and_events_both_ways_and_ends_on_call_end() -> None:
     setup = await _setup()
-    socket, linked = await _in_call(setup, gem=str(setup.gem.id))
+    socket, linked = await _in_call(setup)
     [conversation] = setup.voice.made
 
     socket.mic(b"\x01\x02")
@@ -299,7 +301,7 @@ async def test_mic_audio_sent_while_the_call_opens_is_kept_and_fed_in_order() ->
     setup.voice.gate = asyncio.Event()
     socket, linked = await _open(setup)
 
-    socket.send(type="call.start")
+    setup.start(socket)
     for n in range(5):
         socket.mic(bytes([n]))
     await _eventually(lambda: len(setup.voice.asked) == 1)
@@ -349,7 +351,7 @@ async def test_the_playback_delay_reaches_the_call_even_when_it_is_sent_while_it
     setup.voice.gate = asyncio.Event()
     socket, linked = await _open(setup)
 
-    socket.send(type="call.start")
+    setup.start(socket)
     socket.send(type="call.playback", delay=0.25)
     await _eventually(lambda: len(setup.voice.asked) == 1)
     await _settle()
@@ -364,47 +366,23 @@ async def test_the_playback_delay_reaches_the_call_even_when_it_is_sent_while_it
 
 
 @pytest.mark.parametrize(
-    ("start", "opened"),
+    ("start", "first"),
     [
-        # Without a gem: the model and who speaks first as asked, or left to the defaults.
-        ({}, (None, None)),
-        ({"model": "Haiku 5.5"}, ("Haiku 5.5", None)),
-        ({"first": "user"}, (None, False)),
-        ({"first": "assistant"}, (None, True)),
-        ({"model": "6.1 Sol", "first": "assistant"}, ("6.1 Sol", True)),
-        # Sent as null is the same as left out.
-        ({"model": None, "first": None}, (None, None)),
+        # Left out, or sent as null, it is the gem's to say. Sent, it wins for this call.
+        ({}, None),
+        ({"first": None}, None),
+        ({"first": "user"}, False),
+        ({"first": "assistant"}, True),
     ],
 )
-async def test_a_call_without_a_gem_opens_as_asked(
-    start: dict[str, Any], opened: tuple[object, object]
+async def test_a_call_opens_with_its_gem_its_darbar_text_and_who_speaks_first_if_asked(
+    start: dict[str, Any], first: bool | None
 ) -> None:
     setup = await _setup()
     socket, linked = await _in_call(setup, **start)
 
-    assert setup.voice.asked == [(*opened, None, None)]
-    await _close(socket, linked)
-
-
-@pytest.mark.parametrize(
-    ("start", "opened"),
-    [
-        # Left out, each is the gem's to say. Sent, each wins for this call.
-        ({}, (None, None)),
-        ({"model": "6.1 Terra"}, ("6.1 Terra", None)),
-        ({"first": "user"}, (None, False)),
-        ({"first": "assistant"}, (None, True)),
-        ({"model": "Haiku 5.5", "first": "user"}, ("Haiku 5.5", False)),
-    ],
-)
-async def test_a_call_with_a_gem_opens_with_its_config_its_darbar_text_and_what_is_asked(
-    start: dict[str, Any], opened: tuple[object, object]
-) -> None:
-    setup = await _setup()
-    socket, linked = await _in_call(setup, gem=str(setup.gem.id), **start)
-
-    [(model, first, gem, darbar)] = setup.voice.asked
-    assert (model, first) == opened
+    [(asked, gem, darbar)] = setup.voice.asked
+    assert asked is first
     assert cast("Any", gem).id == setup.gem.id
     assert darbar is not None and darbar.startswith("The user keeps a few assistants")
     await _close(socket, linked)
@@ -413,16 +391,8 @@ async def test_a_call_with_a_gem_opens_with_its_config_its_darbar_text_and_what_
 # ---- a call that does not open
 
 
-@pytest.mark.parametrize(
-    "start",
-    [
-        {"model": "GPT-2"},
-        {"first": "nobody"},
-        {"model": 5},
-        {"gem": 5},
-    ],
-)
-async def test_a_model_or_setting_that_is_not_offered_is_refused(start: dict[str, Any]) -> None:
+@pytest.mark.parametrize("start", [{}, {"gem": None}, {"gem": 5}])
+async def test_a_start_that_names_no_gem_is_refused(start: dict[str, Any]) -> None:
     setup = await _setup()
     socket, linked = await _open(setup)
 
@@ -431,7 +401,24 @@ async def test_a_model_or_setting_that_is_not_offered_is_refused(start: dict[str
 
     assert socket.frame("call.refused") == {
         "type": "call.refused",
-        "text": "unknown model or setting",
+        "text": "no gem, or an unknown setting",
+    }
+    assert setup.voice.asked == []
+    assert not linked.done()
+    await _close(socket, linked)
+
+
+@pytest.mark.parametrize("first", ["nobody", 5])
+async def test_a_setting_that_is_not_offered_is_refused(first: object) -> None:
+    setup = await _setup()
+    socket, linked = await _open(setup)
+
+    setup.start(socket, first=first)
+    await socket.until("call.refused")
+
+    assert socket.frame("call.refused") == {
+        "type": "call.refused",
+        "text": "no gem, or an unknown setting",
     }
     assert setup.voice.asked == []
     assert not linked.done()
@@ -456,7 +443,7 @@ async def test_a_model_whose_provider_has_no_key_is_refused_with_the_reason() ->
     setup.voice.fails = LookupError("no Anthropic key is set, so Haiku 5.5 cannot be used")
     socket, linked = await _open(setup)
 
-    socket.send(type="call.start", model="Haiku 5.5")
+    setup.start(socket)
     await socket.until("call.refused")
 
     assert socket.frame("call.refused")["text"] == (
@@ -471,7 +458,7 @@ async def test_a_gem_whose_config_cannot_be_read_fails_the_call() -> None:
     setup.chat.docdb.collections["Gems"][0]["version"] = GEM_CONFIG_VERSION + 1
     socket, linked = await _open(setup)
 
-    socket.send(type="call.start", gem=str(setup.gem.id))
+    setup.start(socket)
     await socket.until("call.failed")
 
     assert socket.frame("call.failed")["text"] == "the gem's config cannot be read"
@@ -485,7 +472,7 @@ async def test_speech_services_that_cannot_be_reached_fail_the_call() -> None:
     setup.voice.fails = ConnectionError("no route to the speech service")
     socket, linked = await _open(setup)
 
-    socket.send(type="call.start")
+    setup.start(socket)
     await socket.until("call.failed")
 
     assert socket.frame("call.failed")["text"] == "speech services unavailable"
@@ -499,7 +486,7 @@ async def test_after_a_call_that_did_not_open_another_can_be_started() -> None:
 
     socket.send(type="call.start", gem="not-an-id")
     await socket.until("call.refused")
-    socket.send(type="call.start")
+    setup.start(socket)
     await socket.until("call.ready")
 
     assert socket.types() == ["link.ready", "call.refused", "call.ready"]
@@ -518,9 +505,9 @@ async def test_a_call_start_while_a_call_is_open_or_opening_gets_error_and_the_c
     if opening:
         setup.voice.gate = asyncio.Event()
 
-    socket.send(type="call.start")
+    setup.start(socket)
     await _eventually(lambda: len(setup.voice.asked) == 1)
-    socket.send(type="call.start", model="Haiku 5.5")
+    setup.start(socket, first="assistant")
     await socket.until("error")
     if setup.voice.gate is not None:
         setup.voice.gate.set()
@@ -529,7 +516,7 @@ async def test_a_call_start_while_a_call_is_open_or_opening_gets_error_and_the_c
     [conversation] = setup.voice.made
     await _eventually(lambda: conversation.audio == [b"\x01"])
 
-    assert setup.voice.asked == [(None, None, None, None)]
+    assert [first for first, _, _ in setup.voice.asked] == [None]
     assert socket.frame("error")["text"] == "a call is already open"
     assert conversation.closed == 0
     await _close(socket, linked)
@@ -566,12 +553,12 @@ async def test_a_call_started_right_after_call_end_follows_the_first_call_s_last
     first = setup.voice.made[0]
 
     socket.send(type="call.end")
-    socket.send(type="call.start", model="Haiku 5.5")
+    setup.start(socket, first="assistant")
     await socket.until("call.ready", 2)
 
     assert socket.types() == ["link.ready", "call.ready", "call.ended", "call.ready"]
     assert first.closed == 1
-    assert setup.voice.asked[1][0] == "Haiku 5.5"
+    assert setup.voice.asked[1][0] is True
     await _close(socket, linked)
     assert first.closed == 1
     assert setup.voice.made[1].closed == 1
@@ -600,7 +587,7 @@ async def test_a_call_whose_conversation_ends_by_itself_gets_call_ended() -> Non
     assert conversation.closed == 1
     assert not linked.done()
     # Nothing more is sent for the call, and another can be started.
-    socket.send(type="call.start")
+    setup.start(socket)
     await socket.until("call.ready", 2)
     assert socket.types() == ["link.ready", "call.ready", "call.ended", "call.ready"]
     await _close(socket, linked)
@@ -702,7 +689,7 @@ async def test_call_end_while_the_call_opens_stops_the_opening_and_gets_call_end
     setup.voice.finishes_anyway = finishes_anyway
     socket, linked = await _open(setup)
 
-    socket.send(type="call.start")
+    setup.start(socket)
     await _eventually(lambda: len(setup.voice.asked) == 1)
     socket.send(type="call.end")
     await socket.until("call.ended")
@@ -724,7 +711,7 @@ async def test_the_link_dropping_while_the_call_opens_stops_the_opening(
     setup.voice.finishes_anyway = finishes_anyway
     socket, linked = await _open(setup)
 
-    socket.send(type="call.start")
+    setup.start(socket)
     await _eventually(lambda: len(setup.voice.asked) == 1)
     await _close(socket, linked)
 
@@ -737,7 +724,7 @@ async def test_a_call_hung_up_while_it_waits_for_the_one_before_it_never_opens()
     first = setup.voice.made[0]
 
     socket.send(type="call.end")
-    socket.send(type="call.start")
+    setup.start(socket)
     socket.send(type="call.end")
     await socket.until("call.ended", 2)
 
@@ -756,7 +743,7 @@ async def test_chat_is_read_and_answered_while_a_call_opens_and_runs() -> None:
     setup.voice.gate = asyncio.Event()
     socket, linked = await _open(setup)
 
-    socket.send(type="call.start")
+    setup.start(socket)
     socket.send(type="chat.send", gem=str(setup.gem.id), text="hello")
     await socket.until("chat.done")
     setup.voice.gate.set()
@@ -790,18 +777,21 @@ async def test_a_failed_chat_reply_does_not_disturb_the_call() -> None:
     await _close(socket, linked)
 
 
-@pytest.mark.parametrize("gem", ["not-an-id", None])
-async def test_a_call_that_does_not_open_does_not_disturb_a_chat_reply(gem: str | None) -> None:
+@pytest.mark.parametrize("refused", [True, False])
+async def test_a_call_that_does_not_open_does_not_disturb_a_chat_reply(refused: bool) -> None:
     pause = asyncio.Event()
     setup = await _setup([_delta("Once "), pause, _delta("upon a time."), _completed()])
-    if gem is None:
+    if not refused:
         setup.voice.fails = ConnectionError("no route")
     socket, linked = await _open(setup)
 
     socket.send(type="chat.send", gem=str(setup.gem.id), text="a story")
     await socket.until("chat.text")
-    socket.send(type="call.start", **({} if gem is None else {"gem": gem}))
-    await socket.until("call.failed" if gem is None else "call.refused")
+    if refused:
+        socket.send(type="call.start", gem="not-an-id")
+    else:
+        setup.start(socket)
+    await socket.until("call.refused" if refused else "call.failed")
     pause.set()
     await socket.until("chat.done")
 
@@ -854,7 +844,7 @@ async def test_a_call_hung_up_while_it_opens_gets_call_ended_even_if_the_opening
     setup.voice.finishes_anyway = True  # the opening runs on past the hang-up
     setup.voice.fails = LookupError("no OpenAI key is set, so 6 Luna cannot be used")
     socket, linked = await _open(setup)
-    socket.send(type="call.start")
+    setup.start(socket)
     await _eventually(lambda: len(setup.voice.asked) == 1)
 
     socket.send(type="call.end")
@@ -871,7 +861,7 @@ async def test_a_refused_start_hung_up_behind_an_ending_call_gets_call_ended() -
     conversation.close_waits = asyncio.Event()
 
     socket.send(type="call.end")
-    socket.send(type="call.start", model="no such model")
+    setup.start(socket, first="nobody")
     socket.send(type="call.end")
     await _settle()
     assert socket.types() == ["link.ready", "call.ready"]  # the first call is still closing
@@ -898,7 +888,7 @@ async def test_a_conversation_that_fails_to_close_still_ends_the_call_and_is_log
     assert "did not close cleanly" in caplog.text
     assert "the speech connection would not close" in caplog.text
     # The link is unharmed, and another call can be started.
-    socket.send(type="call.start")
+    setup.start(socket)
     await socket.until("call.ready", 2)
     await _close(socket, linked)
 
@@ -965,7 +955,7 @@ async def test_frames_read_after_the_client_stopped_reading_are_not_acted_on(
     await _eventually(lambda: conversation.closed == 1)
     assert socket.gone
 
-    socket.send(type="call.start")
+    setup.start(socket)
     async with asyncio.timeout(_WAIT):
         await linked
 

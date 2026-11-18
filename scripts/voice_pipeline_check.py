@@ -229,6 +229,7 @@ class Talk:
             tts=self.tts,
             llm=tap(llm, self.llm),
             search=self.search,
+            gem=T._GEM,
             model=MODEL,
             speaks_first=False,
             clock=self.clock,

@@ -1,4 +1,4 @@
-"""What a call's model is sent as instructions, with a gem and without one.
+"""What a call's model is sent as instructions, and what a call is opened with.
 
 The expected texts are written out here in full, not built from the module's
 constants, so any change to what the model reads shows up as a failing test.
@@ -6,7 +6,7 @@ constants, so any change to what the model reads shows up as a failing test.
 
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from bson import ObjectId
@@ -16,7 +16,7 @@ from app.entities.call_ent import CallEntityClass, CallRefused
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig
 from app.entities.instructions import instruction_layers, instructions
-from app.entities.model import ModelName, model_for
+from app.entities.model import model_for
 from app.entities.voice_ent import VoiceConversation
 from tests.test_darbar import _darbar
 from tests.test_darbar import _DocDBFake as _DarbarDocDB
@@ -28,7 +28,6 @@ from tests.test_voice_conversation import (
     _TTS,
     _Clock,
     _completed,
-    _conversation,
     _delta,
     _Fixture,
     _message,
@@ -42,10 +41,6 @@ if TYPE_CHECKING:
 
 _NOW = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 
-_CORTEX_OPENING = (
-    "You are Cortex, a voice assistant in a live spoken conversation. Everything you write "
-    "is read aloud by a text-to-speech voice.\n"
-)
 _DARBAR = (
     "The user keeps a few assistants of their own, which they call gems. Each gem has its "
     "own name and its own work. The place they share is called the Darbar.\n"
@@ -96,10 +91,6 @@ _NOTE_RULE = (
 )
 _DATE = "\nToday is Tuesday, 17 November 2026.\n"
 
-# What a call without a gem has always been sent.
-_NO_GEM = _CORTEX_OPENING + "\n" + _SPOKEN_RULES
-_NO_GEM_WITH_SEARCH = _NO_GEM + _SEARCH_RULES
-
 
 def _dated(text: str) -> str:
     """The text with today's date, whatever day the test runs, put back as `_DATE`."""
@@ -110,54 +101,33 @@ def _gem(**fields: object) -> GemConfig:
     return GemConfig.model_validate(_stored(**fields))
 
 
-# ---- without a gem: nothing changes
+# ---- the gem: its name and its own words, then the rules
 
 
-async def test_a_call_without_a_gem_is_sent_the_instructions_it_always_was() -> None:
-    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
-    f = _conversation(llm)
+def test_the_layers_go_from_what_changes_least_to_what_changes_most() -> None:
+    layers = instruction_layers(gem=_gem(name="Gem One"), search=True, model_needs="", now=_NOW)
 
-    f.stt.say("hello")
-    await _read_until(f.conversation, "assistant.done")
-
-    assert _dated(llm.requests[0]["instructions"]) == _NO_GEM_WITH_SEARCH + _DATE
-    assert [tool["name"] for tool in llm.requests[0]["tools"]] == [
-        "web_search",
-        "cancel_tool_call",
-    ]
-    await f.conversation.close()
-
-
-async def test_a_call_without_a_gem_or_a_search_key_is_sent_no_search_rules() -> None:
-    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
-    f = _conversation(llm, _Search(configured=False))
-
-    f.stt.say("hello")
-    await _read_until(f.conversation, "assistant.done")
-
-    assert _dated(llm.requests[0]["instructions"]) == _NO_GEM + _DATE
-    assert llm.requests[0]["tools"] == []
-    await f.conversation.close()
+    assert [layer.name for layer in layers] == ["darbar", "gem", "spoken", "tools", "model", "date"]
+    assert [layer.text for layer in layers[:2]] == [_DARBAR, "You are Gem One.\n\n"]
+    assert layers[-1].text == _DATE
 
 
 def test_an_anthropic_model_adds_its_note_rule_after_the_search_rules() -> None:
     model = model_for(_adapters(openai_key=False, anthropic_key=True)["anthropic"], "Haiku 5.5", [])
+    gem = _gem(name="Gem One")
 
-    text = instructions(gem=None, search=True, model_needs=model.own_instructions, now=_NOW)
+    text = instructions(gem=gem, search=True, model_needs=model.own_instructions, now=_NOW)
 
-    assert text == _NO_GEM_WITH_SEARCH + _NOTE_RULE + _DATE
-
-
-def test_the_layers_go_from_what_changes_least_to_what_changes_most() -> None:
-    layers = instruction_layers(gem=None, search=True, model_needs="", now=_NOW)
-
-    assert [layer.name for layer in layers] == ["darbar", "gem", "spoken", "tools", "model", "date"]
-    # A call without a gem is told nothing of the Darbar, and the gem says nothing.
-    assert [layer.text for layer in layers[:2]] == ["", ""]
-    assert layers[-1].text == _DATE
-
-
-# ---- with a gem: its name and its own words, then the same rules
+    assert text == (
+        _DARBAR
+        + "You are Gem One.\n\n"
+        + _GEM_OPENING
+        + "\n"
+        + _SPOKEN_RULES
+        + _SEARCH_RULES
+        + _NOTE_RULE
+        + _DATE
+    )
 
 
 def test_a_gem_is_named_and_its_own_instructions_come_before_the_spoken_rules() -> None:
@@ -237,13 +207,6 @@ def test_the_darbar_text_is_sent_without_the_space_around_it() -> None:
 
     assert text.startswith(f"{own}\n\nYou are Gem One.\n\n")
     assert "\n\n\n" not in text
-
-
-@pytest.mark.parametrize("darbar", [None, "", "Every gem works for one person."])
-def test_a_call_without_a_gem_is_told_no_darbar_text_whatever_it_is(darbar: str | None) -> None:
-    text = instructions(darbar=darbar, gem=None, search=True, model_needs="", now=_NOW)
-
-    assert text == _NO_GEM_WITH_SEARCH + _DATE
 
 
 # ---- a conversation held with a gem
@@ -363,34 +326,29 @@ async def test_a_gem_keeps_the_darbar_text_it_opened_with_even_if_it_changes_mid
 
 
 @pytest.mark.parametrize(
-    ("model", "speaks_first", "gem", "used"),
+    ("speaks_first", "gem", "used"),
     [
-        # Without a gem, as before: what was asked for, or the configured model.
-        (None, None, None, ("6 Luna", False)),
-        ("Haiku 5.5", True, None, ("Haiku 5.5", True)),
-        (None, False, None, ("6 Luna", False)),
-        # With a gem: what the gem says, unless the call asks for something else.
-        (None, None, {"model": "Sonnet 5.5", "speaks_first": True}, ("Sonnet 5.5", True)),
-        (None, None, {"model": None, "speaks_first": False}, ("6 Luna", False)),
-        ("6.1 Terra", None, {"model": "Sonnet 5.5", "speaks_first": True}, ("6.1 Terra", True)),
-        (None, False, {"model": "Sonnet 5.5", "speaks_first": True}, ("Sonnet 5.5", False)),
-        (None, True, {"model": None, "speaks_first": False}, ("6 Luna", True)),
+        # The gem's model, or the configured one when it names none. Who speaks first is
+        # the gem's to say, unless the call asks for something else.
+        (None, {"model": "Sonnet 5.5", "speaks_first": True}, ("Sonnet 5.5", True)),
+        (None, {"model": None, "speaks_first": False}, ("6 Luna", False)),
+        (False, {"model": "Sonnet 5.5", "speaks_first": True}, ("Sonnet 5.5", False)),
+        (True, {"model": None, "speaks_first": False}, ("6 Luna", True)),
     ],
 )
 async def test_a_conversation_takes_its_model_and_who_speaks_first_from_the_gem_unless_asked(
     monkeypatch: pytest.MonkeyPatch,
-    model: ModelName | None,
     speaks_first: bool | None,
-    gem: dict[str, object] | None,
+    gem: dict[str, object],
     used: tuple[str, bool],
 ) -> None:
     opened: list[dict[str, object]] = []
     monkeypatch.setattr(voice_ent, "VoiceConversation", lambda **kwargs: opened.append(kwargs))
     monkeypatch.setattr(voice_ent.settings, "voice_model", "6 Luna")
     entity = _entity(_adapters(openai_key=True, anthropic_key=True))
-    config = None if gem is None else _gem(**gem)
+    config = _gem(**gem)
 
-    await entity.open_conversation(model, speaks_first=speaks_first, gem=config)
+    await entity.open_conversation(config, speaks_first=speaks_first)
 
     [kwargs] = opened
     assert (kwargs["model"], kwargs["speaks_first"]) == used
@@ -405,13 +363,13 @@ async def test_a_conversation_is_opened_with_the_darbar_text_it_is_handed(
     monkeypatch.setattr(voice_ent, "VoiceConversation", lambda **kwargs: opened.append(kwargs))
     entity = _entity(_adapters(openai_key=True, anthropic_key=True))
 
-    await entity.open_conversation(gem=_gem(name="Gem One"), darbar=darbar)
+    await entity.open_conversation(_gem(name="Gem One"), darbar=darbar)
 
     [kwargs] = opened
     assert kwargs["darbar"] == darbar
 
 
-# ---- opening a call reads the Darbar text once, and only for a gem
+# ---- opening a call reads the Darbar text once
 
 
 class _Voice:
@@ -421,13 +379,11 @@ class _Voice:
     """
 
     def __init__(self) -> None:
-        self.opened: list[tuple[object, object, object]] = []
+        self.opened: list[tuple[object, object]] = []
         self.darbars: list[str | None] = []
 
-    async def open_conversation(
-        self, model=None, *, speaks_first=None, gem=None, darbar=None
-    ) -> object:
-        self.opened.append((model, speaks_first, gem))
+    async def open_conversation(self, gem, *, speaks_first=None, darbar=None) -> object:
+        self.opened.append((speaks_first, gem))
         self.darbars.append(darbar)
         return object()
 
@@ -476,18 +432,6 @@ async def test_a_change_to_the_darbar_text_reaches_the_next_call() -> None:
     await calls.open(str(gem.id))
 
     assert voice.darbars == ["Every gem works for one person.", "Every gem works for two people."]
-
-
-@pytest.mark.parametrize("asked", [{}, {"model": "Haiku 5.5", "speaks_first": True}])
-async def test_a_call_without_a_gem_does_not_read_the_darbar_text(asked: dict[str, Any]) -> None:
-    calls, voice, _, (darbar, darbar_db) = await _calls()
-    await darbar.set("Every gem works for one person.")
-    darbar_db.reads = 0
-
-    await calls.open(None, **asked)
-
-    assert voice.darbars == [None]
-    assert darbar_db.reads == 0
 
 
 async def test_a_gem_that_is_not_there_reads_no_darbar_text() -> None:

@@ -6,12 +6,14 @@ the tests move a clock by hand, so each one can say how much of a reply the user
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
 from app.entities import voice_ent
+from app.entities.gem_ent import GemConfig
 from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
 from app.entities.voice_speech import Playback, Utterance
 
@@ -19,6 +21,16 @@ from app.entities.voice_speech import Playback, Utterance
 _BYTES_PER_SECOND = 48000
 # Playback starts this long after audio is sent (see voice_speech._CLIENT_DELAY).
 _DELAY = 0.15
+
+# The gem every call here is with: a plain stand-in, with no instructions of its own and
+# the default tools. What it is told is tested in `test_voice_gem.py`.
+_GEM = GemConfig.model_validate(
+    {
+        "name": "Gem One",
+        "created_at": datetime(2026, 11, 17, tzinfo=UTC),
+        "updated_at": datetime(2026, 11, 17, tzinfo=UTC),
+    }
+)
 
 
 class _Clock:
@@ -253,6 +265,7 @@ def _conversation(
         tts=tts,
         llm=llm,
         search=search or _Search(),
+        gem=_GEM,
         speaks_first=speaks_first,
         clock=clock,
     )
@@ -640,7 +653,9 @@ async def test_a_connection_that_failed_to_open_ahead_of_time_does_not_fail_the_
     llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
     stt, tts, clock = _STT(), _TTS(), _Clock()
     tts.failures = 1
-    conversation = VoiceConversation(stt=stt, tts=tts, llm=llm, search=_Search(), clock=clock)
+    conversation = VoiceConversation(
+        stt=stt, tts=tts, llm=llm, search=_Search(), gem=_GEM, clock=clock
+    )
 
     await _let_audio_out()
     stt.say("hello")

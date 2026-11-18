@@ -129,11 +129,6 @@ def test_the_written_rule_for_a_search_that_carries_on_is_the_calls_with_a_new_o
     )
 
 
-def test_writing_is_always_with_a_gem() -> None:
-    with pytest.raises(ValueError, match="always with a gem"):
-        instructions(gem=None, search=False, written=True, model_needs="")
-
-
 # ---- the store
 
 

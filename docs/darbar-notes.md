@@ -13,12 +13,13 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Granth (proposed): a long document a gem writes, kept in its Bhandar.
 - Vichar Dhara (proposed): the setting that carries a gem's thinking forward.
 - No name yet: skills, tool servers ("connection" for now), the vault.
-- Not decided: whether "Cortex" is the app or the memory system.
+- Cortex: the name of the whole project, which holds one or many gems. Never an assistant.
 
 ## Decided
 
 - A gem is one entity with one context. Call or chat, it is the same context. No sessions.
 - Every gem has both call and chat.
+- Always a gem: there is no call without one. A call answers with the gem's model.
 - How a call behaves is closed, until we find something that makes it better.
 - One WebSocket once you are logged in. Calls, chat and events all go over it.
 - Calls go over the standing socket only. The old call socket and the test page are gone: the app is the client.
