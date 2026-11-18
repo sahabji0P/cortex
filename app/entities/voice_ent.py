@@ -5,7 +5,10 @@ Voice entity: a spoken conversation as a cascade of three services.
                   (Cartesia)         (OpenAI or (Cartesia)
                                       Anthropic)
 
-One `VoiceConversation` per call. The speech-to-text service also detects turns:
+One `VoiceConversation` per call. It starts from the gem's conversation as it is stored,
+since a gem has one conversation whether the user calls it or writes to it, and hands
+back what it adds, as it is settled, for the caller to store (see `call_ent.py`). The
+speech-to-text service also detects turns:
 
 - `turn.end`   the user finished a sentence. Its transcript starts a reply: the model's
                text is pushed to text-to-speech as it streams, and the audio is forwarded.
@@ -29,13 +32,16 @@ item, which can gain a line (see below).
 
 A user turn stays open until some of the reply to it has been heard. Words that arrive
 before that join the same turn on a new line: speech recognition often splits one
-sentence in two, and the second half is not a new request.
+sentence in two, and the second half is not a new request. The rule is the same in
+writing, and in one place (`history.py`).
 
 A tool call is not stopped by an interruption. If the user speaks while one is running,
 it carries on, as it does in writing (see `late_results.py`). What the user said is
 answered first. The real result is then added at the next quiet moment, even if it came
 in long before, and the model tells the user about it in a reply of its own, without
-waiting to be asked.
+waiting to be asked. The same goes for a tool call left running by a written reply
+before the call: the gem has one set of calls that outlive their replies. A call still
+running when the call ends carries on too, and its result is told in writing.
 """
 
 import asyncio
@@ -43,7 +49,8 @@ import contextlib
 import re
 import time
 import unicodedata
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -55,9 +62,10 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
+from app.entities.history import Added, Mode, UserTurn, added_reply, line, mode_line, stubs
 from app.entities.instructions import instructions
 from app.entities.late_results import LateResults
-from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, run_reply
+from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import (
     LLM,
     MODELS,
@@ -67,18 +75,14 @@ from app.entities.model import (
     is_openai,
     model_for,
 )
-from app.entities.tools import Toolbox, web_search_tool
+from app.entities.tools import gem_toolbox
 from app.entities.voice_speech import Clock, Playback, Speech, Standby
 
-__all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
+__all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent", "VoiceLine"]
 
-# The first item of a call's history. The gem is told one instruction text however it is
-# reached, and that text says a line in the conversation marks when a call starts: this
-# is that line.
-_CALL_STARTED = "The user has called you. From here on the conversation is spoken."
-
-# Follows it in a conversation in which the assistant is to speak first. The
-# model's own words never come first: its opening line is an answer to this.
+# Opens a call in which the assistant is to speak first, after the line that says the
+# user has called, if there is one. The model's own words never open a call: its
+# opening line is an answer to this.
 _GREETING_NOTE = (
     "The call has just connected and the user has not said anything yet. Greet them in "
     "one short sentence and ask what you can do for them."
@@ -153,18 +157,34 @@ class VoiceConversation:
         darbar: str | None = None,
         model: ModelName = "6 Luna",
         speaks_first: bool = False,
+        history: Sequence[Item] = (),
+        last_mode: Mode = "chat",
+        late: LateResults | None = None,
         clock: Clock = time.monotonic,
     ) -> None:
+        # `history` is the gem's conversation as it is stored, and `last_mode` the mode
+        # of its last item ("chat" if it is empty). `late` holds the gem's tool calls
+        # that outlive their replies, those of written replies included; whoever holds
+        # it calls `results_came` when a result comes in while the call is open. Left
+        # out, the conversation holds its own, and stops its calls when it closes.
         self._stt = stt
         self._tts = tts
         self._clock = clock
         self._playback = Playback(clock)
         # Everything the model sees, oldest first. It only ever grows at the end, and
-        # each entry is final when it is added. A call starts with nothing before it.
-        self._history: list[Item] = [{"role": "developer", "content": _CALL_STARTED}]
-        # The user's turn that has not been answered yet, as the pieces it arrived in.
-        # It joins the history when some of the reply to it has been heard.
-        self._turn: list[str] = []
+        # each entry is final when it is added.
+        self._history: list[Item] = list(history)
+        # Everything the call added to the history, in order, for the caller to store.
+        # `grew` is set each time something is added.
+        self.added: list[Added] = []
+        self.grew = asyncio.Event()
+        # The tool calls left running when their replies were cut, in order. Each has the
+        # placeholder as its result in the history, and is held by `late`.
+        self.left_running: list[ToolCall] = []
+        self._closed = False
+        # The user's turn that has not been answered yet. It joins the history when some
+        # of the reply to it has been heard.
+        self._turn = UserTurn()
         # Whether the turn the user has just opened cut a reply short, and whether any
         # of that reply had been heard.
         self._cut_a_reply = False
@@ -178,12 +198,11 @@ class VoiceConversation:
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
         # Tool calls that outlived their replies, until their results are told. A result
         # that comes in is told at the next quiet moment.
-        self._late = LateResults(self._announce_when_quiet)
-        # `llm` has to be the adapter of the provider that `model` belongs to.
-        # The gem is offered only the tools its config names. A name with no tool behind
-        # it here is passed over, so a config saved before a tool went still opens a call.
-        offers_search = search.configured and "web_search" in gem.tools
-        self._tools = Toolbox([web_search_tool(search), self._late.tool] if offers_search else [])
+        self._owns_late = late is None
+        self._late = LateResults(self.results_came) if late is None else late
+        # `llm` has to be the adapter of the provider that `model` belongs to. The gem is
+        # offered the tools its config names, as in writing (see `tools.py`).
+        self._tools = gem_toolbox(gem.tools, search, self._late.tool, self._history)
         self._model = model_for(llm, model, self._tools.specs)
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
@@ -209,11 +228,16 @@ class VoiceConversation:
         # The speech connection for the next reply, opened before it is needed.
         self._standby = Standby(tts, clock)
         self._standby.ready()
+        # The instructions say a line in the conversation marks when a call starts. Every
+        # call opens with it, whatever the conversation held before.
+        self._add(*mode_line("call", last_mode))
         self._listening = asyncio.create_task(self._listen())
         if speaks_first:
             # Otherwise nothing is said until the user has spoken.
-            self._history.append({"role": "developer", "content": _GREETING_NOTE})
+            self._add(line(_GREETING_NOTE))
             self._producing = asyncio.create_task(self._respond())
+        # A result that came in before the call opened is told in it.
+        self._announce_when_quiet()
 
     async def send_audio(self, pcm: bytes) -> None:
         """Feed mic audio: raw 16-bit mono PCM at 16 kHz."""
@@ -228,21 +252,31 @@ class VoiceConversation:
         while (item := await self._out.get()) is not None:
             yield item
 
+    def results_came(self) -> None:
+        """A late result has come in. It is told at the next quiet moment."""
+        self._announce_when_quiet()
+
     async def close(self) -> None:
-        """End the conversation: stop any reply and release the speech connections."""
+        """End the conversation: stop any reply and release the speech connections.
+
+        The latest reply joins the history as it was heard, as when the user speaks over
+        it. A tool call it left running carries on, with the placeholder as its result,
+        unless the conversation holds its own late results: it then stops every call.
+        """
         # First, so that no result coming in from here on starts a reply.
-        outliving = self._late.stop()
+        self._closed = True
         tasks = [
             task
             for task in (self._listening, self._producing, self._announcing)
             if task is not None
         ]
-        calls = self._reply.calls() if self._reply else []
-        others = [call.running for call in calls if call.running is not None]
-        for task in (*tasks, *others):
+        # Settled before it is stopped, as when the user speaks.
+        self._settle()
+        outliving = self._late.stop() if self._owns_late else []
+        for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.gather(*others, *outliving, return_exceptions=True)
+        await asyncio.gather(*outliving, return_exceptions=True)
         await self._standby.close()
         with contextlib.suppress(Exception):
             await self._stt.close()
@@ -298,25 +332,24 @@ class VoiceConversation:
             return None
         reply.speech.silence()
         for call in reply.calls():
-            self._late.settle(call)
+            if self._late.settle(call):
+                self.left_running.append(call)
         heard = reply.delivered(self._playback.hearing())
         if reply.brings_results and (heard.any_text or (reply.finished and heard.kept is None)):
             # Heard at least in part, or produced in full and played to its end: the
             # user has been told. (One that was cut off or failed before it said
             # anything also has nothing "cut", but has told them nothing.)
             self._results_owed = False
-        if heard.items and self._turn:
-            # Some of the reply got through, so the turn it answers is closed.
-            self._history.append({"role": "user", "content": "\n".join(self._turn)})
-            self._turn = []
-        self._history.extend(heard.items)
+        # If some of the reply got through, the turn it answers is closed.
+        answered = self._turn.answered(heard.items)
+        self._add(*answered, *added_reply(heard.items, reply.calls(), datetime.now(UTC)))
         return heard
 
     def _announce_when_quiet(self) -> None:
         """Make sure something is waiting to give the model its late results."""
         waiting = self._announcing is not None and not self._announcing.done()
         owed = self._late.ready or self._results_owed
-        if owed and not self._user_speaking and not waiting:
+        if owed and not self._user_speaking and not waiting and not self._closed:
             self._announcing = asyncio.create_task(self._announce_late_results())
 
     async def _announce_late_results(self) -> None:
@@ -351,16 +384,13 @@ class VoiceConversation:
 
         Whatever is added next follows it, and what the user says next is a new turn.
         """
-        if self._turn:
-            self._history.append({"role": "user", "content": "\n".join(self._turn)})
-            self._turn = []
+        self._add(*self._turn.close())
 
     def _add_late_results(self) -> None:
         """Add each waiting result to the history, as a stub call followed by the result."""
         # An unanswered turn has already been sent to the model: the results follow it.
         self._close_turn()
-        for late in self._late.take():
-            self._history.extend(late.stub.items())
+        self._add(*stubs(late.stub for late in self._late.take()))
 
     async def _start_reply(self, transcript: str) -> None:
         """A turn ended: answer it, or put back what it interrupted if nothing was said."""
@@ -380,14 +410,14 @@ class VoiceConversation:
         # The reply that was to tell the user of a late result, cut off unheard, is not
         # "picked up where it stopped": it is made again, by the same path as before.
         retell = self._results_owed and not said
-        if not said and not self._turn and (not self._cut_a_reply or retell):
+        if not said and not self._turn.open and (not self._cut_a_reply or retell):
             # Nothing was said and nothing heard was stopped: late results may be waiting.
             self._announce_when_quiet()
             return
         if said:
             # The result is in front of the model along with what the user now says.
             self._results_owed = False
-            self._turn.append(transcript)
+            self._turn.add(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
             self._emit("user.final", transcript)
@@ -395,7 +425,7 @@ class VoiceConversation:
             # Nothing was said, yet it stopped a reply that was being heard, which now
             # ends the history. (A reply cut before any of it was heard left the history
             # as it was, and is simply made again.)
-            self._history.append({"role": "developer", "content": _NO_WORDS_NOTE})
+            self._add(line(_NO_WORDS_NOTE))
         self._producing = asyncio.create_task(self._respond())
         # A result that came in while the user was speaking is not slipped in with their
         # turn: the model would answer what they said and never mention it. It waits
@@ -432,18 +462,20 @@ class VoiceConversation:
         # little thinking it was about one in twenty. That costs about half a second at
         # the median and 1.5 s for the slowest tenth, on every request made while this
         # holds. An Anthropic model is not asked to: see `model.py`.
-        return RoundInput([*self._history, *self._open_turn()], think=self._late.pending)
+        return RoundInput([*self._history, *self._turn.items()], think=self._late.pending)
 
     def _is_noise(self, transcript: str) -> bool:
         """Whether a turn's words are a stray fragment trailing the user's last sentence."""
-        trailing = bool(self._turn) or (
-            self._turn_began_at - self._said_at <= _STRAY_WINDOW_SECONDS
-        )
+        trailing = self._turn.open or (self._turn_began_at - self._said_at <= _STRAY_WINDOW_SECONDS)
         return trailing and _is_stray(transcript, self._said, self._user_scripts)
 
-    def _open_turn(self) -> list[Item]:
-        """The user's unanswered turn as one message, for a model call."""
-        return [{"role": "user", "content": "\n".join(self._turn)}] if self._turn else []
+    def _add(self, *added: Added) -> None:
+        """Add items to the history, where they are final."""
+        for one in added:
+            self._history.append(one.item)
+            self.added.append(one)
+        if added:
+            self.grew.set()
 
     def _show_call(self, text: str) -> None:
         """Tell the client what a tool call is doing, such as what a search looks up."""
@@ -471,42 +503,90 @@ class VoiceEntityClass:
         ready = {"OpenAI": self._openai.configured, "Anthropic": self._anthropic.configured}
         return [(info, ready[info.provider], info.name == settings.voice_model) for info in MODELS]
 
-    async def open_conversation(
-        self,
-        gem: GemConfig,
-        *,
-        speaks_first: bool | None = None,
-        darbar: str | None = None,
-    ) -> VoiceConversation:
-        """Start listening. The caller owns the conversation and must `close()` it.
+    async def connect(self, gem: GemConfig, *, speaks_first: bool | None = None) -> "VoiceLine":
+        """Connect speech recognition for a call with `gem`, before its conversation opens.
 
-        The conversation is with `gem`: it says who the assistant is, which tools it may
-        use, and which model answers, or the configured one if it names none. With
-        `speaks_first` the gem greets the user as soon as the conversation opens, or
-        waits for the user to speak; left out, the gem's config says which. `darbar` is
-        the Darbar text the gem is told first, or None for the built-in one; it is kept
-        for the whole conversation. Raises `LookupError` if the model's provider has no
-        key.
+        The call answers with the gem's model, or the configured one if it names none.
+        With `speaks_first` the gem greets the user as soon as the conversation opens, or
+        waits for the user to speak; left out, the gem's config says which. Raises
+        `LookupError` if the model's provider has no key: said now, not as a failed
+        reply after the user has spoken. The caller owns the line: it opens the
+        conversation on it, or closes it.
         """
         model = gem.model or settings.voice_model
-        if speaks_first is None:
-            speaks_first = gem.speaks_first
         llm: LLM = self._openai if is_openai(model) else self._anthropic
         if not llm.configured:
-            # Said now, not as a failed reply after the user has spoken.
             provider = "OpenAI" if is_openai(model) else "Anthropic"
             raise LookupError(f"no {provider} key is set, so {model} cannot be used")
         stt = await self._stt.connect_auto_turns()
-        return VoiceConversation(
+        return VoiceLine(
             stt=stt,
             tts=self._tts,
             llm=llm,
             search=self._search,
             gem=gem,
-            darbar=darbar,
             model=model,
-            speaks_first=speaks_first,
+            speaks_first=gem.speaks_first if speaks_first is None else speaks_first,
         )
+
+
+class VoiceLine:
+    """Speech recognition connected for a call, before its conversation opens."""
+
+    def __init__(
+        self,
+        *,
+        stt: CartesiaSTTSession,
+        tts: CartesiaTTSAdapterClass,
+        llm: LLM,
+        search: ParallelAdapterClass,
+        gem: GemConfig,
+        model: ModelName,
+        speaks_first: bool,
+    ) -> None:
+        self._stt = stt
+        self._tts = tts
+        self._llm = llm
+        self._search = search
+        self._gem = gem
+        self._model: ModelName = model
+        self._speaks_first = speaks_first
+        self._opened = False
+
+    def open(
+        self,
+        *,
+        darbar: str | None = None,
+        history: Sequence[Item] = (),
+        last_mode: Mode = "chat",
+        late: LateResults | None = None,
+    ) -> VoiceConversation:
+        """Start listening. The conversation owns the line from here, and the caller owns it.
+
+        `darbar` is the Darbar text the gem is told first, or None for the built-in one;
+        it is kept for the whole conversation. `history`, `last_mode` and `late` are as
+        `VoiceConversation` takes them.
+        """
+        self._opened = True
+        return VoiceConversation(
+            stt=self._stt,
+            tts=self._tts,
+            llm=self._llm,
+            search=self._search,
+            gem=self._gem,
+            darbar=darbar,
+            model=self._model,
+            speaks_first=self._speaks_first,
+            history=history,
+            last_mode=last_mode,
+            late=late,
+        )
+
+    async def close(self) -> None:
+        """Hang up a line no conversation was opened on."""
+        if not self._opened:
+            with contextlib.suppress(Exception):
+                await self._stt.close()
 
 
 def _is_stray(fragment: str, sentence_before: str, scripts_spoken: set[str]) -> bool:

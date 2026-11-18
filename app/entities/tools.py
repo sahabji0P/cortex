@@ -15,9 +15,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
 from app.adapters.parallel_adp import ParallelAdapterClass, SearchResult
-from app.entities.model import ToolSpec
+from app.entities.model import Item, ToolSpec
 
-__all__ = ["GEM_TOOL_NAMES", "Tool", "Toolbox", "web_search_tool"]
+__all__ = ["GEM_TOOL_NAMES", "Tool", "Toolbox", "gem_toolbox", "web_search_tool"]
 
 # The tools a gem can be given, by name. A gem's config is checked against this when it
 # is saved. Each is offered on a call only when it can run there.
@@ -80,6 +80,44 @@ class Toolbox:
             return await tool.run(arguments)
         except Exception as exc:
             return f"{name} failed: {exc}"
+
+
+def gem_toolbox(
+    names: Sequence[str],
+    search: ParallelAdapterClass,
+    cancel: Tool,
+    history: Sequence[Item],
+) -> Toolbox:
+    """The tools a gem is offered, the same in a call and in writing.
+
+    `names` are the tools the gem's config names, `cancel` is `cancel_tool_call` for
+    the gem's calls that outlive their replies, and `history` is the conversation the
+    tools are offered in. Web search is offered when the config names it and its key is
+    set, and with it `cancel_tool_call`. A name with no tool behind it here is passed
+    over, so a config saved before a tool went still works.
+    """
+    search_tool = web_search_tool(search)
+    if search.configured and "web_search" in names:
+        return Toolbox([search_tool, cancel])
+    # The conversation may hold calls from when the gem could search. A provider refuses
+    # a history with calls of a tool it is not told of, so such a tool stays declared,
+    # and a call of it now is answered with why not.
+    return Toolbox(
+        [
+            Tool(tool.spec, _not_available)
+            for tool in (search_tool, cancel)
+            if any(_calls(item, tool.name) for item in history)
+        ]
+    )
+
+
+def _calls(item: Item, tool: str) -> bool:
+    """Whether a history item is a call of the tool called `tool`."""
+    return "type" in item and item["type"] == "function_call" and item["name"] == tool
+
+
+async def _not_available(arguments: str) -> str:
+    return "This tool is not available to you now."
 
 
 def web_search_tool(search: ParallelAdapterClass) -> Tool:

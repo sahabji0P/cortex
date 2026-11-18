@@ -4,15 +4,17 @@ The expected texts are written out here in full, not built from the module's
 constants, so any change to what the model reads shows up as a failing test.
 """
 
+import asyncio
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from bson import ObjectId
 
 from app.entities import voice_ent
 from app.entities.call_ent import CallEntityClass, CallRefused
+from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import DEFAULT_GEM_INSTRUCTIONS, GemConfig
 from app.entities.instructions import instruction_layers, instructions
@@ -322,7 +324,7 @@ async def test_a_conversation_takes_its_model_and_who_speaks_first_from_the_gem_
     entity = _entity(_adapters(openai_key=True, anthropic_key=True))
     config = _gem(**gem)
 
-    await entity.open_conversation(config, speaks_first=speaks_first)
+    (await entity.connect(config, speaks_first=speaks_first)).open()
 
     [kwargs] = opened
     assert (kwargs["model"], kwargs["speaks_first"]) == used
@@ -337,7 +339,7 @@ async def test_a_conversation_is_opened_with_the_darbar_text_it_is_handed(
     monkeypatch.setattr(voice_ent, "VoiceConversation", lambda **kwargs: opened.append(kwargs))
     entity = _entity(_adapters(openai_key=True, anthropic_key=True))
 
-    await entity.open_conversation(_gem(name="Gem One"), darbar=darbar)
+    (await entity.connect(_gem(name="Gem One"))).open(darbar=darbar)
 
     [kwargs] = opened
     assert kwargs["darbar"] == darbar
@@ -347,7 +349,7 @@ async def test_a_conversation_is_opened_with_the_darbar_text_it_is_handed(
 
 
 class _Voice:
-    """Records what each conversation was opened with.
+    """Records what each call was connected and opened with.
 
     The Darbar text is kept apart in `darbars`, one per conversation opened.
     """
@@ -356,10 +358,46 @@ class _Voice:
         self.opened: list[tuple[object, object]] = []
         self.darbars: list[str | None] = []
 
-    async def open_conversation(self, gem, *, speaks_first=None, darbar=None) -> object:
+    async def connect(self, gem: object, *, speaks_first: bool | None = None) -> "_Line":
         self.opened.append((speaks_first, gem))
-        self.darbars.append(darbar)
-        return object()
+        return _Line(self.darbars)
+
+
+class _Line:
+    def __init__(self, darbars: list[str | None]) -> None:
+        self._darbars = darbars
+
+    def open(self, *, darbar: str | None = None, **_: object) -> "_Silent":
+        self._darbars.append(darbar)
+        return _Silent()
+
+    async def close(self) -> None:
+        pass
+
+
+class _Silent:
+    """A call's conversation in which nothing is said."""
+
+    def __init__(self) -> None:
+        self.added: list[object] = []
+        self.grew = asyncio.Event()
+        self.left_running: list[object] = []
+
+    def results_came(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+class _NothingStored:
+    """A gem's stored conversation, with nothing in it."""
+
+    async def load(self, gem_id: object) -> list[object]:
+        return []
+
+    async def add(self, items: object) -> None:
+        pass
 
 
 async def _calls() -> tuple[
@@ -369,7 +407,12 @@ async def _calls() -> tuple[
     gem = await gems.create(name="Gem One", model="Sonnet 5.5", speaks_first=True)
     voice = _Voice()
     darbar = _darbar()
-    calls = CallEntityClass(gems=gems, darbar=darbar[0], voice=cast("VoiceEntityClass", voice))
+    calls = CallEntityClass(
+        gems=gems,
+        darbar=darbar[0],
+        voice=cast("VoiceEntityClass", voice),
+        conversations=ConversationEntityClass(gems=gems, store=cast("Any", _NothingStored())),
+    )
     return calls, voice, gem, darbar
 
 
@@ -398,9 +441,9 @@ async def test_a_change_to_the_darbar_text_reaches_the_next_call() -> None:
     calls, voice, gem, (darbar, _) = await _calls()
 
     await darbar.set("Every gem works for one person.")
-    await calls.open(str(gem.id))
+    await (await calls.open(str(gem.id))).close()
     await darbar.set("Every gem works for two people.")
-    await calls.open(str(gem.id))
+    await (await calls.open(str(gem.id))).close()
 
     assert voice.darbars == ["Every gem works for one person.", "Every gem works for two people."]
 

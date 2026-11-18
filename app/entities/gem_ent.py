@@ -23,7 +23,7 @@ from pydantic_mongo import PydanticObjectId
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.core.errors import NotFoundError
 from app.core.times import UtcDatetime
-from app.entities.chat_store import ChatStoreClass
+from app.entities.conversation_store import ConversationStoreClass
 
 # The one place the model names are imported. Everything else uses `GemModelName`.
 from app.entities.model import MODELS, ModelName
@@ -277,8 +277,8 @@ class GemEntityClass:
 
     def __init__(self, docdb: DocDBAdapterClass) -> None:
         self._docdb = docdb
-        # A gem's written conversation is deleted with it.
-        self._chat = ChatStoreClass(docdb)
+        # A gem's conversation is deleted with it.
+        self._conversations = ConversationStoreClass(docdb)
 
     async def create(
         self,
@@ -373,8 +373,8 @@ class GemEntityClass:
         return await self._docdb.count(GemConfig, filters={"id": found}) > 0
 
     async def delete(self, gem_id: str) -> None:
-        """Delete a gem, and its written conversation with it."""
+        """Delete a gem, and its conversation with it."""
         found = _gem_id(gem_id)
         if await self._docdb.delete(GemConfig, {"id": found}) == 0:
             raise NotFoundError("Gem")
-        await self._chat.forget(found)
+        await self._conversations.forget(found)

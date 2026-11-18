@@ -360,7 +360,7 @@ async def test_a_conversation_is_opened_on_the_gem_s_model_or_the_configured_one
     adapters = _adapters(openai_key=True, anthropic_key=True)
     entity = _entity(adapters)
 
-    conversation = await entity.open_conversation(_GEM.model_copy(update={"model": named}))
+    conversation = (await entity.connect(_GEM.model_copy(update={"model": named}))).open()
     await conversation.close()
 
     assert built == [(adapters[provider], used)]
@@ -395,9 +395,9 @@ async def test_a_model_whose_provider_has_no_key_is_refused_when_the_conversatio
     entity = _entity(_adapters(openai_key=True, anthropic_key=False))
 
     with pytest.raises(LookupError, match="no Anthropic key is set"):
-        await entity.open_conversation(_GEM.model_copy(update={"model": "Opus 5.5"}))
+        await entity.connect(_GEM.model_copy(update={"model": "Opus 5.5"}))
 
-    conversation = await entity.open_conversation(_GEM.model_copy(update={"model": "6.1 Terra"}))
+    conversation = (await entity.connect(_GEM.model_copy(update={"model": "6.1 Terra"}))).open()
     await conversation.close()
 
 

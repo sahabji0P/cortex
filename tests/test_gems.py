@@ -60,6 +60,11 @@ class _DocDBFake:
             documents.sort(key=lambda document: document[field], reverse=direction == -1)
         return [collection.model_validate(document) for document in documents]
 
+    async def count(
+        self, _collection: type[BaseModel], *, filters: MutableMapping[str, Any]
+    ) -> int:
+        return int(self._id(filters) in self.documents)
+
     async def insert[T: BaseModel](self, data: T) -> T:
         document = data.model_dump(by_alias=True)
         self.documents[document["_id"]] = document

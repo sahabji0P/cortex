@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.entities.history import UserTurn
 from app.entities.late_results import LateResults
 from app.entities.loop import ToolCall
 from app.entities.model import Item, ToolSpec, model_for
@@ -102,13 +103,16 @@ class _LookUp:
 
 
 def _conversation(
-    llm: _LLM, look_up: _LookUp | None = None, history: list[Item] | None = None
+    llm: _LLM,
+    look_up: _LookUp | None = None,
+    history: list[Item] | None = None,
+    turn: UserTurn | None = None,
 ) -> WrittenConversation:
-    return _with_tools(llm, (look_up or _LookUp()).tools(), history)
+    return _with_tools(llm, (look_up or _LookUp()).tools(), history, turn)
 
 
 def _with_tools(
-    llm: _LLM, tools: Toolbox, history: list[Item] | None = None
+    llm: _LLM, tools: Toolbox, history: list[Item] | None = None, turn: UserTurn | None = None
 ) -> WrittenConversation:
     model = model_for(llm, "6 Luna", tools.specs)
     return WrittenConversation(
@@ -117,6 +121,7 @@ def _with_tools(
         instructions="Be brief.",
         late=LateResults(lambda: None),
         history=history or [],
+        turn=turn,
     )
 
 
@@ -461,18 +466,36 @@ async def test_a_cut_ends_the_stream_with_what_is_kept() -> None:
     ]
 
 
-async def test_a_reply_cut_before_it_begins_leaves_no_reply_and_asks_nothing() -> None:
+async def test_a_reply_cut_before_it_begins_asks_nothing_and_leaves_the_message_open() -> None:
     llm = _LLM()
-    conversation = _conversation(llm)
+    turn = UserTurn()
+    conversation = _conversation(llm, turn=turn)
 
     conversation.cut()
     events = await _read(conversation, "hello")
 
     assert events == [WrittenEvent("cut", "…")]
     assert llm.requests == []
+    # No reply got through, so the message is not added: it waits for the next one.
+    assert conversation.added == []
+    assert turn.items() == [{"role": "user", "content": "hello"}]
+
+
+async def test_a_message_sent_before_any_reply_got_through_joins_the_open_turn() -> None:
+    llm = _LLM(_said("Sunny."))
+    turn = UserTurn()
+    turn.add("a story")
+    conversation = _conversation(llm, turn=turn)
+
+    await _read(conversation, "no, the weather")
+
+    open_turn = {"role": "user", "content": "a story\nno, the weather"}
+    assert llm.requests[0]["input"] == [open_turn]
     assert [entry.item for entry in conversation.added] == [
-        {"role": "user", "content": "hello"},
+        open_turn,
+        {"role": "assistant", "content": "Sunny."},
     ]
+    assert not turn.open
 
 
 async def test_a_failed_reply_is_handed_back_as_delivered() -> None:
