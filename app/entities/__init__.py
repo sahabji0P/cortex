@@ -1,6 +1,7 @@
 from app.adapters import AdapterRegistry
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
+from app.entities.connection_ent import Connection, ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
@@ -20,12 +21,17 @@ class EntitiesRegistry:
         await adapter.DocDB.create_index(
             ConversationItem, [("gem_id", 1), ("place", 1)], unique=True, name="chat_items_in_order"
         )
+        # A connection's key starts its tools' names, so no two may share one.
+        await adapter.DocDB.create_index(
+            Connection, [("key", 1)], unique=True, name="connections_key"
+        )
         cls.Users = UserEntityClass(
             docdb=adapter.DocDB,
             cache=adapter.Cache,
         )
         cls.Gems = GemEntityClass(docdb=adapter.DocDB)
         cls.Darbar = DarbarEntityClass(docdb=adapter.DocDB)
+        cls.Connections = ConnectionEntityClass(docdb=adapter.DocDB, mcp=adapter.Mcp, gems=cls.Gems)
         cls.ConversationStore = ConversationStoreClass(docdb=adapter.DocDB)
         cls.Conversations = ConversationEntityClass(gems=cls.Gems, store=cls.ConversationStore)
         cls.Chat = ChatEntityClass(
@@ -35,6 +41,7 @@ class EntitiesRegistry:
             openai=adapter.OpenAI,
             anthropic=adapter.Anthropic,
             search=adapter.Parallel,
+            connections=cls.Connections,
         )
         cls.Voice = VoiceEntityClass(
             stt=adapter.CartesiaSTT,
@@ -44,7 +51,11 @@ class EntitiesRegistry:
             search=adapter.Parallel,
         )
         cls.Call = CallEntityClass(
-            gems=cls.Gems, darbar=cls.Darbar, voice=cls.Voice, conversations=cls.Conversations
+            gems=cls.Gems,
+            darbar=cls.Darbar,
+            voice=cls.Voice,
+            conversations=cls.Conversations,
+            connections=cls.Connections,
         )
 
 

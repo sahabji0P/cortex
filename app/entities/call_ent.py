@@ -2,11 +2,12 @@
 Opening a call, and keeping what it adds to the gem's conversation.
 
 A call is always with a gem, and may say who speaks first. Opening it reads the gem's
-config and the Darbar text, connects speech recognition, then takes hold of the gem: a
-gem has one conversation and one writer at a time (see `conversation_ent.py`). A reply
-being written to the gem is cut, as a new message cuts it, and the call opens once that
-reply is stored. The call then starts from the gem's conversation as it is stored, and
-adds its turns to it. The standing socket (`app/routers/link`) holds the call from there.
+config, the Darbar text and the tools of the gem's connections, connects speech
+recognition, then takes hold of the gem: a gem has one conversation and one writer at a
+time (see `conversation_ent.py`). A reply being written to the gem is cut, as a new
+message cuts it, and the call opens once that reply is stored. The call then starts from
+the gem's conversation as it is stored, and adds its turns to it. The standing socket
+(`app/routers/link`) holds the call from there.
 
 What the call adds is stored as it is settled, in order, after what was stored before:
 the user's turns, the gem's replies as they were heard, tool calls and their results,
@@ -28,16 +29,18 @@ Two kinds of "no" are told apart, because the app is told them apart:
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 
 from bson import ObjectId
 from pydantic import ValidationError
 
 from app.core.errors import NotFoundError
+from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass, Stored
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.history import mode_line, settled
+from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass, VoiceEvent, VoiceLine
 
 __all__ = ["CallEntityClass", "CallFault", "CallRefused", "OpenCall"]
@@ -192,11 +195,14 @@ class CallEntityClass:
         darbar: DarbarEntityClass,
         voice: VoiceEntityClass,
         conversations: ConversationEntityClass,
+        connections: ConnectionEntityClass | None = None,
     ) -> None:
         self._gems = gems
         self._darbar = darbar
         self._voice = voice
         self._conversations = conversations
+        # The tool servers gems can use. Without it, no gem is offered a connection's tools.
+        self._connections = connections
 
     async def open(self, gem: str, *, speaks_first: bool | None = None) -> OpenCall:
         """Open a call with a gem. The caller owns the call and must `close()` it.
@@ -225,6 +231,14 @@ class CallEntityClass:
         except Exception as exc:
             raise CallFault("the Darbar text could not be read", exc) from exc
         try:
+            # Read once, here: the tools a call offers are the same from start to end.
+            # A tool closed to the gem during the call is refused when it is called.
+            connected = (
+                [] if self._connections is None else await self._connections.tools_for(config.id)
+            )
+        except Exception as exc:
+            raise CallFault("the gem's connections could not be read", exc) from exc
+        try:
             line = await self._voice.connect(config, speaks_first=speaks_first)
         except LookupError as exc:
             # The gem's model is offered, but its provider has no key here.
@@ -233,12 +247,14 @@ class CallEntityClass:
             # A speech service is unreachable or not configured.
             raise CallFault("speech services unavailable", exc) from exc
         try:
-            return await self._take(config.id, line, darbar)
+            return await self._take(config.id, line, darbar, connected)
         except BaseException:
             await line.close()
             raise
 
-    async def _take(self, gem_id: ObjectId, line: VoiceLine, darbar: str | None) -> OpenCall:
+    async def _take(
+        self, gem_id: ObjectId, line: VoiceLine, darbar: str | None, connected: Sequence[Tool]
+    ) -> OpenCall:
         """Take hold of the gem, and open the call on its stored conversation.
 
         Everything that can refuse the call has been asked by now, so a reply being
@@ -273,7 +289,11 @@ class CallEntityClass:
             # Nothing is awaited after this, so a caller that cancels the opening either
             # gets the call back, to close, or none was made.
             conversation = line.open(
-                darbar=darbar, history=stored.items, last_mode=stored.mode, late=kept.late
+                darbar=darbar,
+                history=stored.items,
+                last_mode=stored.mode,
+                late=kept.late,
+                connected=connected,
             )
         except BaseException:
             call.let_go()

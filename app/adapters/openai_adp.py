@@ -83,18 +83,24 @@ class OpenAIAdapterClass:
             name: str,
             description: str,
             parameters: dict[str, object],
+            strict: bool = True,
         ) -> FunctionToolParam:
-            """Build a strict function tool the caller runs itself.
+            """Build a function tool the caller runs itself, strict unless told otherwise.
 
             The model's call arrives as a `function_call` output item; send the result
             back as a `function_call_output` input item with the same `call_id`.
+
+            A strict tool's arguments always fit its schema, which must then keep to
+            the subset the API allows. A schema written elsewhere, such as a tool
+            server's, may not: sent with `strict` off, the arguments are the model's
+            best effort.
             """
             return {
                 "type": "function",
                 "name": name,
                 "description": description,
                 "parameters": parameters,
-                "strict": True,
+                "strict": strict,
             }
 
         @staticmethod

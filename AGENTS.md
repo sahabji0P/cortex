@@ -21,6 +21,7 @@ a change here needs a matching change there:
 | `/v1/gems` (`app/routers/gems`, `GemConfig` in `app/entities/gem_ent.py`) | `src/gem_routes.rs` | The gems and their configs |
 | `GET /v1/gems/{id}/chat` | `src/chat.rs` | A gem's conversation so far, a call's turns included |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
+| `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`) | not built yet | The tool servers gems can use, their tools, and which gem may use which |
 | `GET /v1/voice/models` | `src/models.rs` | The models a call can be held with |
 
 What that means in practice:
@@ -39,6 +40,11 @@ What that means in practice:
   speed are kept but no call uses them yet, so the app shows them as "coming soon".
   A gem made with blank instructions is given the default ones (how to talk in a call
   and how to write), and the app shows what comes back.
+- **A gem's `tools` are the built-in ones only.** A connection's tools are not named
+  on the gem. Who may use them is said on the connection: the gems it is open to, and
+  for one tool a narrower list. A new connection is open to no gem. The app has no
+  screen for connections yet: when it gets one, it is the only place this is changed.
+  A header's value is never sent to the app, only its name.
 - **What a gem is told is two parts, the same in a call and in writing.** The Darbar
   text, which by default says how things are here (calls, writing, a cut reply, a late
   tool result), and the gem's own instructions. Both are the user's to change.

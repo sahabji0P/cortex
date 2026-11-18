@@ -13,6 +13,8 @@ The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
   `instructions` blank or left out is given the default instructions, which come back in
   the answer; a change stores `instructions` as sent, so blank means none.
 - The Darbar text: `/v1/darbar`.
+- Connections, the tool servers gems can use, and which gem may use which:
+  `/v1/connections` (see [Connections](#connections-v1connections)).
 - The models a call can be held with: `GET /v1/voice/models`.
 
 Plain HTTP is for saving and loading things. The standing socket is for what is live.
@@ -34,9 +36,9 @@ a `type`. Binary frames are a call's audio.
 | `type` | Fields | Meaning |
 | --- | --- | --- |
 | `link.ready` | `version` (4) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later. Version 4: a call's reply comes as words timed to its audio (`call.assistant.word`), and `call.assistant.delta` is gone |
-| `chat.result` | `gem`, `text` | A search the gem started in an earlier reply has come back, and a reply about it follows, unasked. `text` is what the search looked up, as its `chat.tool` said, or "" |
+| `chat.result` | `gem`, `text` | A search, or another tool call, the gem started in an earlier reply has come back, and a reply about it follows, unasked. `text` is what the search looked up, as its `chat.tool` said, or "" |
 | `chat.text` | `gem`, `text` | The next piece of the reply, as it is written |
-| `chat.tool` | `gem`, `text` | The gem is using a tool. `text` says what, such as what a search looks up |
+| `chat.tool` | `gem`, `text` | The gem is using a tool. `text` says what: what a search looks up, or for a connection's tool the connection and the tool, as "Issue Tracker: Find issues" |
 | `chat.done` | `gem`, `text` | The reply is complete. `text` is the whole reply as it is kept: its stretches of text, joined by a space |
 | `chat.cut` | `gem`, `text` | The reply was cut off by a new message. `text` is what is kept of it: what was sent, ending in "…". If it was cut while a tool was running, it is the text before the tool, whole, and the tool carries on: its result comes later (see `chat.result`). If nothing is kept, it is just "…" |
 | `chat.error` | `gem`, `text` | No reply can be made, or the reply failed: the gem is not there, its model has no key, the gem is in a call ("the gem is in a call"), or the model call failed. `text` is the reason. What was sent before a failure is kept, ending in "…" |
@@ -125,7 +127,7 @@ text frames like the rest.
 | `call.user.final` (JSON) | `text` | The user's finished sentence. A reply follows |
 | `call.assistant.word` (JSON) | `text`, `start` (a whole number of samples) | The next word of the reply, as it is spoken. `start` is where the word begins in the call's speech audio (see [Words](#words)) |
 | `call.assistant.done` (JSON) | `text` | All of the reply's audio has been sent, which is well before it has all been heard. `text` is the whole reply, as the gem wrote it |
-| `call.tool.call` (JSON) | `text` | A web search has started. `text` is what it looks up |
+| `call.tool.call` (JSON) | `text` | A tool call has started. For a web search `text` is what it looks up. For a connection's tool it is the connection and the tool, as "Issue Tracker: Find issues" |
 | `call.interrupt` (JSON) | `text` | The user started speaking: stop playback and drop the speech not yet played. If that cut a reply short, `text` is what the gem remembers of it, the words heard ending in "…" (just "…" if none were); otherwise it is empty |
 | `call.error` (JSON) | `text` | Something failed inside a call that carries on. `text` says what |
 | `call.ended` (JSON) | `text` | The call is over: the app hung up, or the conversation ended by itself. `text` is empty |
@@ -315,3 +317,82 @@ write takes its place whole. It applies to every conversation opened after the c
 | `GET /v1/darbar` | `{"text": "...", "is_default": true}`. `is_default` says whether it is the built-in text. The built-in text is several paragraphs, about 1,700 characters |
 | `PUT /v1/darbar` | Body `{"text": "..."}`, at most 4,000 characters. An empty text means gems are told nothing here. Answers like `GET` |
 | `DELETE /v1/darbar` | Goes back to the built-in text. Answers like `GET` |
+
+## Connections: `/v1/connections`
+
+A connection is a tool server (an MCP server) the user has added. Its tools are offered
+to the gems it is open to, in a call and in writing, next to web search. The app is where
+the user adds one and says who may use it. Nothing about a connection travels on the
+socket: a tool call of one shows as `chat.tool` or `call.tool.call`, like a search.
+
+| Route | Does |
+| --- | --- |
+| `POST /v1/connections` | Adds one (201). Body: `name`, `url`, and optionally `headers`, `gems`, `enabled`. The server is asked for its tools before anything is kept: this can take up to 20 seconds |
+| `GET /v1/connections` | Every connection, in the order they were added |
+| `GET /v1/connections/{id}` | One connection |
+| `PATCH /v1/connections/{id}` | Changes only the fields sent: `name`, `url`, `headers`, `enabled`, `gems`, `tool_gems`. None may be null |
+| `POST /v1/connections/{id}/refresh` | Asks the server for its tools again, and keeps what it lists now |
+| `DELETE /v1/connections/{id}` | Deletes it (204) |
+
+A connection, as every route but `DELETE` answers:
+
+```json
+{
+  "id": "6afdb62efdd277b795ce9455",
+  "key": "issue_tracker",
+  "name": "Issue Tracker",
+  "url": "https://tools.example.com/mcp",
+  "headers": ["Authorization"],
+  "enabled": true,
+  "gems": ["6afdb62efdd277b795ce9401"],
+  "tools": [
+    {
+      "name": "find_issues",
+      "title": "Find issues",
+      "description": "Find the issues that mention a text.",
+      "offered_as": "issue_tracker__find_issues",
+      "gems": null
+    },
+    {
+      "name": "close_issue",
+      "title": null,
+      "description": "Close an issue.",
+      "offered_as": "issue_tracker__close_issue",
+      "gems": []
+    }
+  ],
+  "tools_left_out": 0,
+  "checked_at": "2026-11-18T09:00:00Z",
+  "created_at": "2026-11-18T09:00:00Z",
+  "updated_at": "2026-11-18T09:05:00Z"
+}
+```
+
+- **`gems` is who the connection is open to**: the string `"all"`, or a list of gem ids.
+  Left out when a connection is added, it is `[]`: open to no gem. The app should ask.
+- **A tool's `gems` is its limit**: null for none, or the gem ids it is limited to. A
+  limit only narrows. A gem is offered the tool when the connection is open to the gem
+  and, if the tool has a limit, the limit names the gem too. `[]` turns the tool off for
+  everyone. A limit naming a gem the connection is not open to opens nothing to it.
+- **`tool_gems` in a `PATCH`** is an object of a tool's `name` (not `offered_as`) to a
+  list of gem ids, or to null to lift the limit: `{"tool_gems": {"close_issue": []}}`.
+  Only the tools named change.
+- **`headers` goes in as an object** of name to value, as `{"Authorization": "Bearer
+  ..."}`, and comes out as the names only. A value is never sent back, so a `PATCH` with
+  `headers` replaces all of them.
+- **`key` never changes**, whatever the name becomes. `offered_as` is the tool's name as
+  the model is told it and as the stored conversation has it.
+- **`tools` is a copy**, made at `checked_at`. A gem is offered the copy. It changes when
+  the connection is added, when its `url` or `headers` change, and on a refresh.
+  `tools_left_out` counts tools the server lists that cannot be used here.
+- **`enabled: false`** offers its tools to no gem, and keeps who it was open to.
+- **When a change applies.** In writing, from the next message. In a call, the tools
+  offered are those of when it opened, but a tool closed to the gem during the call is
+  refused when it is called.
+- **Failures.** A server that does not answer is a 502, `{"code": "upstream_failed",
+  "message": "The server at ... could not be asked for its tools: the server answered
+  401: its headers do not let us in"}`, and nothing is added or changed. A gem id that
+  names no gem, or a tool name the connection does not have, is a 422, `{"code":
+  "invalid", "message": "..."}`. A field that breaks a rule (a blank name, an address
+  that is not http or https) is FastAPI's 422. An id that names no connection is a 404.
+- Deleting a gem takes it out of every connection's `gems` and every limit.

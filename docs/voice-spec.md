@@ -57,9 +57,15 @@ mic ─▶ speech to text ─▶ conversation ─▶ model ─▶ text to speech
   Haiku 5.5, Sonnet 5.5 and Opus 5.5 from Anthropic. The model is the gem's, or the
   configured one (`VOICE_MODEL`) when the gem names none. It does not change during the
   call.
-- **Two tools, when a search key is set.** (Enforced) `web_search` and
-  `cancel_tool_call`, when the gem's tools name `web_search`. Otherwise the model has no
-  tools.
+- **The tools are the gem's.** (Enforced) `web_search`, when the gem's tools name it and
+  a search key is set, and the tools of the connections open to the gem, as they were
+  when the call opened (see Connections in the README). With any of them comes
+  `cancel_tool_call`. Otherwise the model has no tools. A connection's tool is run like
+  a search: left running at an interruption, its result told late.
+- **A tool closed to the gem during the call is refused.** (Enforced) The tool list does
+  not change, but each call of a connection's tool reads the connection again. One that
+  is no longer open to the gem gets "This tool is not available to you now." as its
+  result.
 - **A line says the user has called.** (Enforced) The instructions are the same in a
   call and in writing, so a line in the history is what tells the model the conversation
   is spoken. It follows the stored conversation when that ends in writing (or opens an
@@ -217,7 +223,7 @@ Every request to the conversation model is built the same way, in this order (En
 | Part | What it is | Changes during a call? |
 | --- | --- | --- |
 | 1. Instructions | The text under [The instructions](#the-instructions) | No |
-| 2. Tools | `web_search` and `cancel_tool_call`, or none | No |
+| 2. Tools | `web_search`, `cancel_tool_call`, then the tools of the gem's connections, then any tool the history holds a call of that is no longer offered (declared as not available). Or none | No |
 | 3. History | The gem's stored conversation, then every item the call has finished, oldest first | Only grows at its end |
 | 4. The open user turn | The turn no reply has been heard to yet | Can gain a line |
 | 5. This reply so far | On the second and later calls of one reply: what was said before the search, the call, its result | Grows within the reply |
@@ -346,6 +352,10 @@ web_search: Search the web for current or factual information. Never call this f
 cancel_tool_call: Stop a tool call that is still running in the background. Call this only when the user says they no longer want its result, and always call it then: nothing is cancelled unless this is called.
 ```
 
+A connection's tool is told to the model by the description its server gave, as it was
+when the user last had the server asked, under the name `{key}__{tool}`. Its schema is
+the server's, sent with `strict` off.
+
 ## What the server writes into the history
 
 Everything in the history that neither the user nor the model wrote (all Enforced).
@@ -394,6 +404,13 @@ A fourth, added on 16 November 2026:
 - **A sound before the greeting's first word.** If a turn with no words cuts the
   greeting before the model has written anything, the greeting is not made again and
   the call stays silent until the user speaks. Found while writing this, by running it.
+- **Connections have no recorded live run.** A connection's tools were run against a real
+  MCP server, but not with a real model: whether either provider takes every schema a
+  server may list, and how a model in a call behaves with many tools, is to be tried out.
+  One schema a provider refuses fails every request of the gem until the tool is turned
+  off.
+- **`call.tool.call` says little for a connection's tool.** It names the connection and
+  the tool, not what the call is about.
 - **An unused event.** The model layer still reports that a tool call has started
   (`CallStarted`). Nothing uses it since the server stopped speaking before a search.
 - **What a call never settled is lost.** A turn the user was still speaking when the

@@ -4,7 +4,8 @@ from typing import Annotated
 from fastapi import Depends
 
 from app.entities import EntitiesRegistry
-from app.entities.conversation_ent import ConversationEntityClass
+from app.entities.connection_ent import ConnectionEntityClass
+from app.entities.conversation_ent import ConversationEntityClass, gem_key
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.routers.gems.models import GemsModels
 
@@ -14,10 +15,15 @@ class GemsServiceV1Class:
         self,
         gems: GemEntityClass | None = None,
         conversations: ConversationEntityClass | None = None,
+        connections: ConnectionEntityClass | None = None,
     ) -> None:
         # Tests hand in their own. The app uses the ones the registry made at startup.
         self.gems = EntitiesRegistry.Gems if gems is None else gems
         self._conversations = conversations
+        # Left out with gems handed in, a deleted gem is not taken out of any connection.
+        self._connections = (
+            EntitiesRegistry.Connections if gems is None and connections is None else connections
+        )
 
     @property
     def conversations(self) -> ConversationEntityClass:
@@ -73,6 +79,9 @@ class GemsServiceV1Class:
 
     async def delete_gem(self, gem_id: str) -> None:
         await self.gems.delete(gem_id)
+        if self._connections is not None:
+            # No connection is left naming a gem that is gone.
+            await self._connections.forget_gem(gem_key(gem_id))
 
     async def get_chat(self, gem_id: str) -> GemsModels.V1.Output.Chat:
         return GemsModels.V1.Output.Chat(

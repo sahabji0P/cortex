@@ -75,7 +75,7 @@ from app.entities.model import (
     is_openai,
     model_for,
 )
-from app.entities.tools import gem_toolbox
+from app.entities.tools import Tool, gem_toolbox
 from app.entities.voice_speech import Clock, Playback, Speech, Standby
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent", "VoiceLine"]
@@ -116,7 +116,7 @@ class VoiceEvent(BaseModel):
                         sample it begins at in the call's speech audio (24 kHz, counted
                         over all the speech sent since the call opened)
     - `assistant.done`  the reply's audio has all been sent (full text in `text`)
-    - `tool.call`       the assistant is searching the web (query in `text`)
+    - `tool.call`       the assistant is using a tool (`text` says what: a search's query)
     - `interrupt`       the user started speaking: stop playback and drop queued audio.
                         If that cut a reply short, `text` is what the history keeps of
                         it (just "…" if nothing); otherwise `text` is empty
@@ -164,6 +164,7 @@ class VoiceConversation:
         history: Sequence[Item] = (),
         last_mode: Mode = "chat",
         late: LateResults | None = None,
+        connected: Sequence[Tool] = (),
         clock: Clock = time.monotonic,
     ) -> None:
         # `history` is the gem's conversation as it is stored, and `last_mode` the mode
@@ -171,6 +172,8 @@ class VoiceConversation:
         # that outlive their replies, those of written replies included; whoever holds
         # it calls `results_came` when a result comes in while the call is open. Left
         # out, the conversation holds its own, and stops its calls when it closes.
+        # `connected` are the tools of the connections the gem may use, as they were when
+        # the call opened.
         self._stt = stt
         self._tts = tts
         self._clock = clock
@@ -205,8 +208,9 @@ class VoiceConversation:
         self._owns_late = late is None
         self._late = LateResults(self.results_came) if late is None else late
         # `llm` has to be the adapter of the provider that `model` belongs to. The gem is
-        # offered the tools its config names, as in writing (see `tools.py`).
-        self._tools = gem_toolbox(gem.tools, search, self._late.tool, self._history)
+        # offered the tools its config names and those of its connections, as in
+        # writing (see `tools.py`).
+        self._tools = gem_toolbox(gem.tools, search, self._late.tool, self._history, connected)
         self._model = model_for(llm, model, self._tools.specs)
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
@@ -576,12 +580,13 @@ class VoiceLine:
         history: Sequence[Item] = (),
         last_mode: Mode = "chat",
         late: LateResults | None = None,
+        connected: Sequence[Tool] = (),
     ) -> VoiceConversation:
         """Start listening. The conversation owns the line from here, and the caller owns it.
 
         `darbar` is the Darbar text the gem is told first, or None for the built-in one;
-        it is kept for the whole conversation. `history`, `last_mode` and `late` are as
-        `VoiceConversation` takes them.
+        it is kept for the whole conversation. `history`, `last_mode`, `late` and
+        `connected` are as `VoiceConversation` takes them.
         """
         self._opened = True
         return VoiceConversation(
@@ -596,6 +601,7 @@ class VoiceLine:
             history=history,
             last_mode=last_mode,
             late=late,
+            connected=connected,
         )
 
     async def close(self) -> None:

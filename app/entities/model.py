@@ -124,7 +124,11 @@ class ToolSpec:
 
     name: str
     description: str
-    parameters: dict[str, object]  # JSON schema; must set additionalProperties: false
+    parameters: dict[str, object]  # JSON schema; if strict, sets additionalProperties: false
+    # Whether the model's arguments are held to the schema. Our own tools are. A tool
+    # whose schema was written elsewhere (a connection's) is not: such a schema need not
+    # keep to what a provider allows of a strict one.
+    strict: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +216,10 @@ class _OpenAIModel:
         self._name: _OpenAIModelName = name
         self._tools = [
             OpenAIAdapterClass.Tools.function(
-                name=tool.name, description=tool.description, parameters=tool.parameters
+                name=tool.name,
+                description=tool.description,
+                parameters=tool.parameters,
+                strict=tool.strict,
             )
             for tool in tools
         ]
@@ -309,7 +316,10 @@ class _AnthropicModel:
         self._name: _AnthropicModelName = name
         self._tools: list[ToolUnionParam] = [
             AnthropicAdapterClass.Tools.function(
-                name=tool.name, description=tool.description, parameters=tool.parameters
+                name=tool.name,
+                description=tool.description,
+                parameters=tool.parameters,
+                strict=tool.strict,
             )
             for tool in tools
         ]

@@ -47,6 +47,7 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.core.errors import NotFoundError
+from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass, Stored, Writer, gem_key
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
@@ -138,6 +139,7 @@ class ChatEntityClass:
         openai: OpenAIAdapterClass,
         anthropic: AnthropicAdapterClass,
         search: ParallelAdapterClass,
+        connections: ConnectionEntityClass | None = None,
     ) -> None:
         self._gems = gems
         self._darbar = darbar
@@ -145,6 +147,8 @@ class ChatEntityClass:
         self._openai = openai
         self._anthropic = anthropic
         self._search = search
+        # The tool servers gems can use. Without it, no gem is offered a connection's tools.
+        self._connections = connections
         # The latest message to each gem, by `gem_key`: its id as the client spelled it,
         # and its client. A late result is told to that client.
         self._latest: dict[str, tuple[str, Deliver]] = {}
@@ -264,7 +268,10 @@ class ChatEntityClass:
         gem = ready.gem
         kept = self._conversations.gem(key)
         late = kept.late
-        tools = gem_toolbox(gem.tools, self._search, late.tool, history.items)
+        # Read for every reply, so a connection opened or closed to the gem applies
+        # from the next message.
+        connected = [] if self._connections is None else await self._connections.tools_for(gem.id)
+        tools = gem_toolbox(gem.tools, self._search, late.tool, history.items, connected)
         model = model_for(ready.llm, ready.name, tools.specs)
         # Read for every reply, so a change to it applies from the next message.
         darbar = (await self._darbar.read()).text

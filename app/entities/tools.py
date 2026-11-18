@@ -11,6 +11,7 @@ of every request, and a prompt cache only helps while that start stays the same.
 """
 
 import json
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
@@ -87,33 +88,68 @@ def gem_toolbox(
     search: ParallelAdapterClass,
     cancel: Tool,
     history: Sequence[Item],
+    connected: Sequence[Tool] = (),
 ) -> Toolbox:
     """The tools a gem is offered, the same in a call and in writing.
 
     `names` are the tools the gem's config names, `cancel` is `cancel_tool_call` for
-    the gem's calls that outlive their replies, and `history` is the conversation the
-    tools are offered in. Web search is offered when the config names it and its key is
-    set, and with it `cancel_tool_call`. A name with no tool behind it here is passed
-    over, so a config saved before a tool went still works.
+    the gem's calls that outlive their replies, `history` is the conversation the tools
+    are offered in, and `connected` are the tools of the connections the gem may use
+    (see `connection_ent.py`). Web search is offered when the config names it and its
+    key is set. `cancel_tool_call` is offered with any other tool. A name with no tool
+    behind it here is passed over, so a config saved before a tool went still works.
+
+    The order is always the same: web search, `cancel_tool_call`, the connections'
+    tools, then the tools that are only declared (below).
     """
     search_tool = web_search_tool(search)
-    if search.configured and "web_search" in names:
-        return Toolbox([search_tool, cancel])
-    # The conversation may hold calls from when the gem could search. A provider refuses
-    # a history with calls of a tool it is not told of, so such a tool stays declared,
-    # and a call of it now is answered with why not.
-    return Toolbox(
-        [
-            Tool(tool.spec, _not_available)
-            for tool in (search_tool, cancel)
-            if any(_calls(item, tool.name) for item in history)
-        ]
+    searches = search.configured and "web_search" in names
+    called = _called(history)
+    tools: list[Tool] = []
+    # The conversation may hold calls of a tool the gem is no longer offered: one it
+    # could search with, or a connection that has gone or been closed to it. A provider
+    # refuses a history with calls of a tool it is not told of, so such a tool stays
+    # declared, and a call of it now is answered with why not.
+    if searches:
+        tools.append(search_tool)
+    elif search_tool.name in called:
+        tools.append(Tool(search_tool.spec, _not_available))
+    if searches or connected:
+        tools.append(cancel)
+    elif cancel.name in called:
+        tools.append(Tool(cancel.spec, _not_available))
+    tools.extend(connected)
+    offered = {tool.name for tool in tools}
+    tools.extend(
+        Tool(_gone(name), _not_available)
+        for name in called
+        if name not in offered and _TOOL_NAME.fullmatch(name)
     )
+    return Toolbox(tools)
 
 
-def _calls(item: Item, tool: str) -> bool:
-    """Whether a history item is a call of the tool called `tool`."""
-    return "type" in item and item["type"] == "function_call" and item["name"] == tool
+# What either provider takes as a tool's name. A call of anything else in the history
+# was never of a tool, and cannot be declared.
+_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _called(history: Sequence[Item]) -> list[str]:
+    """The names of the tools called in a history, each once, in the order first called."""
+    names: dict[str, None] = {}
+    for item in history:
+        if "type" in item and item["type"] == "function_call":
+            names.setdefault(item["name"])
+    return list(names)
+
+
+def _gone(name: str) -> ToolSpec:
+    """What the model is told of a tool it called once and is not offered now."""
+    return ToolSpec(
+        name=name,
+        description="This tool is not available to you now.",
+        parameters={"type": "object", "properties": {}},
+        strict=False,
+    )
 
 
 async def _not_available(arguments: str) -> str:

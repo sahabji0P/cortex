@@ -115,12 +115,16 @@ class AnthropicAdapterClass:
             description: str,
             parameters: dict[str, object],
             eager_input_streaming: bool = False,
+            strict: bool = True,
         ) -> ToolParam:
-            """Build a strict function tool the caller runs itself.
+            """Build a function tool the caller runs itself, strict unless told otherwise.
 
             The model's call arrives as a `tool_use` content block; send the result back
             as a `tool_result` block with the same `tool_use_id`, in the user message
-            that directly follows. `parameters` must set `additionalProperties: false`.
+            that directly follows. A strict tool's `parameters` must set
+            `additionalProperties: false` and keep to the subset the API allows. A schema
+            written elsewhere, such as a tool server's, may not: sent with `strict` off,
+            the input is the model's best effort.
 
             With `eager_input_streaming` the call's input streams as it is written
             instead of arriving whole. The API then no longer checks it against the
@@ -130,8 +134,9 @@ class AnthropicAdapterClass:
                 "name": name,
                 "description": description,
                 "input_schema": parameters,
-                "strict": True,
             }
+            if strict:
+                tool["strict"] = True
             if eager_input_streaming:
                 tool["eager_input_streaming"] = True
             return tool
