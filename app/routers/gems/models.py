@@ -7,7 +7,7 @@ from app.entities.gem_ent import (
     DEFAULT_GEM_TOOLS,
     GemDescription,
     GemImage,
-    GemInstructions,
+    GemInstructionsToSave,
     GemModelName,
     GemName,
     GemSpeechSpeed,
@@ -23,7 +23,7 @@ class GemsModels:
                 name: GemName
                 description: GemDescription = ""
                 image: GemImage | None = None
-                instructions: GemInstructions = ""
+                instructions: GemInstructionsToSave = ""
                 # A name from `GET /v1/voice/models`, or none for the configured default.
                 model: GemModelName | None = None
                 speaks_first: bool = False
@@ -41,7 +41,7 @@ class GemsModels:
                 name: GemName | None = None
                 description: GemDescription | None = None
                 image: GemImage | None = None
-                instructions: GemInstructions | None = None
+                instructions: GemInstructionsToSave | None = None
                 model: GemModelName | None = None
                 speaks_first: bool | None = None
                 tools: GemToolsToSave | None = None

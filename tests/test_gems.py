@@ -9,6 +9,7 @@ from pydantic import BaseModel, ValidationError
 
 from app.core.errors import NotFoundError
 from app.entities.gem_ent import (
+    DEFAULT_GEM_INSTRUCTIONS,
     GEM_CONFIG_VERSION,
     GemConfig,
     GemEntityClass,
@@ -93,10 +94,11 @@ def _gems() -> tuple[GemEntityClass, _DocDBFake]:
 
 
 def _stored(**fields: Any) -> dict[str, Any]:
-    """A config as it would sit in the database."""
+    """A config as it would sit in the database, in the current version unless told."""
     now = datetime(2026, 11, 17, tzinfo=UTC)
     return {
         "_id": ObjectId(),
+        "version": GEM_CONFIG_VERSION,
         "name": "Gem Two",
         "instructions": "",
         "model": None,
@@ -134,7 +136,7 @@ async def test_a_new_gem_has_the_defaults() -> None:
     gem = await gems.create(name="Gem Two")
 
     assert gem.version == GEM_CONFIG_VERSION
-    assert gem.instructions == ""
+    assert gem.instructions == DEFAULT_GEM_INSTRUCTIONS
     assert gem.model is None
     assert gem.speaks_first is False
     assert gem.tools == ["web_search"]
@@ -324,7 +326,7 @@ def test_a_config_without_a_version_is_read_as_version_1_and_brought_up_to_date(
     # Version 1 is the first shape, so a config with no version cannot be older.
     # Reading it as version 1 lets a config written by hand leave the field out.
     document = _stored()
-    assert "version" not in document
+    del document["version"]
 
     assert upgrade_gem_document(document)["version"] == GEM_CONFIG_VERSION
     assert GemConfig.model_validate(document).version == GEM_CONFIG_VERSION
@@ -335,12 +337,12 @@ def test_a_version_1_config_gains_what_version_2_added_with_nothing_chosen() -> 
 
     gem = GemConfig.model_validate(document)
 
-    assert gem.version == 2
+    assert gem.version == GEM_CONFIG_VERSION
     assert (gem.description, gem.image, gem.voice, gem.speech_speed) == ("", None, None, 1.0)
-    # What it already held is as it was.
+    # What it already held is as it was, with what version 3 added after its instructions.
     assert (gem.name, gem.instructions, gem.tools) == (
         "Gem Two",
-        "A patient tutor.",
+        f"A patient tutor.\n\n{DEFAULT_GEM_INSTRUCTIONS}",
         ["web_search"],
     )
 
@@ -353,9 +355,100 @@ async def test_a_version_1_config_is_stored_in_the_new_shape_once_it_is_changed(
     await gems.update(str(document["_id"]), {"description": "Keeps the accounts."})
 
     stored = docdb.documents[document["_id"]]
-    assert stored["version"] == 2
+    assert stored["version"] == GEM_CONFIG_VERSION
     assert stored["description"] == "Keeps the accounts."
     assert (stored["image"], stored["voice"], stored["speech_speed"]) == (None, None, 1.0)
+
+
+@pytest.mark.parametrize(
+    ("own", "instructions"),
+    [
+        ("A patient tutor.", f"A patient tutor.\n\n{DEFAULT_GEM_INSTRUCTIONS}"),
+        ("A patient tutor.\n\n", f"A patient tutor.\n\n{DEFAULT_GEM_INSTRUCTIONS}"),
+        ("", DEFAULT_GEM_INSTRUCTIONS),
+        ("  \n", DEFAULT_GEM_INSTRUCTIONS),
+    ],
+)
+def test_a_version_2_config_has_the_default_instructions_after_its_own(
+    own: str, instructions: str
+) -> None:
+    # Before version 3 the code added the rules for a call and for writing to every gem.
+    gem = GemConfig.model_validate(_stored(version=2, instructions=own))
+
+    assert gem.version == GEM_CONFIG_VERSION
+    assert gem.instructions == instructions
+
+
+async def test_an_older_gem_with_long_instructions_still_loads_and_can_be_changed() -> None:
+    # The limit is on what a user saves. The step to version 3 adds the defaults after
+    # the gem's own text, which can take it past the limit: it must load all the same,
+    # or the whole list of gems fails with it.
+    gems, docdb = _gems()
+    own = "x" * 19_900
+    document = _stored(version=2, instructions=own)
+    docdb.documents[document["_id"]] = document
+
+    (listed,) = await gems.list_all()
+    renamed = await gems.update(str(document["_id"]), {"name": "Gem Three"})
+
+    assert len(listed.instructions) > 20_000
+    assert renamed.instructions == listed.instructions == f"{own}\n\n{DEFAULT_GEM_INSTRUCTIONS}"
+    with pytest.raises(ValidationError):
+        await gems.update(str(document["_id"]), {"instructions": "x" * 20_001})
+    with pytest.raises(ValidationError):
+        await gems.create(name="Gem Two", instructions="x" * 20_001)
+
+
+@pytest.mark.parametrize("version", [2, None])
+async def test_an_older_gem_changed_twice_has_the_default_instructions_once(
+    version: int | None,
+) -> None:
+    gems, docdb = _gems()
+    document = _stored(version=version, instructions="A patient tutor.")
+    if version is None:
+        del document["version"]
+    docdb.documents[document["_id"]] = document
+    gem_id = str(document["_id"])
+    upgraded = f"A patient tutor.\n\n{DEFAULT_GEM_INSTRUCTIONS}"
+
+    # Only the name is changed: the upgraded instructions are stored with the new version.
+    await gems.update(gem_id, {"name": "Gem Three"})
+    assert docdb.documents[document["_id"]]["version"] == GEM_CONFIG_VERSION
+    assert docdb.documents[document["_id"]]["instructions"] == upgraded
+    assert (await gems.get(gem_id)).instructions == upgraded
+
+    await gems.update(gem_id, {"name": "Gem Four"})
+    read = await gems.get(gem_id)
+    assert (read.name, read.instructions) == ("Gem Four", upgraded)
+    assert docdb.documents[document["_id"]]["instructions"] == upgraded
+
+
+@pytest.mark.parametrize("instructions", ["", "   ", "\n\n"])
+async def test_a_gem_made_with_blank_instructions_is_given_the_defaults(instructions: str) -> None:
+    gems, _ = _gems()
+
+    gem = await gems.create(name="Gem Two", instructions=instructions)
+
+    assert gem.instructions == DEFAULT_GEM_INSTRUCTIONS
+
+
+async def test_a_gem_made_with_instructions_keeps_them_as_they_were_sent() -> None:
+    gems, _ = _gems()
+
+    gem = await gems.create(name="Gem Two", instructions="A patient tutor.")
+
+    assert gem.instructions == "A patient tutor."
+
+
+async def test_instructions_changed_to_blank_are_stored_blank() -> None:
+    # The user removed them: they are not given the defaults again.
+    gems, _ = _gems()
+    made = await gems.create(name="Gem Two")
+
+    changed = await gems.update(str(made.id), {"instructions": ""})
+
+    assert changed.instructions == ""
+    assert (await gems.get(str(made.id))).instructions == ""
 
 
 async def test_a_gem_keeps_what_the_app_shows_of_it_and_how_it_is_to_be_spoken() -> None:
@@ -445,6 +538,8 @@ async def test_the_service_hands_out_a_gem_with_its_id_as_text_and_its_version()
     assert ObjectId(made.id)
     assert made.version == GEM_CONFIG_VERSION
     assert made.tools == ["web_search"]
+    # The app sends an empty text for a new gem; one sent with none is the same.
+    assert made.instructions == DEFAULT_GEM_INSTRUCTIONS
     assert [gem.id for gem in await service.list_gems()] == [made.id]
 
 

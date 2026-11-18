@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
-from app.entities.gem_ent import GemConfig
+from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig
 from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
 from app.entities.voice_speech import Playback, Utterance
 
@@ -25,6 +25,7 @@ _DELAY = 0.15
 # the default tools. What it is told is tested in `test_voice_gem.py`.
 _GEM = GemConfig.model_validate(
     {
+        "version": GEM_CONFIG_VERSION,
         "name": "Gem One",
         "created_at": datetime(2026, 11, 17, tzinfo=UTC),
         "updated_at": datetime(2026, 11, 17, tzinfo=UTC),
@@ -295,6 +296,20 @@ def _audio_seconds(outputs: list[VoiceEvent | bytes]) -> float:
     return sum(len(output) for output in outputs if isinstance(output, bytes)) / _BYTES_PER_SECOND
 
 
+# The line a call's history opens with, written out in full.
+_CALL_STARTED = {
+    "role": "developer",
+    "content": "The user has called you. From here on the conversation is spoken.",
+}
+
+
+def _after_the_call_start(request: dict) -> list[dict]:
+    """A request's history after the line it opens with, which says a call has started."""
+    first, *rest = request["input"]
+    assert first == _CALL_STARTED
+    return rest
+
+
 def _shape(items: list[dict]) -> list[str]:
     """History items as short labels: the role of a message, or the type of anything else."""
     return [item.get("role") or item["type"] for item in items]
@@ -315,7 +330,7 @@ async def test_a_finished_turn_is_answered_in_speech() -> None:
     assert outputs[-1] == VoiceEvent(type="assistant.done", text="Hi there.")
     assert f.tts.contexts[0].finished
     assert f.tts.sessions[0].closed
-    assert llm.requests[0]["input"] == [{"role": "user", "content": "hello"}]
+    assert _after_the_call_start(llm.requests[0]) == [{"role": "user", "content": "hello"}]
     assert llm.requests[0]["store"] is False
     assert llm.requests[0]["model"] == "6 Luna"
     assert llm.requests[0]["reasoning"] == {"effort": "none"}
@@ -337,7 +352,7 @@ async def test_a_reply_heard_to_the_end_is_stored_whole() -> None:
 
     # Nothing was cut, so the interrupt event carries no heard text.
     assert outputs[0] == VoiceEvent(type="interrupt")
-    assert llm.requests[1]["input"] == [
+    assert _after_the_call_start(llm.requests[1]) == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "Hi there."},
         {"role": "user", "content": "how are you"},
@@ -407,7 +422,7 @@ async def test_speaking_over_a_reply_keeps_only_the_words_that_were_heard() -> N
     assert f.tts.contexts[0].cancelled
     assert f.tts.sessions[0].closed
     assert _audio_seconds(outputs) == 1
-    assert llm.requests[1]["input"] == [
+    assert _after_the_call_start(llm.requests[1]) == [
         {"role": "user", "content": "tell me a story"},
         {"role": "assistant", "content": "Once upon a…"},
         {"role": "user", "content": "stop, just say sure"},
@@ -430,7 +445,7 @@ async def test_a_reply_still_playing_when_the_user_speaks_is_cut_the_same_way() 
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert outputs[0] == VoiceEvent(type="interrupt", text="A long…")
-    assert llm.requests[1]["input"] == [
+    assert _after_the_call_start(llm.requests[1]) == [
         {"role": "user", "content": "tell me a story"},
         {"role": "assistant", "content": "A long…"},
         {"role": "user", "content": "stop"},
@@ -455,7 +470,7 @@ async def test_a_reply_cut_before_any_of_it_played_leaves_no_trace() -> None:
     # Cut before its first word: the client is told so with the bare mark.
     assert _event(outputs, "interrupt").text == "…"
     # None of the reply was heard, so the user's turn is still the same, open turn.
-    assert llm.requests[1]["input"] == [
+    assert _after_the_call_start(llm.requests[1]) == [
         {"role": "user", "content": "tell me a story\nnever mind"},
     ]
     await f.conversation.close()
@@ -501,7 +516,34 @@ async def test_by_default_nothing_is_said_until_the_user_has_spoken() -> None:
 
     f.stt.say("hello")
     await _read_until(f.conversation, "assistant.done")
-    assert _shape(llm.requests[0]["input"]) == ["user"]
+    assert _shape(_after_the_call_start(llm.requests[0])) == ["user"]
+    await f.conversation.close()
+
+
+@pytest.mark.parametrize("speaks_first", [False, True])
+async def test_a_call_s_history_opens_with_the_line_that_says_a_call_has_started(
+    speaks_first: bool,
+) -> None:
+    # The gem is told the same instructions in a call as in writing: this line is what
+    # says the conversation is spoken. A greeting note, if any, follows it.
+    llm = _LLM([_delta("Hi."), _completed(_message("Hi."))])
+    f = _conversation(llm, speaks_first=speaks_first)
+
+    if not speaks_first:
+        f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.done")
+
+    [first, second] = llm.requests[0]["input"]
+    assert first == _CALL_STARTED
+    assert second == (
+        {
+            "role": "developer",
+            "content": "The call has just connected and the user has not said anything yet. "
+            "Greet them in one short sentence and ask what you can do for them.",
+        }
+        if speaks_first
+        else {"role": "user", "content": "hello"}
+    )
     await f.conversation.close()
 
 
@@ -515,8 +557,8 @@ async def test_asked_to_speak_first_the_assistant_greets_before_the_user_says_an
     outputs = await _read_until(f.conversation, "assistant.done")
 
     # The greeting answers a note of ours: the model's own words never open the history.
-    assert _shape(llm.requests[0]["input"]) == ["developer"]
-    assert "has not said anything yet" in llm.requests[0]["input"][0]["content"]
+    assert _shape(_after_the_call_start(llm.requests[0])) == ["developer"]
+    assert "has not said anything yet" in _after_the_call_start(llm.requests[0])[0]["content"]
     assert outputs[-1].text == "Hi, how can I help?"
     assert _audio_seconds(outputs) == 5
     assert "user.final" not in _types(outputs)
@@ -525,7 +567,7 @@ async def test_asked_to_speak_first_the_assistant_greets_before_the_user_says_an
     f.clock.advance(60)
     f.stt.say("capital of France?")
     await _read_until(f.conversation, "assistant.done")
-    sent = llm.requests[1]["input"]
+    sent = _after_the_call_start(llm.requests[1])
     assert _shape(sent) == ["developer", "assistant", "user"]
     assert sent[1]["content"] == "Hi, how can I help?"
     await f.conversation.close()
@@ -544,7 +586,7 @@ async def test_a_greeting_the_user_talks_over_keeps_only_the_words_they_heard() 
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert _event(outputs, "interrupt").text == "Hi, how…"
-    sent = llm.requests[1]["input"]
+    sent = _after_the_call_start(llm.requests[1])
     assert _shape(sent) == ["developer", "assistant", "user"]
     assert sent[1]["content"] == "Hi, how…"
     await f.conversation.close()
@@ -563,7 +605,7 @@ async def test_a_greeting_cut_off_before_a_word_of_it_was_heard_leaves_no_trace(
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert outputs[-1].text == "Paris."
-    assert _shape(llm.requests[1]["input"]) == ["developer", "user"]
+    assert _shape(_after_the_call_start(llm.requests[1])) == ["developer", "user"]
     await f.conversation.close()
 
 
@@ -580,7 +622,7 @@ async def test_a_greeting_cut_off_by_a_noise_is_picked_up_again() -> None:
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert outputs[-1].text == "can I help?"
-    sent = llm.requests[1]["input"]
+    sent = _after_the_call_start(llm.requests[1])
     assert _shape(sent) == ["developer", "assistant", "developer"]
     assert sent[1]["content"] == "Hi, how…"
     assert "no words" in sent[2]["content"]
@@ -701,7 +743,7 @@ async def _cut_the_story(f: _Fixture, then: str) -> list[dict]:
     await _let_audio_out()
     f.stt.turn_end(then)
     await _read_until(f.conversation, "assistant.done")
-    return f.llm.requests[1]["input"]
+    return _after_the_call_start(f.llm.requests[1])
 
 
 async def test_a_long_unheard_part_leaves_nothing_but_the_cut() -> None:
@@ -737,7 +779,7 @@ async def test_the_recognizer_opening_an_empty_turn_first_adds_only_that_it_had_
     f.stt.say("stop")
     await _read_until(f.conversation, "assistant.done")
 
-    sent = llm.requests[2]["input"]
+    sent = _after_the_call_start(llm.requests[2])
     assert _shape(sent) == ["user", "assistant", "developer", "user"]
     assert sent[1]["content"] == "Once upon a time…"
     assert "no words" in sent[2]["content"]
@@ -756,7 +798,7 @@ async def test_a_turn_that_ends_without_starting_still_cuts_the_reply() -> None:
     f.stt.turn_end("stop")
     await _read_until(f.conversation, "assistant.done")
 
-    assert _shape(llm.requests[1]["input"]) == ["user", "assistant", "user"]
+    assert _shape(_after_the_call_start(llm.requests[1])) == ["user", "assistant", "user"]
     await f.conversation.close()
 
 
@@ -779,13 +821,15 @@ async def test_words_that_trail_a_sentence_join_the_same_turn_on_a_new_line() ->
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert _event(outputs, "user.final").text == "happening?"
-    assert llm.requests[1]["input"] == [{"role": "user", "content": "Hello, what's\nhappening?"}]
+    assert _after_the_call_start(llm.requests[1]) == [
+        {"role": "user", "content": "Hello, what's\nhappening?"}
+    ]
 
     # Once the reply has been heard, the turn is closed: the next words are a new turn.
     f.clock.advance(60)
     f.stt.say("bye")
     await _read_until(f.conversation, "assistant.done")
-    assert llm.requests[2]["input"] == [
+    assert _after_the_call_start(llm.requests[2]) == [
         {"role": "user", "content": "Hello, what's\nhappening?"},
         {"role": "assistant", "content": "Nothing much."},
         {"role": "user", "content": "bye"},
@@ -808,7 +852,7 @@ async def test_a_stray_word_in_another_script_is_dropped_and_the_reply_starts_ag
 
     # The noise never reaches the model or the screen, and the question is answered.
     assert "user.final" not in _types(outputs)
-    assert llm.requests[1]["input"] == [
+    assert _after_the_call_start(llm.requests[1]) == [
         {"role": "user", "content": "What is the capital of France?"},
     ]
     assert outputs[-1].text == "Paris."
@@ -829,7 +873,7 @@ async def test_a_turn_with_no_words_does_not_leave_the_user_unanswered() -> None
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert outputs[-1].text == "Paris."
-    assert llm.requests[1]["input"] == [
+    assert _after_the_call_start(llm.requests[1]) == [
         {"role": "user", "content": "What is the capital of France?"},
     ]
     await f.conversation.close()
@@ -851,7 +895,7 @@ async def test_a_reply_cut_off_by_a_noise_is_picked_up_again() -> None:
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert _event(outputs, "interrupt").text == "Once upon a time…"
-    sent = llm.requests[1]["input"]
+    sent = _after_the_call_start(llm.requests[1])
     assert _shape(sent) == ["user", "assistant", "developer"]
     assert sent[1]["content"] == "Once upon a time…"
     assert "no words" in sent[2]["content"]
@@ -874,7 +918,7 @@ async def test_a_stray_word_just_after_the_reply_starts_is_dropped_and_the_reply
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert "user.final" not in _types(outputs)
-    sent = llm.requests[1]["input"]
+    sent = _after_the_call_start(llm.requests[1])
     assert _shape(sent) == ["user", "assistant", "developer"]
     assert sent[1]["content"] == "The capital…"
     assert "no words" in sent[2]["content"]
@@ -897,7 +941,7 @@ async def test_the_same_word_well_into_the_reply_is_taken_as_the_user_speaking()
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert _event(outputs, "user.final").text == "रुको"
-    assert llm.requests[1]["input"][-1] == {"role": "user", "content": "रुको"}
+    assert _after_the_call_start(llm.requests[1])[-1] == {"role": "user", "content": "रुको"}
     await f.conversation.close()
 
 
@@ -1005,7 +1049,7 @@ async def test_a_noise_turn_that_starts_with_punctuation_is_still_dropped() -> N
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert "user.final" not in _types(outputs)
-    assert llm.requests[1]["input"] == [
+    assert _after_the_call_start(llm.requests[1]) == [
         {"role": "user", "content": "What is the capital of France?"},
     ]
     await f.conversation.close()
@@ -1019,7 +1063,7 @@ async def test_a_noise_word_inside_the_users_sentence_never_reaches_the_model() 
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert _event(outputs, "user.final").text == "What is the capital of France?"
-    assert llm.requests[0]["input"] == [
+    assert _after_the_call_start(llm.requests[0]) == [
         {"role": "user", "content": "What is the capital of France?"},
     ]
     await f.conversation.close()
@@ -1052,7 +1096,7 @@ async def test_a_search_runs_between_two_model_calls() -> None:
     assert outputs[-1].text == "Norris won."
     assert len(f.tts.sessions) == 1
     # The second call gets the call and its result.
-    sent = llm.requests[1]["input"]
+    sent = _after_the_call_start(llm.requests[1])
     assert _shape(sent) == ["user", "function_call", "function_call_output"]
     assert sent[1]["call_id"] == sent[2]["call_id"] == "call_1"
     assert "Norris won in Las Vegas." in sent[2]["output"]
@@ -1098,7 +1142,7 @@ async def test_a_reply_may_search_as_often_as_the_model_needs() -> None:
 
     # A fourth search runs, and the model answers with its result in front of it.
     assert search.queries == ["query 0", "query 1", "query 2", "query 3"]
-    *_, call, result = llm.requests[-1]["input"]
+    *_, call, result = _after_the_call_start(llm.requests[-1])
     assert call["call_id"] == result["call_id"] == "call_3"
     assert "Norris won in Las Vegas." in result["output"]
     # No round forbids the tool.
@@ -1128,7 +1172,7 @@ async def test_interrupting_the_answer_keeps_the_search_and_the_words_heard() ->
     f.stt.say("stop")
     await _read_until(f.conversation, "assistant.done")
 
-    sent = llm.requests[2]["input"]
+    sent = _after_the_call_start(llm.requests[2])
     assert _shape(sent) == ["user", "function_call", "function_call_output", "assistant", "user"]
     assert sent[3]["content"] == "Norris…"
     await f.conversation.close()
@@ -1153,7 +1197,7 @@ async def test_what_was_said_before_a_search_is_kept_whole_once_the_model_has_se
     # "One moment." had already gone back to the model with the search result, so it
     # stays as it was. The answer was never heard and is dropped.
     assert outputs[0] == VoiceEvent(type="interrupt", text="One moment.")
-    sent = llm.requests[2]["input"]
+    sent = _after_the_call_start(llm.requests[2])
     assert _shape(sent) == ["user", "assistant", "function_call", "function_call_output", "user"]
     assert sent[1]["content"] == "One moment."
     await f.conversation.close()
@@ -1175,7 +1219,7 @@ async def test_two_searches_in_one_round_are_each_given_their_own_kind_of_result
     f.stt.say("hello?")
     await _read_until(f.conversation, "assistant.done")
 
-    sent = llm.requests[1]["input"]
+    sent = _after_the_call_start(llm.requests[1])
     outputs = {
         item["call_id"]: item["output"]
         for item in sent
@@ -1208,7 +1252,7 @@ async def test_speaking_during_a_search_leaves_a_placeholder_and_the_search_runn
     f.stt.say("hello, what's happening?")
     await _read_until(f.conversation, "assistant.done")
 
-    sent = llm.requests[1]["input"]
+    sent = _after_the_call_start(llm.requests[1])
     assert _shape(sent) == ["user", "function_call", "function_call_output", "user"]
     assert sent[1]["call_id"] == sent[2]["call_id"] == "call_1"
     # The placeholder says the result comes later, names the call, and how to stop it.
@@ -1247,7 +1291,7 @@ async def test_a_late_result_is_given_to_the_model_once_nothing_is_being_said() 
     # that it tends to search for the same thing again when the user just says "hello?".
     assert [request["reasoning"]["effort"] for request in llm.requests] == ["none", "low", "none"]
 
-    sent = llm.requests[2]["input"]
+    sent = _after_the_call_start(llm.requests[2])
     assert _shape(sent) == [
         "user",
         "function_call",
@@ -1287,7 +1331,7 @@ async def test_a_result_that_lands_while_the_user_speaks_is_brought_up_after_the
 
     # First their question is answered, with the search still shown as running.
     assert outputs[-1].text == "Four."
-    asked = llm.requests[1]["input"]
+    asked = _after_the_call_start(llm.requests[1])
     assert _shape(asked) == ["user", "function_call", "function_call_output", "user"]
     assert "Still running" in asked[2]["output"]
 
@@ -1296,7 +1340,7 @@ async def test_a_result_that_lands_while_the_user_speaks_is_brought_up_after_the
     outputs = await _read_until(f.conversation, "assistant.done")
     assert outputs[-1].text == "It is sunny."
     assert "user.final" not in _types(outputs)
-    told = llm.requests[2]["input"]
+    told = _after_the_call_start(llm.requests[2])
     assert _shape(told)[-4:] == ["user", "assistant", "function_call", "function_call_output"]
     assert json.loads(told[-2]["arguments"]) == {"deferred_result_for": "call_1"}
     assert "Norris won in Las Vegas." in told[-1]["output"]
@@ -1338,7 +1382,7 @@ async def test_a_result_whose_reply_was_cut_off_unheard_by_noise_is_told_again()
 
     assert outputs[-1].text == "It is sunny."
     # Nothing of it was heard, so the history is as it was and the request is the same.
-    assert llm.requests[3]["input"] == llm.requests[2]["input"]
+    assert _after_the_call_start(llm.requests[3]) == _after_the_call_start(llm.requests[2])
 
     # Once it has been heard, the user is owed nothing more.
     f.clock.advance(60)
@@ -1363,7 +1407,7 @@ async def test_a_result_whose_reply_the_user_talked_over_is_left_to_the_model() 
     assert outputs[-1].text == "Four."
 
     # The model was sent the result and then the question, with nothing of ours added.
-    asked = llm.requests[3]["input"]
+    asked = _after_the_call_start(llm.requests[3])
     assert _shape(asked)[-3:] == ["function_call", "function_call_output", "user"]
     assert [item for item in asked if item.get("role") == "developer"] == []
     # Nothing is brought up afterwards: telling the user is the model's to do.
@@ -1419,7 +1463,7 @@ async def test_a_reply_about_a_result_that_says_nothing_is_not_made_again() -> N
 
     # Two questions, two answers: nothing was brought up again in between or after.
     assert len(llm.requests) == 5
-    notes = [i for i in llm.requests[-1]["input"] if i.get("role") == "developer"]
+    notes = [i for i in _after_the_call_start(llm.requests[-1]) if i.get("role") == "developer"]
     assert notes == []
     await f.conversation.close()
 
@@ -1440,7 +1484,7 @@ async def test_a_result_is_still_owed_if_its_reply_was_cut_off_before_it_said_an
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert outputs[-1].text == "It is sunny."
-    assert llm.requests[3]["input"] == llm.requests[2]["input"]
+    assert _after_the_call_start(llm.requests[3]) == _after_the_call_start(llm.requests[2])
     await f.conversation.close()
 
 
@@ -1462,7 +1506,7 @@ async def test_a_result_whose_reply_failed_is_there_when_the_user_next_speaks() 
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert outputs[-1].text == "Four."
-    asked = llm.requests[3]["input"]
+    asked = _after_the_call_start(llm.requests[3])
     assert _shape(asked)[-3:] == ["function_call", "function_call_output", "user"]
     await f.conversation.close()
 
@@ -1487,13 +1531,16 @@ async def test_a_result_waiting_its_turn_keeps_waiting_while_the_user_talks() ->
     f.stt.say("are you there?")
     outputs = await _read_until(f.conversation, "assistant.done")
     assert outputs[-1].text == "Yes."
-    assert _shape(llm.requests[2]["input"])[-1] == "user"
+    assert _shape(_after_the_call_start(llm.requests[2]))[-1] == "user"
 
     # Once that answer has been heard, the result gets its own reply.
     f.clock.advance(60)
     outputs = await _read_until(f.conversation, "assistant.done")
     assert outputs[-1].text == "It is sunny."
-    assert _shape(llm.requests[3]["input"])[-2:] == ["function_call", "function_call_output"]
+    assert _shape(_after_the_call_start(llm.requests[3]))[-2:] == [
+        "function_call",
+        "function_call_output",
+    ]
     assert len(llm.requests) == 4
     await f.conversation.close()
 
@@ -1521,7 +1568,7 @@ async def test_a_late_result_is_still_brought_up_if_the_user_said_nothing_after_
 
     assert outputs[-1].text == "It is sunny."
     # The result went in once, and nothing claims a reply was cut by noise.
-    assert _shape(llm.requests[2]["input"])[-3:] == [
+    assert _shape(_after_the_call_start(llm.requests[2]))[-3:] == [
         "assistant",
         "function_call",
         "function_call_output",
@@ -1552,7 +1599,7 @@ async def test_a_wordless_turn_after_an_unanswered_one_is_not_blamed_on_noise() 
 
     # "hello?" is simply answered again. No reply had been heard, so nothing in the
     # history says one was cut off by noise.
-    again = llm.requests[2]["input"]
+    again = _after_the_call_start(llm.requests[2])
     assert _shape(again) == ["user", "function_call", "function_call_output", "user"]
     assert again[-1]["content"] == "hello?"
 
@@ -1610,7 +1657,7 @@ async def test_a_turn_that_ends_without_starting_cannot_set_off_two_replies() ->
     await _read_until(f.conversation, "assistant.done")
     # Only the answer to the user is under way. The result waits for it to be heard.
     assert len(llm.requests) == 2
-    assert _shape(llm.requests[1]["input"]) == [
+    assert _shape(_after_the_call_start(llm.requests[1])) == [
         "user",
         "function_call",
         "function_call_output",
@@ -1644,7 +1691,7 @@ async def test_the_model_can_cancel_a_search_that_is_still_running() -> None:
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert outputs[-1].text == "Stopped."
-    assert llm.requests[2]["input"][-1] == {
+    assert _after_the_call_start(llm.requests[2])[-1] == {
         "type": "function_call_output",
         "call_id": "call_2",
         "output": "Cancelled.",
@@ -1677,7 +1724,7 @@ async def test_a_result_that_landed_while_the_user_spoke_still_counts_as_pending
     # The model is shown the placeholder and not yet the result, exactly as if the search
     # were still running. So it is asked to think here too.
     asked = llm.requests[1]
-    assert "Still running" in asked["input"][-2]["output"]
+    assert "Still running" in _after_the_call_start(asked)[-2]["output"]
     assert asked["reasoning"]["effort"] == "low"
 
     f.clock.advance(60)
@@ -1708,7 +1755,7 @@ async def test_the_model_can_cancel_a_result_that_is_waiting_to_be_delivered() -
     f.stt.turn_end("never mind, stop that")
     await _read_until(f.conversation, "assistant.done")
 
-    assert llm.requests[2]["input"][-1]["output"] == "Cancelled."
+    assert _after_the_call_start(llm.requests[2])[-1]["output"] == "Cancelled."
     # The result the user called off is never brought up.
     f.clock.advance(60)
     await asyncio.sleep(0.25)
@@ -1751,7 +1798,7 @@ async def test_a_search_cancelled_in_the_instant_it_finishes_is_not_told() -> No
     f.stt.say("never mind, stop that")
     await _read_until(f.conversation, "assistant.done")
 
-    assert llm.requests[2]["input"][-1]["output"] == "Cancelled."
+    assert _after_the_call_start(llm.requests[2])[-1]["output"] == "Cancelled."
     f.clock.advance(60)
     await asyncio.sleep(0.25)
     # It did finish: it was not stopped. It is never told all the same.
@@ -1774,7 +1821,10 @@ async def test_cancelling_a_call_that_is_not_running_says_so() -> None:
     f.stt.say("stop the search")
     await _read_until(f.conversation, "assistant.done")
 
-    assert llm.requests[1]["input"][-1]["output"] == "Nothing is running under that call_id."
+    assert (
+        _after_the_call_start(llm.requests[1])[-1]["output"]
+        == "Nothing is running under that call_id."
+    )
     await f.conversation.close()
 
 

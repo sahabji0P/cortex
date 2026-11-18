@@ -30,13 +30,14 @@ from app.entities.model import MODELS, ModelName
 from app.entities.tools import GEM_TOOL_NAMES
 
 __all__ = [
+    "DEFAULT_GEM_INSTRUCTIONS",
     "DEFAULT_GEM_TOOLS",
     "GEM_CONFIG_VERSION",
     "GemConfig",
     "GemDescription",
     "GemEntityClass",
     "GemImage",
-    "GemInstructions",
+    "GemInstructionsToSave",
     "GemModelName",
     "GemName",
     "GemSpeechSpeed",
@@ -48,7 +49,7 @@ __all__ = [
 ]
 
 # The version of the config's shape. Raise it when a field is added, renamed or changed.
-GEM_CONFIG_VERSION = 2
+GEM_CONFIG_VERSION = 3
 
 # The models a gem can be answered by: the same names a call accepts.
 type GemModelName = ModelName
@@ -56,6 +57,33 @@ _MODEL_NAMES = frozenset(info.name for info in MODELS)
 
 # The tools a new gem may use, when it is not told which.
 DEFAULT_GEM_TOOLS: tuple[str, ...] = ("web_search",)
+
+# The instructions a new gem is given when it is made without any: how to talk in a call
+# and how to write. They are the gem's own from then on, for the user to change or remove.
+# A DRAFT THE OWNER HAS NOT READ YET.
+DEFAULT_GEM_INSTRUCTIONS = """\
+In a call:
+- Talk like a person on a call: short, natural sentences. Keep to one or two sentences \
+unless the user asks for more.
+- Use plain words only: no markdown, lists, emoji, links or symbols. Write numbers the way \
+they are said.
+- If the user interrupts to ask or say something, answer that first, then go back to what \
+you were saying if it is still worth finishing. If it was only a sound, or a word like \
+"yes" or "okay", carry on from where you stopped. When you carry on after being cut off, \
+continue from there instead of starting again.
+- When what you are about to do will keep the user waiting for more than a second, such \
+as looking something up, first say in a few words what you are going to do, the way a \
+person would, and do it in that same turn: the user hears nothing else while they wait.
+
+In writing:
+- Write the way a person writes a message: plainly, and only as long as the answer needs.
+- Write plain text, with no markdown or other formatting marks. The window shows your \
+words exactly as you write them.
+- When what you are about to do will keep the user waiting, such as looking something \
+up, first say in a few words what you are going to do, the way a person would.
+
+Always:
+- When you answer from search results, name the source."""
 
 _NAME_MAX_LENGTH = 100
 # Long enough for a detailed brief. A limit keeps a stray paste out of every request.
@@ -98,7 +126,6 @@ def _check_known_tools(value: list[str]) -> list[str]:
 
 # The rules for each field, shared by the stored config and the routes' input.
 type GemName = Annotated[str, AfterValidator(_check_name)]
-type GemInstructions = Annotated[str, Field(max_length=_INSTRUCTIONS_MAX_LENGTH)]
 # What the app shows of a gem, and how its replies are to be spoken. The backend keeps
 # these and gives them back. None of them changes what a call or a chat does yet.
 type GemDescription = Annotated[str, Field(max_length=_DESCRIPTION_MAX_LENGTH)]
@@ -114,6 +141,10 @@ type GemTools = Annotated[
 # names a tool which has since gone must still load: that tool is just not offered.
 type GemToolsToSave = Annotated[GemTools, AfterValidator(_check_known_tools)]
 _TOOLS_TO_SAVE: TypeAdapter[list[str]] = TypeAdapter(GemToolsToSave)
+# The same for the instructions: the limit is on what a user saves. A stored config whose
+# instructions a newer version made longer (see `_version_2_to_3`) must still load.
+type GemInstructionsToSave = Annotated[str, Field(max_length=_INSTRUCTIONS_MAX_LENGTH)]
+_INSTRUCTIONS_TO_SAVE: TypeAdapter[str] = TypeAdapter(GemInstructionsToSave)
 # The same for the model: a name that is not offered is refused when a gem is made or
 # changed. One already stored is read as no model at all (see `GemConfig._upgrade`).
 _MODEL_TO_SAVE: TypeAdapter[GemModelName | None] = TypeAdapter(GemModelName | None)
@@ -128,8 +159,24 @@ def _version_1_to_2(document: dict[str, Any]) -> dict[str, Any]:
     return {"description": "", "image": None, "voice": None, "speech_speed": 1.0, **document}
 
 
+def _version_2_to_3(document: dict[str, Any]) -> dict[str, Any]:
+    """Version 3 made the rules for a call and for writing part of a gem's instructions.
+
+    Before, the code added them to every gem. Now a gem holds them in its own
+    instructions, so an older gem's are its own text, a blank line, then the defaults.
+    """
+    own = str(document.get("instructions") or "").rstrip()
+    instructions = (
+        f"{own}\n\n{DEFAULT_GEM_INSTRUCTIONS}" if own.strip() else DEFAULT_GEM_INSTRUCTIONS
+    )
+    return {**document, "instructions": instructions}
+
+
 # One step per version: the step under key N takes a document from version N to N + 1.
-_UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {1: _version_1_to_2}
+_UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    1: _version_1_to_2,
+    2: _version_2_to_3,
+}
 
 
 def upgrade_gem_document(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -170,8 +217,9 @@ class GemConfig(BaseModel):
     # The gem's picture, as one value the backend does not read. Today the app writes
     # its built-in face and colour there; later it could be the address of a picture.
     image: GemImage | None = None
-    # Who this gem is and how it behaves, in plain words.
-    instructions: GemInstructions = ""
+    # Who this gem is and how it behaves, in plain words. A gem made without any is given
+    # `DEFAULT_GEM_INSTRUCTIONS`.
+    instructions: str = ""
     # The model that answers. None means the configured default.
     model: GemModelName | None = None
     # Whether the gem greets the user when a call connects.
@@ -245,13 +293,18 @@ class GemEntityClass:
         voice: str | None = None,
         speech_speed: float = 1.0,
     ) -> GemConfig:
+        """Make a gem. Instructions left out or blank are the defaults."""
         now = datetime.now(UTC)
         gem = GemConfig.model_validate(
             {
+                # Named, so it is not read as an older config and upgraded.
+                "version": GEM_CONFIG_VERSION,
                 "name": name,
                 "description": description,
                 "image": image,
-                "instructions": instructions,
+                "instructions": _INSTRUCTIONS_TO_SAVE.validate_python(instructions)
+                if instructions.strip()
+                else DEFAULT_GEM_INSTRUCTIONS,
                 "model": _MODEL_TO_SAVE.validate_python(model),
                 "speaks_first": speaks_first,
                 "tools": _TOOLS_TO_SAVE.validate_python(
@@ -280,13 +333,21 @@ class GemEntityClass:
         return gem
 
     async def update(self, gem_id: str, changes: Mapping[str, Any]) -> GemConfig:
-        """Change only the fields given. `updated_at` moves even when nothing else does."""
+        """Change only the fields given. `updated_at` moves even when nothing else does.
+
+        Instructions are stored as they are sent: blank ones mean the user removed them.
+        """
         if unknown := set(changes) - _EDITABLE:
             raise ValueError(f"These fields of a gem cannot be changed: {sorted(unknown)}")
         if "tools" in changes:
             changes = {**changes, "tools": _TOOLS_TO_SAVE.validate_python(changes["tools"])}
         if "model" in changes:
             changes = {**changes, "model": _MODEL_TO_SAVE.validate_python(changes["model"])}
+        if "instructions" in changes:
+            changes = {
+                **changes,
+                "instructions": _INSTRUCTIONS_TO_SAVE.validate_python(changes["instructions"]),
+            }
         current = await self.get(gem_id)
         # Checked as a whole, so a change can never leave a config that would not load.
         updated = GemConfig.model_validate(

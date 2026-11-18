@@ -31,6 +31,11 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Before a wait, the gem says a few words first. Same in chat as in a call.
 - Instructions and skills are plainly written. Nothing hard-coded.
 - The list of gems changes, so it is not in the fixed instructions.
+- What a gem is told is two parts: the Darbar text (the environment, same for every gem) and the gem's own instructions.
+- There is no other Darbar text: it is the environment instruction, and it stays editable.
+- The instructions do not depend on call or chat, or on the tools offered.
+- A new gem's instructions come filled in with the call and writing style rules. The user may change or remove them.
+- A line in the conversation says a call has started. For now a call starts empty, so it is the call's first line.
 - Product questions are settled by trying them out with proper evals, not blindly.
 - Tools are the same in a call and in chat: the same tools, run the same way, by one copy of the code.
 - A tool call still running at a cut carries on in both. cancel_tool_call stops one, for any tool.
@@ -51,6 +56,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Homes and the Darbar are part of the memory design too: what is private to a gem, what is common.
 - Proactivity: gems calling or messaging first, routines. Comes with memory.
 - Gem to gem samvaad, and several gems in one call.
+- A call joined to the stored conversation, with the call-start line written wherever the mode changes.
 - Workers: a worker returns to its parent gem. A shared worker that is triggered is a new idea.
 - Vault: secrets per gem, and shared ones. The model never sees a secret.
 - Vault: a gem without a secret asks the gem that has it to do the job. The secret is not handed over.
@@ -102,3 +108,4 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - One context with both speaking and writing in it: does the gem keep to the right one?
 - No cap on tool rounds: does a gem ever loop?
 - Call: three things are now asked of the model and not yet run live: a few words before a wait, carrying on after a sound, telling a late result after answering.
+- One instruction text for call and chat: does a gem keep to the call rules in a call and the writing rules in writing?

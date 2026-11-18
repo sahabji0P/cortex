@@ -492,6 +492,13 @@ async def test_cutting_off_an_openai_reply_closes_its_connection_there_and_then(
 # ---- a whole conversation on an Anthropic model
 
 
+# How a call's opening line reaches an Anthropic model.
+_CALL_STARTED = {
+    "type": "text",
+    "text": "<note>The user has called you. From here on the conversation is spoken.</note>",
+}
+
+
 async def test_a_search_runs_between_two_model_calls_on_an_anthropic_model() -> None:
     llm = _Claude(
         [_call_starts(), _final(("toolu_1", "who won the race"))],
@@ -505,8 +512,9 @@ async def test_a_search_runs_between_two_model_calls_on_an_anthropic_model() -> 
 
     assert outputs[-1].text == "Norris won."
     first, second = llm.requests
+    # The line that opens a call's history is a note, on the user's side with their words.
     assert first["messages"] == [
-        {"role": "user", "content": [{"type": "text", "text": "who won the race?"}]}
+        {"role": "user", "content": [_CALL_STARTED, {"type": "text", "text": "who won the race?"}]}
     ]
     _, assistant, result = second["messages"]
     assert assistant == {
@@ -544,7 +552,7 @@ async def test_interrupting_an_anthropic_model_closes_its_stream_and_keeps_what_
 
     assert llm.streams[0].closed
     assert llm.requests[1]["messages"] == [
-        {"role": "user", "content": [{"type": "text", "text": "tell me a story"}]},
+        {"role": "user", "content": [_CALL_STARTED, {"type": "text", "text": "tell me a story"}]},
         {"role": "assistant", "content": [{"type": "text", "text": "Once upon…"}]},
         {"role": "user", "content": [{"type": "text", "text": "stop"}]},
     ]

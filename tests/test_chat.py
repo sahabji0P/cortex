@@ -1,7 +1,8 @@
 """Written chat with a gem: what it is told, what is stored, and the standing socket.
 
-The expected instructions are written out here in full, not built from the module's
-constants, so any change to what the model reads shows up as a failing test.
+The expected instructions are written out in full, here and in the Darbar's and the
+call's tests, not built from the module's constants, so any change to what the model
+reads shows up as a failing test.
 """
 
 import asyncio
@@ -21,13 +22,13 @@ from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
 from app.entities.chat_store import ChatItem, ChatStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
-from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.instructions import instruction_layers, instructions
+from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig, GemEntityClass
+from app.entities.instructions import instructions
 from app.routers.gems.service import GemsServiceV1Class
 from app.routers.link.service import LinkServiceV1Class
 from tests.test_model import _call_starts, _Claude, _final, _text
 from tests.test_voice_conversation import _completed, _delta, _Search, _search_call, _starts
-from tests.test_voice_gem import _SEARCH_RULES as _CALL_SEARCH_RULES
+from tests.test_voice_gem import _DARBAR
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -36,45 +37,11 @@ if TYPE_CHECKING:
 
 _NOW = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 
-_GEM_IN_WRITING = (
-    "The user keeps a few assistants of their own, which they call gems. Each gem has its "
-    "own name and its own work. The place they share is called the Darbar.\n"
-    "\n"
-    "You are Gem One.\n"
-    "\n"
-    "You look after the user's personal finances.\n"
-    "\n"
-    "You are in a written conversation. The user reads what you write in a chat window.\n"
-    "\n"
-    "- Write the way a person writes a message: plainly, and only as long as the answer "
-    "needs.\n"
-    "- Write plain text, with no markdown or other formatting marks. The window shows your "
-    "words exactly as you write them.\n"
-    '- An earlier reply of yours that ends in "…" was cut off at that point, because the '
-    "user sent a new message. They read nothing after it, so do not assume they know the "
-    'rest. Never end a reply with "…" yourself.\n'
-)
-_WRITTEN_SEARCH_RULES = (
-    "- When what you are about to do will keep the user waiting, such as looking something "
-    "up, first say in a few words what you are going to do, the way a person would.\n"
-    "- When you answer from search results, name the source.\n"
-    "- If the user sends a new message while a search is running, the search carries on in "
-    "the background. Do not search for the same thing again: say it is still coming, and "
-    "answer whatever else they asked. Only if they say they no longer want it, call "
-    "cancel_tool_call: nothing is cancelled unless you make that call. The result reaches "
-    'you by itself, as a call with "deferred_result_for" in its arguments. You did not make '
-    "that call: it only delivers the late result. When it arrives, tell the user what it "
-    "found straight away, without being asked, unless they have said they no longer want "
-    "it. If they say something else before you have told them, answer that and then tell "
-    "them. If you have already told them the same thing, do not repeat it: say in a few "
-    "words that the search confirms it.\n"
-)
-_TODAY = "\nToday is Tuesday, 17 November 2026.\n"
-
 
 def _a_gem(**fields: object) -> GemConfig:
     return GemConfig.model_validate(
         {
+            "version": GEM_CONFIG_VERSION,
             "name": "Gem One",
             "instructions": "You look after the user's personal finances.",
             "created_at": _NOW,
@@ -87,46 +54,20 @@ def _a_gem(**fields: object) -> GemConfig:
 # ---- what a gem is told in writing
 
 
-@pytest.mark.parametrize(
-    ("search", "expected"),
-    [
-        (True, _GEM_IN_WRITING + _WRITTEN_SEARCH_RULES + "- A need of the model's.\n" + _TODAY),
-        (False, _GEM_IN_WRITING + "- A need of the model's.\n" + _TODAY),
-    ],
-)
-def test_a_gem_in_writing_is_told_the_written_rules(search: bool, expected: str) -> None:
-    told = instructions(
-        gem=_a_gem(),
-        search=search,
-        written=True,
-        model_needs="- A need of the model's.\n",
-        now=_NOW,
-    )
-    assert told == expected
+def _told(name: str, own: str, darbar: str = _DARBAR) -> str:
+    today = datetime.now(UTC).strftime("%A, %d %B %Y")
+    return f"{darbar}You are {name}.\n\n{own}\n\nToday is {today}.\n"
 
 
-def test_the_written_layers_take_the_place_of_the_spoken_ones() -> None:
-    layers = instruction_layers(gem=_a_gem(), search=True, written=True, model_needs="", now=_NOW)
-    assert [layer.name for layer in layers] == [
-        "darbar",
-        "gem",
-        "written",
-        "tools",
-        "model",
-        "date",
-    ]
-    told = "".join(layer.text for layer in layers)
-    # Nothing of a call's speech.
-    assert "spoken" not in told
+def test_a_gem_in_writing_is_told_what_it_is_told_in_a_call() -> None:
+    # One instruction text for a gem: nothing in it depends on how the gem is reached.
+    told = instructions(gem=_a_gem(), model_needs="- A need of the model's.\n", now=_NOW)
 
-
-def test_the_written_rule_for_a_search_that_carries_on_is_the_calls_with_a_new_opening() -> None:
-    call = _CALL_SEARCH_RULES.split("\n- ")[-1]
-    written = _WRITTEN_SEARCH_RULES.rsplit("\n- ", maxsplit=1)[-1]
-    opening = "If the user interrupts while a search is running,"
-    assert call.startswith(opening)
-    assert written == call.replace(
-        opening, "If the user sends a new message while a search is running,", 1
+    assert told == (
+        _DARBAR
+        + "You are Gem One.\n\nYou look after the user's personal finances.\n\n"
+        + "- A need of the model's.\n\n"
+        + "Today is Tuesday, 17 November 2026.\n"
     )
 
 
@@ -516,9 +457,8 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     ]
     assert await setup.shown() == [("user", "hello"), ("gem", "Hi there.")]
     [request] = setup.llm.requests
-    today = datetime.now(UTC).strftime("%A, %d %B %Y")
-    assert request["instructions"] == (
-        _GEM_IN_WRITING + _WRITTEN_SEARCH_RULES + f"\nToday is {today}.\n"
+    assert request["instructions"] == _told(
+        "Gem One", "You look after the user's personal finances."
     )
     # Search, and as in a call, a way to stop one that carries on in the background.
     assert _tool_names(request) == ["web_search", "cancel_tool_call"]
@@ -876,8 +816,7 @@ async def test_a_changed_gem_applies_from_the_next_message() -> None:
         "You are Gem One.\n\nYou look after the user's personal finances.\n\n"
         in (first["instructions"])
     )
-    assert "You are Gem Four.\n\nYou keep the household accounts.\n\n" in second["instructions"]
-    assert "search" not in second["instructions"]
+    assert second["instructions"] == _told("Gem Four", "You keep the household accounts.")
     assert _tool_names(first) == ["web_search", "cancel_tool_call"]
     assert _tool_names(second) == []
     # The conversation carries on as it was stored.
@@ -897,7 +836,10 @@ async def test_a_gem_without_search_or_without_the_key_is_offered_no_tools() -> 
 
     [request] = setup.llm.requests
     assert _tool_names(request) == []
-    assert "search" not in request["instructions"]
+    # What the gem is told does not depend on the tools it is offered.
+    assert request["instructions"] == _told(
+        "Gem One", "You look after the user's personal finances."
+    )
     await _close(socket, linked)
 
 
@@ -1022,8 +964,8 @@ async def test_a_gem_that_lost_its_search_still_declares_it_while_its_history_ho
         "function_call",
         "function_call_output",
     ]
-    # But the gem is given none of the rules for searching, and a search does not run.
-    assert "search" not in asked["instructions"]
+    # It is told what it was told before, and a search does not run.
+    assert asked["instructions"] == setup.llm.requests[0]["instructions"]
     assert setup.search.queries == ["Pune weather"]
     refused = setup.llm.requests[3]["input"][-1]
     assert refused == {
@@ -1873,7 +1815,7 @@ async def test_a_gem_that_lost_its_search_still_declares_cancel_tool_call_if_it_
 
     asked = setup.llm.requests[-1]
     assert _tool_names(asked) == ["web_search", "cancel_tool_call"]
-    assert "cancel_tool_call" not in asked["instructions"]
+    assert asked["instructions"] == setup.llm.requests[0]["instructions"]
     await _close(socket, linked)
 
 
