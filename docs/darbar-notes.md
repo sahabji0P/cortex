@@ -21,6 +21,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Every gem has both call and chat.
 - How a call behaves is closed, until we find something that makes it better.
 - One WebSocket once you are logged in. Calls, chat and events all go over it.
+- Calls go over the standing socket only. The old call socket and the test page are gone: the app is the client.
 - It goes both ways: a gem can call or message you.
 - Call and chat are a medium between any two: you and a gem, or gem and gem.
 - One agentic loop for call, chat and workers. Only the config differs.
@@ -36,7 +37,6 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - GemConfig on the backend: character, instructions, model, tools, skills, permissions, sandbox.
 - The shared loop, taken out of the call code without changing how a call behaves.
 - A tool registry, then skills.
-- The standing WebSocket, with the call moved onto it.
 - Chat.
 - A sound before the greeting's first word leaves the call silent. Small fix.
 

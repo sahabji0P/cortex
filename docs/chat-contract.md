@@ -6,12 +6,11 @@ built to it and so is the app. Change it here first.
 
 The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
 
-## What stays as it is
+## Plain HTTP
 
-- Gems: `/v1/gems`, over plain HTTP.
-- The old call socket, `/v1/voice/converse`, opened per call. It works exactly as it did,
-  with the same query, frames and close codes, until the app has moved its calls onto
-  the standing socket. Then it will be removed.
+- Gems: `/v1/gems`, and a gem's written conversation, `GET /v1/gems/{gem_id}/chat`.
+- The Darbar text: `/v1/darbar`.
+- The models a call can be held with: `GET /v1/voice/models`.
 
 Plain HTTP is for saving and loading things. The standing socket is for what is live.
 
@@ -88,9 +87,9 @@ text frames like the rest.
 
 | Frame | Fields | Meaning |
 | --- | --- | --- |
-| `call.start` (JSON) | `gem` (optional gem id), `model` (optional, a name from `GET /v1/voice/models`), `first` (optional, `user` or `assistant`) | Open a call. The three fields mean exactly what `?gem=`, `?model=` and `?first=` mean on the old socket, including that a `model` or `first` that is sent wins over the gem's and one left out leaves the gem's |
-| binary | raw 16-bit mono PCM at 16 kHz, about 100 ms a frame | Mic audio for the open call. Audio sent after `call.start` and before `call.ready` is kept and fed in order once the call is open: none is lost. A binary frame when no call is open or opening is dropped without an answer |
-| `call.playback` (JSON) | `delay` (seconds, >= 0) | The sound device's delay, as `playback` on the old socket |
+| `call.start` (JSON) | `gem` (optional gem id), `model` (optional, a name from `GET /v1/voice/models`), `first` (optional, `user` or `assistant`) | Open a call. With `gem`, the call is with that gem: its config says who answers, with which model and tools, and whether it greets the user. Without one, the call is with Cortex. `model` is the model for this call, and `first: "assistant"` has the call open with a greeting, `"user"` has it wait for the user to speak. A `model` or `first` that is sent wins over the gem's; one left out, or sent as null, leaves the gem's. Without a gem, those are the configured model and the user |
+| binary | raw 16-bit mono PCM at 16 kHz, about 100 ms a frame | Mic audio for the open call (see [Audio](#audio)). Audio sent after `call.start` and before `call.ready` is kept and fed in order once the call is open: none is lost. A binary frame when no call is open or opening is dropped without an answer |
+| `call.playback` (JSON) | `delay` (seconds, >= 0) | How long the sound device holds audio before it is heard (see [Audio](#audio)) |
 | `call.end` (JSON) | none | Hang up |
 
 ### The backend sends
@@ -98,14 +97,20 @@ text frames like the rest.
 | Frame | Fields | Meaning |
 | --- | --- | --- |
 | `call.ready` (JSON) | none | The call is open |
-| binary | raw 16-bit mono PCM at 24 kHz | Speech audio of the open call |
-| `call.user.partial`, `call.user.final`, `call.assistant.delta`, `call.assistant.done`, `call.tool.call`, `call.interrupt`, `call.error` (JSON) | `text` | Each is a `VoiceEvent` with `call.` put before its type; `text` is unchanged. `call.error` is something that failed inside a call that carries on, as `error` was |
+| binary | raw 16-bit mono PCM at 24 kHz | Speech audio of the open call (see [Audio](#audio)) |
+| `call.user.partial` (JSON) | `text` | The user's words so far, while they are still speaking |
+| `call.user.final` (JSON) | `text` | The user's finished sentence. A reply follows |
+| `call.assistant.delta` (JSON) | `text` | The next piece of the reply's text |
+| `call.assistant.done` (JSON) | `text` | All of the reply's audio has been sent. `text` is the whole reply |
+| `call.tool.call` (JSON) | `text` | A web search has started. `text` is what it looks up |
+| `call.interrupt` (JSON) | `text` | The user started speaking: stop playback and drop the speech not yet played. If that cut a reply short, `text` is what the gem remembers of it, the words heard ending in "…" (just "…" if none were); otherwise it is empty |
+| `call.error` (JSON) | `text` | Something failed inside a call that carries on. `text` says what |
 | `call.ended` (JSON) | `text` | The call is over: the app hung up, or the conversation ended by itself. `text` is empty |
-| `call.refused` (JSON) | `text` (the reason) | The call was not opened because of what was asked. This replaces close code 1008: unknown gem, an id that is not an id, a model or setting that is not offered, a model whose provider has no key. Same reasons in words as today |
-| `call.failed` (JSON) | `text` (the reason) | The call could not be opened, or broke, through a fault on the backend's side. This replaces close code 1011: the gem's config or the Darbar text cannot be read, speech services unavailable, a failure mid-call, or mic audio that is not being taken (see the rules) |
+| `call.refused` (JSON) | `text` (the reason) | The call was not opened because of what was asked: a gem that is not there or an id that is not an id ("unknown gem"), a model or setting that is not offered ("unknown model or setting"), or a model whose provider has no key (as "no Anthropic key is set, so Haiku 5.5 cannot be used") |
+| `call.failed` (JSON) | `text` (the reason) | The call could not be opened, or broke, through a fault on the backend's side: the gem's config or the Darbar text cannot be read, speech services are unavailable, a failure mid-call, or mic audio that is not being taken (see the rules). `text` says which, in words |
 
-What each event means is in the README, under the old socket's contract. On
-`call.interrupt`, stop playback and drop any audio not yet played.
+The events from `call.user.partial` to `call.error` are the conversation's
+`VoiceEvent`s (`app/entities/voice_ent.py`) with `call.` put before their type.
 
 ### Rules
 
@@ -131,7 +136,7 @@ What each event means is in the README, under the old socket's contract. On
 - The link closing ends its call, as it cuts its chat replies.
 - Mic audio is fed into the call in the order it came. If speech recognition stops
   taking it and about half a minute of it is waiting, the call is failed with
-  `call.failed`. The old socket made the app wait instead.
+  `call.failed`.
 - A client that stops reading its frames for ten seconds counts as gone: the socket is
   closed on it, which ends its call and cuts its replies.
 - Calls changed nothing about chat frames (`chat.send` and the `chat.*` frames back).
@@ -139,6 +144,39 @@ What each event means is in the README, under the old socket's contract. On
 A `call.start` whose `model` or `first` is not offered gets `call.refused` with "unknown
 model or setting", not `error`. A `call.playback` that cannot be read, such as one with a
 negative delay, gets `error`.
+
+### Audio
+
+The backend works out how much of a reply the user heard from its own copy of the app's
+playback schedule. That copy is right only if the app plays speech by these rules, so
+they are part of the contract, not advice.
+
+1. **Mic.** Raw 16-bit little-endian mono PCM at 16 kHz, in frames of about 100 ms
+   (1,600 samples).
+2. **Speech.** Raw 16-bit little-endian mono PCM at 24 kHz. Play the frames back to
+   back, in the order they came, with no gap between them. A frame may end half-way
+   through a sample: keep the odd byte and put it before the next frame.
+3. **When speech starts.** Each frame starts at the later of two moments: the end of the
+   speech queued before it, and 50 ms after it arrives. So a frame that arrives while
+   nothing is queued starts 50 ms after it arrives. The backend allows 0.15 s from
+   sending a frame to its start, the trip included: a longer lead-in makes it count
+   words the user has not heard yet.
+4. **On `call.interrupt`,** stop playback at once and drop everything queued and not yet
+   played, the odd byte too. The next frame that arrives starts by rule 3.
+5. **`call.playback`** reports how long the sound device itself holds audio before it is
+   heard (in a browser, `AudioContext.outputLatency + baseLatency`): a few hundredths of
+   a second on speakers, a few tenths on Bluetooth. The 50 ms of rule 3 is not part of
+   it. It belongs to one call: send it for each call, once it is known (at `call.ready`
+   at the latest), and again whenever it changes. One sent while the call opens is kept
+   for it. A call that is told none counts the delay as nothing. The backend takes at
+   most 1 second of it.
+6. **Echo.** Cancel echo on the app's side. Without it the mic hears the gem's own
+   speech as the user talking, and the gem interrupts itself.
+
+After the app hangs up, frames of that call, audio included, may still arrive until its
+last frame. Drop them all, up to and including that last frame, so the end of one call
+never plays into the next. Count the hang-ups whose last frame has not come yet: a call
+started right after a hang-up gets its frames only after the first call's last frame.
 
 ## What a gem remembers of a chat
 

@@ -45,15 +45,16 @@ mic ─▶ speech to text ─▶ conversation ─▶ model ─▶ text to speech
                               └─────── what was heard ─────┘
 ```
 
-- **One conversation per call.** (Enforced) It lives in memory for as long as the
-  WebSocket is open. Nothing is saved, and nothing is loaded when a call starts.
+- **One conversation per call.** (Enforced) It lives in memory for as long as the call
+  lasts. Nothing is saved, and nothing is loaded when a call starts.
 - **Six models.** (Enforced) 6 Luna (the default), 6.1 Terra and 6.1 Sol from OpenAI;
   Haiku 5.5, Sonnet 5.5 and Opus 5.5 from Anthropic. The model is chosen when the call
   opens and does not change during it.
 - **Two tools, when a search key is set.** (Enforced) `web_search` and
   `cancel_tool_call`. Without a search key the model has no tools.
-- **Who speaks first.** (Enforced) The user, unless the call is opened with
-  `first=assistant`. Then the history starts with a note asking for a greeting.
+- **Who speaks first.** (Enforced) The user, unless the call's gem speaks first or
+  `call.start` asks for `first: "assistant"`. Then the history starts with a note asking
+  for a greeting.
 
 ## Input path
 
@@ -286,7 +287,7 @@ Everything in the history that neither the user nor the model wrote (all Enforce
 
 | What | Shape | When | Text |
 | --- | --- | --- | --- |
-| Greeting note | Note, first item | The call opens with `first=assistant` | "The call has just connected and the user has not said anything yet. Greet them in one short sentence and ask what you can do for them." |
+| Greeting note | Note, first item | The call opens with the assistant speaking first | "The call has just connected and the user has not said anything yet. Greet them in one short sentence and ask what you can do for them." |
 | Cut mark | The end of a reply's text | A reply was cut part-way | "…" |
 | No-words note | Note, after the cut reply | A turn with no words cut a reply the user was hearing | "The user made a sound there, with no words in it." |
 | Placeholder result | The result of the model's own call | A search was still running when the user spoke | "Still running in the background, under call_id {call_id}. [...]" |
@@ -333,6 +334,8 @@ A fourth, added on 16 November 2026:
 - `app/entities/voice_ent.py`: the conversation, the history, interruption, late results.
 - `app/entities/voice_speech.py`: speaking, and working out what was heard.
 - `app/entities/model.py`: the two providers behind one interface.
-- `app/routers/voice/`: the WebSocket, the model list and the test page.
+- `app/entities/call_ent.py`: opening a call.
+- `app/routers/link/`: the standing socket, which carries the call.
+- `app/routers/voice/`: the model list.
 - `tests/test_voice_conversation.py` and `tests/test_model.py`: the tests for what
   goes into the history and how it is sent to each provider.

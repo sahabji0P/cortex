@@ -20,7 +20,7 @@ async def link(websocket: WebSocket, service: LinkServiceRegistry.V1) -> None:
     message to that gem.
 
     A call, one at a time: send `{"type": "call.start"}` with optional `gem`, `model`
-    and `first`, as on `/v1/voice/converse`. Send mic audio as binary frames (raw 16-bit
+    and `first`. Send mic audio as binary frames (raw 16-bit
     mono PCM at 16 kHz, about 100 ms each), `{"type": "call.playback", "delay": seconds}`
     for the sound device's delay, and `{"type": "call.end"}` to hang up. The call comes
     as `call.ready`, then speech as binary frames (raw 16-bit mono PCM at 24 kHz) and the

@@ -23,9 +23,8 @@ _SEND_SECONDS = 10.0
 _CALL_ALREADY_OPEN = "a call is already open"
 
 # How many frames of mic audio may wait to be fed into a call: about half a minute. The
-# old call socket made the client wait when speech recognition took no audio. Here the
-# socket is read whatever the call does, so audio that is not taken piles up instead, and
-# a call that far behind is of no use: it is failed.
+# socket is read whatever the call does, so audio that speech recognition does not take
+# piles up, and a call that far behind is of no use: it is failed.
 _MIC_FRAMES_WAITING = 300
 
 _log = logging.getLogger(__name__)
@@ -135,8 +134,8 @@ class LinkServiceV1Class:
                     try:
                         start = LinkModels.V1.Input.CallStart.model_validate_json(text)
                     except ValidationError:
-                        # A refusal, not an unreadable frame: as the old call socket's
-                        # 1008, this is a model or a setting that is not offered.
+                        # A refusal, not an unreadable frame: this is a model or a
+                        # setting that is not offered.
                         start = None
                     # A call that is ending sends its last frame before this one's first.
                     call = _Call(self.call, start, send, send_audio, after=call)

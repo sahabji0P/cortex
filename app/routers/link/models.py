@@ -37,18 +37,20 @@ class LinkModels:
             class CallStart(BaseModel):
                 """Open a call. Anything else in the frame is ignored.
 
-                The fields mean what `?gem=`, `?model=` and `?first=` mean on the old call
-                socket. A `model` or `first` that is sent wins over the gem's for this
-                call; one left out, or sent as null, leaves the gem's.
+                `gem` is the id of the gem to talk to; without one the call is with
+                Cortex. `model` is a name from `GET /v1/voice/models`, and `first` says
+                who says the first words. A `model` or `first` that is sent wins over the
+                gem's for this call; one left out, or sent as null, leaves the gem's.
+                Without a gem they are the configured model and the user.
                 """
 
                 type: Literal["call.start"]
-                gem: str | None = None  # the gem's id; without one the call is with Cortex
+                gem: str | None = None
                 model: ModelName | None = None
                 first: Literal["user", "assistant"] | None = None
 
             class CallPlayback(BaseModel):
-                """How long the app's sound device delays audio, as on the old call socket.
+                """How long the app's sound device delays audio before it is heard.
 
                 It lets the backend work out what the user has really heard when they
                 interrupt.
