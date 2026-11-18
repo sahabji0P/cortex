@@ -39,7 +39,8 @@ class CartesiaTTSWord(NamedTuple):
     """One word of an utterance, as Cartesia timed it."""
 
     text: str
-    end: float  # seconds from the start of the utterance's audio
+    start: float  # seconds from the start of the utterance's audio
+    end: float  # the same, for where the word ends
 
 
 class _Types:
@@ -87,8 +88,10 @@ class CartesiaTTSContext:
             elif event.type == "timestamps":
                 if timings := event.word_timestamps:
                     yield [
-                        CartesiaTTSWord(text, end)
-                        for text, end in zip(timings.words, timings.end, strict=True)
+                        CartesiaTTSWord(text, start, end)
+                        for text, start, end in zip(
+                            timings.words, timings.start, timings.end, strict=True
+                        )
                     ]
             elif event.type == "error":
                 raise RuntimeError(f"Cartesia speech synthesis failed: {event.error}")

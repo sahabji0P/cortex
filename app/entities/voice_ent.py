@@ -112,7 +112,9 @@ class VoiceEvent(BaseModel):
 
     - `user.partial`    the user's words so far, while they are still speaking
     - `user.final`      the user's finished sentence; a reply follows
-    - `assistant.delta` the next piece of the reply's text
+    - `assistant.word`  the next word of the reply, as it is spoken. `start` is the
+                        sample it begins at in the call's speech audio (24 kHz, counted
+                        over all the speech sent since the call opened)
     - `assistant.done`  the reply's audio has all been sent (full text in `text`)
     - `tool.call`       the assistant is searching the web (query in `text`)
     - `interrupt`       the user started speaking: stop playback and drop queued audio.
@@ -124,13 +126,15 @@ class VoiceEvent(BaseModel):
     type: Literal[
         "user.partial",
         "user.final",
-        "assistant.delta",
+        "assistant.word",
         "assistant.done",
         "tool.call",
         "interrupt",
         "error",
     ]
     text: str = ""
+    # Only an `assistant.word` has one.
+    start: int | None = None
 
 
 class _Reply(Reply):
@@ -434,7 +438,13 @@ class VoiceConversation:
 
     async def _respond(self, *, brings_results: bool = False) -> None:
         """Produce one reply: model rounds (with searches in between), spoken as they stream."""
-        speech = Speech(self._tts, self._out.put_nowait, self._playback, self._standby.take())
+        speech = Speech(
+            self._tts,
+            self._out.put_nowait,
+            self._playback,
+            self._standby.take(),
+            word=self._show_word,
+        )
         reply = _Reply(speech, brings_results=brings_results)
         self._reply = reply
         try:
@@ -444,7 +454,9 @@ class VoiceConversation:
                 self._tools,
                 instructions=self._instructions,
                 next_round=self._next_round,
-                said=lambda text: self._emit("assistant.delta", text),
+                # The client is not shown the model's text, which runs well ahead of
+                # the audio. It is sent each word as it is spoken (see `_show_word`).
+                said=lambda text: None,
                 show=self._show_call,
             )
         except Exception as exc:
@@ -476,6 +488,10 @@ class VoiceConversation:
             self.added.append(one)
         if added:
             self.grew.set()
+
+    def _show_word(self, text: str, start: int) -> None:
+        """Send the client one word of the reply, and where it starts in the call's audio."""
+        self._out.put_nowait(VoiceEvent(type="assistant.word", text=text, start=start))
 
     def _show_call(self, text: str) -> None:
         """Tell the client what a tool call is doing, such as what a search looks up."""

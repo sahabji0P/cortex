@@ -543,7 +543,7 @@ async def test_interrupting_an_anthropic_model_closes_its_stream_and_keeps_what_
     conversation, stt, clock = _conversation(llm)
 
     stt.say("tell me a story")
-    await _read_until(conversation, "assistant.delta")
+    await _read_until(conversation, "assistant.word")
     await asyncio.sleep(0.01)
     clock.advance(_DELAY + 2.5)  # each word takes a second: two of the four were heard
     stt.say("stop")

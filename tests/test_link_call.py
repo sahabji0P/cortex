@@ -275,7 +275,7 @@ async def test_a_call_carries_audio_and_events_both_ways_and_ends_on_call_end() 
     socket.mic(b"\x03\x04")
     conversation.out.put_nowait(_event("user.final", "hello"))
     conversation.out.put_nowait(b"\x05\x06")
-    conversation.out.put_nowait(_event("assistant.delta", "Hi."))
+    conversation.out.put_nowait(VoiceEvent(type="assistant.word", text="Hi.", start=4800))
     conversation.out.put_nowait(b"\x07\x08")
     conversation.out.put_nowait(_event("assistant.done", "Hi."))
     await socket.until("call.assistant.done")
@@ -285,11 +285,11 @@ async def test_a_call_carries_audio_and_events_both_ways_and_ends_on_call_end() 
 
     assert conversation.audio == [b"\x01\x02", b"\x03\x04"]
     assert socket.frames == [
-        {"type": "link.ready", "version": 3},
+        {"type": "link.ready", "version": 4},
         {"type": "call.ready"},
         {"type": "call.user.final", "text": "hello"},
         b"\x05\x06",
-        {"type": "call.assistant.delta", "text": "Hi."},
+        {"type": "call.assistant.word", "text": "Hi.", "start": 4800},
         b"\x07\x08",
         {"type": "call.assistant.done", "text": "Hi."},
         {"type": "call.ended", "text": ""},
@@ -300,12 +300,23 @@ async def test_a_call_carries_audio_and_events_both_ways_and_ends_on_call_end() 
     assert conversation.closed == 1
 
 
+async def test_a_word_goes_out_with_where_it_starts_in_the_calls_audio() -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup)
+
+    setup.voice.made[0].out.put_nowait(VoiceEvent(type="assistant.word", text="Hi.", start=0))
+    await socket.until("call.assistant.word")
+
+    # A start of nought is sent as such: it is a place in the audio, not a missing one.
+    assert socket.frames[-1] == {"type": "call.assistant.word", "text": "Hi.", "start": 0}
+    await _close(socket, linked)
+
+
 @pytest.mark.parametrize(
     "type_",
     [
         "user.partial",
         "user.final",
-        "assistant.delta",
         "assistant.done",
         "tool.call",
         "interrupt",

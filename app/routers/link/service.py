@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 from app.entities import EntitiesRegistry
 from app.entities.call_ent import CallEntityClass, CallFault, CallRefused, OpenCall
 from app.entities.chat_ent import ChatEntityClass, ChatTurn
+from app.entities.voice_ent import VoiceEvent
 from app.routers.link.models import LinkModels
 
 # How long one frame may take to be taken by the client before the client counts as gone.
@@ -363,13 +364,7 @@ class _Call:
     async def _forward(self, conversation: OpenCall) -> None:
         """Send the conversation's speech and events, in order, until it ends."""
         async for output in conversation.outputs():
-            await self._out(
-                output
-                if isinstance(output, bytes)
-                else LinkModels.V1.Output.CallEvent.model_validate(
-                    {"type": f"call.{output.type}", "text": output.text}
-                )
-            )
+            await self._out(_frame(output))
 
     async def _out(self, frame: BaseModel | bytes) -> None:
         """Send one frame of the call. A failure to send is the client's, not a fault."""
@@ -380,6 +375,19 @@ class _Call:
                 await self._send(frame)
         except Exception as exc:
             raise _ClientGone(str(exc)) from exc
+
+
+def _frame(output: VoiceEvent | bytes) -> BaseModel | bytes:
+    """What goes on the link for one of a call's outputs."""
+    if isinstance(output, bytes):
+        return output
+    if output.type == "assistant.word":
+        return LinkModels.V1.Output.CallWord.model_validate(
+            {"text": output.text, "start": output.start}
+        )
+    return LinkModels.V1.Output.CallEvent.model_validate(
+        {"type": f"call.{output.type}", "text": output.text}
+    )
 
 
 def _reason(exc: ValidationError) -> str:

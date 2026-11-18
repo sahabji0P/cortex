@@ -470,7 +470,7 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
 
-    assert socket.frames[0] == {"type": "link.ready", "version": 3}
+    assert socket.frames[0] == {"type": "link.ready", "version": 4}
     assert socket.frames[1:] == [
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "Hi "},
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "there."},
