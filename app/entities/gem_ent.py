@@ -1,0 +1,219 @@
+"""
+A gem's config: one object that says who a gem is, kept in the `Gems` collection.
+
+It is stored in the database but treated like a config file. It holds only what a call
+can honour today. Anything new is added by raising `GEM_CONFIG_VERSION` and writing one
+step in `upgrade_gem_document` that brings older documents up to the new shape.
+
+A call does not read this yet. The voice WebSocket still takes `?model=` and `?first=`.
+"""
+
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
+from typing import Annotated, Any, ClassVar, cast
+
+from bson import ObjectId
+from bson.errors import InvalidId
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic_mongo import PydanticObjectId
+
+from app.adapters.docdb_adp import DocDBAdapterClass
+from app.core.errors import NotFoundError
+
+# The one place the model names are imported. Everything else uses `GemModelName`.
+from app.entities.model import ModelName
+
+__all__ = [
+    "DEFAULT_GEM_TOOLS",
+    "GEM_CONFIG_VERSION",
+    "GemConfig",
+    "GemEntityClass",
+    "GemInstructions",
+    "GemModelName",
+    "GemName",
+    "GemTools",
+    "GemVersionError",
+    "upgrade_gem_document",
+]
+
+# The version of the config's shape. Raise it when a field is added, renamed or changed.
+GEM_CONFIG_VERSION = 1
+
+# The models a gem can be answered by: the same names a call accepts.
+type GemModelName = ModelName
+
+# The tools a new gem may use. Web search is the only tool there is today.
+DEFAULT_GEM_TOOLS: tuple[str, ...] = ("web_search",)
+
+_NAME_MAX_LENGTH = 100
+# Long enough for a detailed brief. A limit keeps a stray paste out of every request.
+_INSTRUCTIONS_MAX_LENGTH = 20_000
+_TOOL_NAME_MAX_LENGTH = 64
+_TOOLS_MAX = 32
+
+
+def _check_name(value: str) -> str:
+    if not (name := value.strip()):
+        raise ValueError("A gem's name cannot be blank")
+    if len(name) > _NAME_MAX_LENGTH:
+        raise ValueError(f"A gem's name is at most {_NAME_MAX_LENGTH} characters")
+    return name
+
+
+def _check_tools(value: list[str]) -> list[str]:
+    names = [name.strip() for name in value]
+    if any(not name for name in names):
+        raise ValueError("A tool's name cannot be blank")
+    # Refused rather than quietly dropped, so a client never sends one list and
+    # gets back another.
+    if len(set(names)) != len(names):
+        raise ValueError("A tool is named more than once")
+    return names
+
+
+# The rules for each field, shared by the stored config and the routes' input.
+type GemName = Annotated[str, AfterValidator(_check_name)]
+type GemInstructions = Annotated[str, Field(max_length=_INSTRUCTIONS_MAX_LENGTH)]
+type GemTools = Annotated[
+    list[Annotated[str, Field(max_length=_TOOL_NAME_MAX_LENGTH)]],
+    Field(max_length=_TOOLS_MAX),
+    AfterValidator(_check_tools),
+]
+
+
+class GemVersionError(ValueError):
+    """A stored config is in a shape this code cannot read."""
+
+
+# One step per version: the step under key N takes a document from version N to N + 1.
+# When version 2 exists, its step goes here as `1: _version_1_to_2`.
+_UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+
+
+def upgrade_gem_document(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a stored config in the current shape, or refuse one from newer code.
+
+    A document without a version is read as version 1. Version 1 is the first shape,
+    so there is nothing older it could be, and a config written by hand need not
+    name it.
+    """
+    upgraded = dict(document)
+    version = upgraded.get("version", 1)
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise GemVersionError(f"A gem's config has no valid version: {version!r}")
+    if version > GEM_CONFIG_VERSION:
+        raise GemVersionError(
+            f"A gem's config is version {version}, but this code knows only up to "
+            f"version {GEM_CONFIG_VERSION}. It was written by a newer cortex."
+        )
+    while version < GEM_CONFIG_VERSION:
+        upgraded = _UPGRADES[version](upgraded)
+        version += 1
+    upgraded["version"] = version
+    return upgraded
+
+
+class GemConfig(BaseModel):
+    """Everything that makes a gem who it is, in the shape `GEM_CONFIG_VERSION` names."""
+
+    __collection_name__: ClassVar[str] = "Gems"
+
+    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
+
+    id: PydanticObjectId = Field(default_factory=ObjectId, alias="_id")
+    version: int = GEM_CONFIG_VERSION
+    name: GemName
+    # Who this gem is and how it behaves, in plain words.
+    instructions: GemInstructions = ""
+    # The model that answers. None means the configured default.
+    model: GemModelName | None = None
+    # Whether the gem greets the user when a call connects.
+    speaks_first: bool = False
+    # The tools this gem may use, by name.
+    tools: GemTools = Field(default_factory=lambda: list(DEFAULT_GEM_TOOLS))
+    created_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade(cls, data: Any) -> Any:
+        # Every read from the database comes through here, so every stored config is
+        # brought to the current shape before its fields are checked.
+        if isinstance(data, Mapping):
+            return upgrade_gem_document(cast("Mapping[str, Any]", data))
+        return data
+
+
+# The fields a client may change. Everything else is the store's to keep.
+_EDITABLE = frozenset({"name", "instructions", "model", "speaks_first", "tools"})
+
+
+def _gem_id(value: str) -> PydanticObjectId:
+    try:
+        return ObjectId(value)
+    except (InvalidId, TypeError) as err:
+        raise NotFoundError("Gem") from err
+
+
+class GemEntityClass:
+    """Create, read, change and delete gems' configs."""
+
+    def __init__(self, docdb: DocDBAdapterClass) -> None:
+        self._docdb = docdb
+
+    async def create(
+        self,
+        *,
+        name: str,
+        instructions: str = "",
+        model: GemModelName | None = None,
+        speaks_first: bool = False,
+        tools: list[str] | None = None,
+    ) -> GemConfig:
+        now = datetime.now(UTC)
+        gem = GemConfig.model_validate(
+            {
+                "name": name,
+                "instructions": instructions,
+                "model": model,
+                "speaks_first": speaks_first,
+                "tools": list(DEFAULT_GEM_TOOLS) if tools is None else tools,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        return await self._docdb.insert(gem)
+
+    async def list_all(self) -> list[GemConfig]:
+        """Every gem, the one changed most recently first."""
+        return await self._docdb.get_many(GemConfig, filters={}, sort=[("updated_at", -1)])
+
+    async def get(self, gem_id: str) -> GemConfig:
+        gem = await self._docdb.get(GemConfig, filters={"id": _gem_id(gem_id)})
+        if gem is None:
+            raise NotFoundError("Gem")
+        return gem
+
+    async def update(self, gem_id: str, changes: Mapping[str, Any]) -> GemConfig:
+        """Change only the fields given. `updated_at` moves even when nothing else does."""
+        if unknown := set(changes) - _EDITABLE:
+            raise ValueError(f"These fields of a gem cannot be changed: {sorted(unknown)}")
+        current = await self.get(gem_id)
+        # Checked as a whole, so a change can never leave a config that would not load.
+        updated = GemConfig.model_validate(
+            {
+                **current.model_dump(by_alias=True),
+                **changes,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        # The whole config is written, not just the changed fields. A config read in an
+        # older shape is then stored in the current one, never half of each.
+        document = updated.model_dump(by_alias=True, exclude={"id"})
+        if await self._docdb.update(GemConfig, {"id": updated.id}, document) == 0:
+            raise NotFoundError("Gem")
+        return updated
+
+    async def delete(self, gem_id: str) -> None:
+        if await self._docdb.delete(GemConfig, {"id": _gem_id(gem_id)}) == 0:
+            raise NotFoundError("Gem")

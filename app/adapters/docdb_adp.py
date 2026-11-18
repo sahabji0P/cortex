@@ -88,6 +88,13 @@ class DocDBAdapterClass:
         # so callers can keep treating 0 as "not found".
         return result.matched_count or (1 if result.upserted_id is not None else 0)
 
+    async def delete(self, collection: type[_T], filters: MutableMapping[str, Any]) -> int:
+        """Delete the first document that matches. Returns 1, or 0 when none did."""
+        result = await self.db.get_collection(_collection_name(collection)).delete_one(
+            _translate_id(filters)
+        )
+        return result.deleted_count
+
     async def delete_many(self, collection: type[_T], filters: MutableMapping[str, Any]) -> int:
         result = await self.db.get_collection(_collection_name(collection)).delete_many(
             _translate_id(filters)
