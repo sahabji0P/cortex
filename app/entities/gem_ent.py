@@ -21,7 +21,7 @@ from app.adapters.docdb_adp import DocDBAdapterClass
 from app.core.errors import NotFoundError
 
 # The one place the model names are imported. Everything else uses `GemModelName`.
-from app.entities.model import ModelName
+from app.entities.model import MODELS, ModelName
 from app.entities.tools import GEM_TOOL_NAMES
 
 __all__ = [
@@ -43,6 +43,7 @@ GEM_CONFIG_VERSION = 1
 
 # The models a gem can be answered by: the same names a call accepts.
 type GemModelName = ModelName
+_MODEL_NAMES = frozenset(info.name for info in MODELS)
 
 # The tools a new gem may use, when it is not told which.
 DEFAULT_GEM_TOOLS: tuple[str, ...] = ("web_search",)
@@ -94,6 +95,9 @@ type GemTools = Annotated[
 # names a tool which has since gone must still load: that tool is just not offered.
 type GemToolsToSave = Annotated[GemTools, AfterValidator(_check_known_tools)]
 _TOOLS_TO_SAVE: TypeAdapter[list[str]] = TypeAdapter(GemToolsToSave)
+# The same for the model: a name that is not offered is refused when a gem is made or
+# changed. One already stored is read as no model at all (see `GemConfig._upgrade`).
+_MODEL_TO_SAVE: TypeAdapter[GemModelName | None] = TypeAdapter(GemModelName | None)
 
 
 class GemVersionError(ValueError):
@@ -154,9 +158,15 @@ class GemConfig(BaseModel):
     def _upgrade(cls, data: Any) -> Any:
         # Every read from the database comes through here, so every stored config is
         # brought to the current shape before its fields are checked.
-        if isinstance(data, Mapping):
-            return upgrade_gem_document(cast("Mapping[str, Any]", data))
-        return data
+        if not isinstance(data, Mapping):
+            return data
+        document = upgrade_gem_document(cast("Mapping[str, Any]", data))
+        # A model that is no longer offered means the configured default, as a missing
+        # one does. Otherwise one gem saved before a model went would fail to load, and
+        # with it the whole list of gems.
+        if document.get("model") not in _MODEL_NAMES:
+            document["model"] = None
+        return document
 
 
 # The fields a client may change. Everything else is the store's to keep.
@@ -190,7 +200,7 @@ class GemEntityClass:
             {
                 "name": name,
                 "instructions": instructions,
-                "model": model,
+                "model": _MODEL_TO_SAVE.validate_python(model),
                 "speaks_first": speaks_first,
                 "tools": _TOOLS_TO_SAVE.validate_python(
                     list(DEFAULT_GEM_TOOLS) if tools is None else tools
@@ -217,6 +227,8 @@ class GemEntityClass:
             raise ValueError(f"These fields of a gem cannot be changed: {sorted(unknown)}")
         if "tools" in changes:
             changes = {**changes, "tools": _TOOLS_TO_SAVE.validate_python(changes["tools"])}
+        if "model" in changes:
+            changes = {**changes, "model": _MODEL_TO_SAVE.validate_python(changes["model"])}
         current = await self.get(gem_id)
         # Checked as a whole, so a change can never leave a config that would not load.
         updated = GemConfig.model_validate(
