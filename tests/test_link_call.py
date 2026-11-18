@@ -285,7 +285,7 @@ async def test_a_call_carries_audio_and_events_both_ways_and_ends_on_call_end() 
 
     assert conversation.audio == [b"\x01\x02", b"\x03\x04"]
     assert socket.frames == [
-        {"type": "link.ready", "version": 4},
+        {"type": "link.ready", "version": 5},
         {"type": "call.ready"},
         {"type": "call.user.final", "text": "hello"},
         b"\x05\x06",

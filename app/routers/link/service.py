@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 from app.entities import EntitiesRegistry
 from app.entities.call_ent import CallEntityClass, CallFault, CallRefused, OpenCall
 from app.entities.chat_ent import ChatEntityClass, ChatTurn
+from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.voice_ent import VoiceEvent
 from app.routers.link.models import LinkModels
 
@@ -35,11 +36,18 @@ type _SendAudio = Callable[[bytes], Awaitable[None]]
 
 class LinkServiceV1Class:
     def __init__(
-        self, chat: ChatEntityClass | None = None, call: CallEntityClass | None = None
+        self,
+        chat: ChatEntityClass | None = None,
+        call: CallEntityClass | None = None,
+        connections: ConnectionEntityClass | None = None,
     ) -> None:
         # Tests hand in their own. The app uses the ones the registry made at startup.
         self.chat = EntitiesRegistry.Chat if chat is None else chat
         self.call = EntitiesRegistry.Call if call is None else call
+        # Tests that hand in their own chat and call and no connections are told of none.
+        self.connections = (
+            EntitiesRegistry.Connections if chat is None and connections is None else connections
+        )
 
     async def link(self, websocket: WebSocket) -> None:
         """Serve one standing socket until the client drops it.
@@ -53,6 +61,8 @@ class LinkServiceV1Class:
 
         This loop never waits on a reply or a call, so chat is read while a call opens
         and while its audio is fed in.
+
+        Every socket is told when a connection's sign-in changes (`connection.changed`).
         """
         await websocket.accept()
         # Replies and a call write to the socket at once, one frame at a time, so the
@@ -96,8 +106,13 @@ class LinkServiceV1Class:
         def busy() -> bool:
             return call is not None and not call.ending
 
+        async def connection_changed(connection_id: str) -> None:
+            await send(LinkModels.V1.Output.ConnectionChanged(id=connection_id))
+
         try:
             await send(LinkModels.V1.Output.Ready())
+            if self.connections is not None:
+                self.connections.listen(connection_changed)
             while True:
                 message = await websocket.receive()
                 if gone or message["type"] == "websocket.disconnect":
@@ -154,6 +169,8 @@ class LinkServiceV1Class:
                 else:
                     await send(LinkModels.V1.Output.Error(text=f"unknown frame type: {kind}"))
         finally:
+            if self.connections is not None:
+                self.connections.ignore(connection_changed)
             for turn in turns:
                 turn.cut()
             # A reply nobody asked for, about a late search result, is in no list of
