@@ -103,7 +103,7 @@ The history holds what the user heard, not what the model wrote.
 In this order (all Enforced):
 
 1. Audio stops being sent, and the last word heard is worked out.
-2. A search that is still running is left running. Its call gets a placeholder result.
+2. A tool call that is still running is left running. Its call gets a placeholder result.
 3. The reply is stored as it was heard.
 4. The model call and the speech are cancelled. The client is sent an `interrupt` event
    and drops the audio it has queued.
@@ -114,9 +114,9 @@ In this order (all Enforced):
 
 1. A stray fragment is dropped. If no words are left, see
    [A turn with no words](#a-turn-with-no-words).
-2. If more than 6 search results are in the history in full, all but the newest 2 are
-   replaced by a marker.
-3. The words join the open turn, and the model is called.
+2. The words join the open turn, and the model is called.
+
+Nothing is cleared: every search result stays in the history whole, as it does in chat.
 
 What the model then does with the interruption is Instructed:
 
@@ -144,13 +144,14 @@ Instructed.
 
 ## Tool calls under interruption
 
-An interruption does not stop a search, and the history always stays a valid chain of
-calls and results (all Enforced).
+An interruption does not stop a tool call, and the history always stays a valid chain of
+calls and results (all Enforced). This is the same in a call and in chat, and the same
+code does it (`app/entities/late_results.py`).
 
 | Case | What the model sees |
 | --- | --- |
 | The result comes back before the user speaks | The call and its result, then the model's answer as far as it was heard, then the user's turn |
-| The user speaks while the search is running | The call gets a placeholder result, written by the server. The user's turn follows. The search carries on |
+| The user speaks while the search is running | The call gets a placeholder result, written by the server. The user's turn follows. The call carries on |
 | The late result arrives | At the next quiet moment: a call written by the server that names the original call, then the real result. The model then replies with no user turn before it |
 | The model is asked to drop it | It calls `cancel_tool_call` with the original call's id. The result is "Cancelled." |
 
@@ -160,11 +161,12 @@ calls and results (all Enforced).
   It has not failed. Only if the user says they no longer want this, stop it with
   cancel_tool_call and that call_id. Otherwise leave it alone: its result will reach you
   by itself, as a separate call with "deferred_result_for": "{call_id}". Until then, do
-  not search for this again, in any wording."
+  not make this call again, in any wording."
 - **The call written by the server** has a new id that starts with `late_`, the same
-  tool name, and the arguments `{"deferred_result_for": "<the original id>"}`. The
-  server keeps a table from these ids to the original ones, so a cancel that names
-  either id works.
+  tool name, and the arguments `{"deferred_result_for": "<the original id>"}`. A cancel
+  that names it finds nothing running: the result has already come.
+- **A cancel in the instant the call finishes** still drops the result. The model was
+  told "Cancelled.", so the result is never added.
 - **Any call still running** when the user speaks gets a placeholder, however short it
   is. One that finished in the instant before gets its real result.
 - **A reply may search as often as the model needs.** There is no cap on tool rounds.
@@ -232,10 +234,8 @@ instructions gain one line saying what the `<note>` tags mean.
 - **The history only grows at its end.** (Enforced) Each request starts with the whole
   of the one before it, so a prompt cache stays valid. The tests check this on every
   model call.
-- **Two things change after being sent.** (Enforced) The open user turn can gain a line.
-  And old search results are replaced by a marker, a whole batch at once, when the
-  user's turn ends. That second one breaks the cache on purpose, to keep the context
-  small. Only results the model has already been sent are replaced, never a placeholder.
+- **One thing changes after being sent.** (Enforced) The open user turn can gain a line.
+  Nothing else is ever rewritten: no result is cleared.
 - **The instructions and the tool list are the same for the whole call.** (Enforced) The
   date is the last line of the instructions, so everything before it is the same in
   every call with the same gem and Darbar text, on any day.
@@ -300,7 +300,7 @@ Nothing in the instructions says when to search. The tool descriptions do:
 ```text
 web_search: Search the web for current or factual information. Never call this for something a search is already running for: that result arrives by itself.
 
-cancel_tool_call: Stop a search that is still running in the background. Call this only when the user says they no longer want its result, and always call it then: nothing is cancelled unless this is called.
+cancel_tool_call: Stop a tool call that is still running in the background. Call this only when the user says they no longer want its result, and always call it then: nothing is cancelled unless this is called.
 ```
 
 ## What the server writes into the history
@@ -312,10 +312,9 @@ Everything in the history that neither the user nor the model wrote (all Enforce
 | Greeting note | Note, first item | The call opens with the assistant speaking first | "The call has just connected and the user has not said anything yet. Greet them in one short sentence and ask what you can do for them." |
 | Cut mark | The end of a reply's text | A reply was cut part-way | "…" |
 | No-words note | Note, after the cut reply | A turn with no words cut a reply the user was hearing | "The user made a sound there, with no words in it." |
-| Placeholder result | The result of the model's own call | A search was still running when the user spoke | "Still running in the background, under call_id {call_id}. [...]" |
-| Late result | A call written by the server, then its result | The search finished; added at the next quiet moment | `{"deferred_result_for": "<id>"}`, then the real result |
-| Cleared marker | Replaces the text of old results | More than 6 full results, when the user's turn ends | "[Cleared to save context. Search again if this is still needed.]" |
-| Cancel result | The result of `cancel_tool_call` | The model stops a background search | "Cancelled." |
+| Placeholder result | The result of the model's own call | A tool call was still running when the user spoke | "Still running in the background, under call_id {call_id}. [...]" |
+| Late result | A call written by the server, then its result | The call finished; added at the next quiet moment | `{"deferred_result_for": "<id>"}`, then the real result |
+| Cancel result | The result of `cancel_tool_call` | The model stops a background call | "Cancelled." |
 
 The server speaks nothing for the model.
 
@@ -343,8 +342,9 @@ A fourth, added on 16 November 2026:
   words before a wait, carrying on after a sound, and telling a late result after
   answering something else. If a model does not follow them, the user hears silence
   during a search, hears a sentence start over, or is never told a result.
-- **Some wording still names search.** The last search instruction and the placeholder
-  say "a search" and "do not search for this again". They will not fit a second tool.
+- **Some wording still names search.** The last search rule of the instructions says "a
+  search" and "do not search for the same thing again". It will not fit a second tool.
+  The placeholder and `cancel_tool_call` name no tool.
 - **A sound before the greeting's first word.** If a turn with no words cuts the
   greeting before the model has written anything, the greeting is not made again and
   the call stays silent until the user speaks. Found while writing this, by running it.
@@ -353,7 +353,10 @@ A fourth, added on 16 November 2026:
 
 ## Where the code is
 
-- `app/entities/voice_ent.py`: the conversation, the history, interruption, late results.
+- `app/entities/voice_ent.py`: the conversation, the history, interruption, and when a
+  late result is told.
+- `app/entities/late_results.py`: tool calls that outlive their reply, the same for a
+  call and for chat.
 - `app/entities/voice_speech.py`: speaking, and working out what was heard.
 - `app/entities/model.py`: the two providers behind one interface.
 - `app/entities/call_ent.py`: opening a call.

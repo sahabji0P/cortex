@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
-from app.entities import voice_ent
 from app.entities.gem_ent import GemConfig
 from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
 from app.entities.voice_speech import Playback, Utterance
@@ -200,16 +199,11 @@ def _assert_only_grew(before: list[dict], after: list[dict]) -> None:
     """Each request has to start with the whole of the one before it.
 
     Changing anything the model has already been sent would break a prompt cache from
-    that point on. Two changes are allowed. The user's open turn, which is always the
-    last item, can gain a line. And an old search result can be replaced by the cleared
-    marker: same call, nothing else touched.
+    that point on. One change is allowed: the user's open turn, which is always the last
+    item, can gain a line.
     """
     *settled, last = before
-    for was, now in zip(settled, after, strict=False):
-        if was != now:
-            assert was.get("type") == "function_call_output", "an earlier item was changed"
-            assert now == {**was, "output": voice_ent._CLEARED}, "an earlier item was changed"
-    assert len(after) >= len(settled), "an earlier item was removed"
+    assert after[: len(settled)] == settled, "an earlier item was changed or removed"
     same_slot = after[len(settled)]
     if same_slot != last:
         assert last.get("role") == "user" == same_slot.get("role")
@@ -1189,160 +1183,7 @@ async def test_two_searches_in_one_round_are_each_given_their_own_kind_of_result
     }
     assert "Norris won in Las Vegas." in outputs["call_q"]
     assert "Still running" in outputs["call_s"]
-    assert list(f.conversation._outliving) == ["call_s"]
-    await f.conversation.close()
-
-
-# ---- clearing old search results
-
-
-def _searching_turns(count: int) -> list[list]:
-    """Scripted model calls for `count` turns that each search once and then answer."""
-    rounds: list[list] = []
-    for n in range(count):
-        call = _search_call(f"query {n}", f"call_{n}")
-        rounds += [
-            [_starts(call), _completed(call)],
-            [_delta("Done."), _completed(_message("Done."))],
-        ]
-    return rounds
-
-
-async def _ask(f: _Fixture, text: str) -> None:
-    f.stt.say(text)
-    await _read_until(f.conversation, "assistant.done")
-    f.clock.advance(60)
-
-
-def _results(request: dict) -> list[str]:
-    """Each search result in a request: "full" or "cleared"."""
-    return [
-        "cleared" if item["output"] == voice_ent._CLEARED else "full"
-        for item in request["input"]
-        if item.get("type") == "function_call_output"
-    ]
-
-
-async def test_old_search_results_are_cleared_in_one_batch_between_turns() -> None:
-    llm = _LLM(*_searching_turns(9), [_delta("Bye."), _completed(_message("Bye."))])
-    f = _conversation(llm)
-
-    for n in range(9):
-        await _ask(f, f"question {n}")
-    await _ask(f, "bye")
-
-    def at_the_start_of_turn(n: int) -> list[str]:
-        return _results(llm.requests[2 * n])
-
-    # Seven full results are allowed to pile up. The turn after that, all but the newest
-    # two are cleared at once, and nothing is cleared again for several turns.
-    assert at_the_start_of_turn(6) == ["full"] * 6
-    assert at_the_start_of_turn(7) == ["cleared"] * 5 + ["full"] * 2
-    assert at_the_start_of_turn(8) == ["cleared"] * 5 + ["full"] * 3
-    assert _results(llm.requests[-1]) == ["cleared"] * 5 + ["full"] * 4
-    # A cleared result keeps its place and its call, so the history is still valid.
-    sent = llm.requests[-1]["input"]
-    assert [item["call_id"] for item in sent if item.get("type") == "function_call"] == [
-        item["call_id"] for item in sent if item.get("type") == "function_call_output"
-    ]
-    await f.conversation.close()
-
-
-async def test_a_result_the_model_has_not_seen_is_never_cleared() -> None:
-    quick, slow = _search_call("quick one", "call_q"), _search_call("slow one", "call_s")
-    llm = _LLM(
-        *_searching_turns(6),
-        [_starts(quick), _completed(quick, slow)],
-        [_delta("Still looking."), _completed(_message("Still looking."))],
-    )
-    f = _conversation(llm, _Search(gate=asyncio.Event(), only="slow"))
-
-    for n in range(6):
-        await _ask(f, f"question {n}")
-    # Two searches at once. One is back, but the model has not been shown its result yet,
-    # because the reply is still waiting for the other when the user speaks.
-    f.stt.say("look up two things")
-    await _read_until(f.conversation, "tool.call")
-    await _let_audio_out()
-    f.stt.say("hello?")
-    await _read_until(f.conversation, "assistant.done")
-
-    # Seven real results are in the history, over the limit of six. But the model has
-    # been sent only six of them, so nothing is cleared.
-    assert _results(llm.requests[-1]).count("full") == 8  # seven results and a placeholder
-    assert "cleared" not in _results(llm.requests[-1])
-    await f.conversation.close()
-
-
-async def test_placeholders_and_cancellations_do_not_push_real_results_out() -> None:
-    slow = _search_call("slow one", "call_slow")
-    cancel = _Item(
-        type="function_call",
-        call_id="call_c",
-        name="cancel_tool_call",
-        arguments=json.dumps({"call_id": "call_slow"}),
-    )
-    llm = _LLM(
-        *_searching_turns(5),
-        [_starts(slow), _completed(slow)],
-        [_completed(cancel)],
-        [_delta("Stopped."), _completed(_message("Stopped."))],
-        [_delta("Bye."), _completed(_message("Bye."))],
-    )
-    f = _conversation(llm, _Search(gate=asyncio.Event(), only="slow"))
-
-    for n in range(5):
-        await _ask(f, f"question {n}")
-    f.stt.say("look this up")
-    await _read_until(f.conversation, "tool.call")
-    await _ask(f, "never mind, stop that")
-    await _ask(f, "bye")
-
-    # Seven outputs are in the history, but only five are search results.
-    outputs = [
-        item for item in llm.requests[-1]["input"] if item.get("type") == "function_call_output"
-    ]
-    assert len(outputs) == 7
-    assert "cleared" not in _results(llm.requests[-1])
-    await f.conversation.close()
-
-
-async def test_nothing_is_cleared_while_a_reply_is_being_made() -> None:
-    three = [[_completed(_search_call(f"more {n}", f"call_m{n}"))] for n in range(3)]
-    llm = _LLM(*_searching_turns(5), *three, [_delta("Here."), _completed(_message("Here."))])
-    f = _conversation(llm)
-
-    for n in range(5):
-        await _ask(f, f"question {n}")
-    await _ask(f, "dig deeper")
-
-    # The last reply searched three more times, taking it to eight full results. All of
-    # its own model calls saw every one of them in full.
-    assert _results(llm.requests[-1]) == ["full"] * 8
-    await f.conversation.close()
-
-
-async def test_a_placeholder_for_a_search_still_running_is_never_cleared() -> None:
-    slow = _search_call("slow one", "call_slow")
-    llm = _LLM(
-        [_starts(slow), _completed(slow)],
-        [_delta("Still looking."), _completed(_message("Still looking."))],
-        *_searching_turns(8),
-    )
-    f = _conversation(llm, _Search(gate=asyncio.Event(), only="slow"))
-
-    f.stt.say("look this up")
-    await _read_until(f.conversation, "tool.call")
-    await _ask(f, "hello?")
-    for n in range(8):
-        await _ask(f, f"question {n}")
-
-    kept = llm.requests[-1]["input"]
-    placeholder = next(
-        item for item in kept if item.get("call_id") == "call_slow" and "output" in item
-    )
-    assert "Still running" in placeholder["output"]
-    assert "cleared" in _results(llm.requests[-1])
+    assert f.conversation._late.holds("call_s") and not f.conversation._late.holds("call_q")
     await f.conversation.close()
 
 
@@ -1376,7 +1217,7 @@ async def test_speaking_during_a_search_leaves_a_placeholder_and_the_search_runn
     assert "cancel_tool_call" in sent[2]["output"]
     # The search was not stopped: it is still waiting.
     assert search.queries == ["weather in Pune"]
-    assert f.conversation._outliving["call_1"].running.done() is False
+    assert f.conversation._late.holds("call_1")
     await f.conversation.close()
 
 
@@ -1423,7 +1264,6 @@ async def test_a_late_result_is_given_to_the_model_once_nothing_is_being_said() 
     assert json.loads(stub["arguments"]) == {"deferred_result_for": "call_1"}
     assert stub["call_id"] == result["call_id"] != "call_1"
     assert "Norris won in Las Vegas." in result["output"]
-    assert f.conversation._stubs == {stub["call_id"]: "call_1"}
     await f.conversation.close()
 
 
@@ -1814,7 +1654,7 @@ async def test_the_model_can_cancel_a_search_that_is_still_running() -> None:
     f.clock.advance(60)
     await asyncio.sleep(0.25)
     assert len(llm.requests) == 3
-    assert f.conversation._outliving == {}
+    assert not f.conversation._late.pending
     await f.conversation.close()
 
 
@@ -1873,7 +1713,51 @@ async def test_the_model_can_cancel_a_result_that_is_waiting_to_be_delivered() -
     f.clock.advance(60)
     await asyncio.sleep(0.25)
     assert len(llm.requests) == 3
-    assert f.conversation._late == []
+    assert not f.conversation._late.pending
+    await f.conversation.close()
+
+
+class _SetsThenGoes(asyncio.Event):
+    """A step of a scripted reply that sets another event and does not wait."""
+
+    def __init__(self, other: asyncio.Event) -> None:
+        super().__init__()
+        self._other = other
+
+    async def wait(self) -> bool:
+        self._other.set()
+        return True
+
+
+async def test_a_search_cancelled_in_the_instant_it_finishes_is_not_told() -> None:
+    # The search finishes in the same step the model cancels it in, too late to be
+    # stopped. The model has been told "Cancelled.", so its result is dropped all the same.
+    cancel = _Item(
+        type="function_call",
+        call_id="call_2",
+        name="cancel_tool_call",
+        arguments=json.dumps({"call_id": "call_1"}),
+    )
+    finish = asyncio.Event()
+    llm, _ = _slow_search_then(
+        [_SetsThenGoes(finish), _starts(cancel), _completed(cancel)],
+        [_delta("Stopped."), _completed(_message("Stopped."))],
+    )
+    search = _Search(gate=finish)
+    f = _conversation(llm, search)
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("never mind, stop that")
+    await _read_until(f.conversation, "assistant.done")
+
+    assert llm.requests[2]["input"][-1]["output"] == "Cancelled."
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+    # It did finish: it was not stopped. It is never told all the same.
+    assert search.queries == ["weather in Pune"]
+    assert len(llm.requests) == 3
+    assert not f.conversation._late.pending
     await f.conversation.close()
 
 
@@ -1939,7 +1823,8 @@ async def test_closing_stops_a_search_that_outlived_its_reply() -> None:
     await _read_until(f.conversation, "tool.call")
     f.stt.say("hello?")
     await _read_until(f.conversation, "assistant.done")
-    search_task = f.conversation._outliving["call_1"].running
+    [call] = [part for part in f.conversation._late._running.values()]
+    search_task = call.running
     await f.conversation.close()
 
     assert search_task.cancelled()

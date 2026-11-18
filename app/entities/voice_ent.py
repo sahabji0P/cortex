@@ -24,30 +24,25 @@ joins the history once it has been heard in full or cut off. A reply that is cut
 stored as the words that were heard, ending in "…". The rest is never sent back.
 
 Nothing the model has been sent is changed afterwards, so each request starts with the
-whole of the one before it. There are two exceptions. The user's open turn, always the
-last item, can gain a line (see below). And once several search results have piled up,
-all but the newest are replaced by a short marker in one go, when the user's turn ends:
-a deliberate break of the prompt cache, made rarely, to keep the context small.
+whole of the one before it. The one exception is the user's open turn, always the last
+item, which can gain a line (see below).
 
 A user turn stays open until some of the reply to it has been heard. Words that arrive
 before that join the same turn on a new line: speech recognition often splits one
 sentence in two, and the second half is not a new request.
 
-A search is not stopped by an interruption. If the user speaks while one is running, its
-call gets a placeholder result so the history stays valid, and the search carries on.
-What the user said is answered first. The real result is then added at the next quiet
-moment, even if it came in long before, as a call written by us (a stub that names the
-original call) followed by that result, and the model tells the user about it in a
-reply of its own, without waiting to be asked.
+A tool call is not stopped by an interruption. If the user speaks while one is running,
+it carries on, as it does in writing (see `late_results.py`). What the user said is
+answered first. The real result is then added at the next quiet moment, even if it came
+in long before, and the model tells the user about it in a reply of its own, without
+waiting to be asked.
 """
 
 import asyncio
 import contextlib
-import json
 import re
 import time
 import unicodedata
-import uuid
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -61,29 +56,21 @@ from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
 from app.entities.instructions import instructions
-from app.entities.late_results import CANCEL_TOOL as _CANCEL_TOOL
-from app.entities.late_results import PLACEHOLDER as _PLACEHOLDER
-from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, run_reply
+from app.entities.late_results import LateResults
+from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, run_reply
 from app.entities.model import (
     LLM,
     MODELS,
-    CallResult,
     Item,
     ModelInfo,
     ModelName,
     is_openai,
     model_for,
 )
-from app.entities.tools import Tool, Toolbox, web_search_tool
+from app.entities.tools import Toolbox, web_search_tool
 from app.entities.voice_speech import Clock, Playback, Speech, Standby
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
-
-# Search results are long. Once more than this many are in the history in full, all but
-# the newest few are replaced by the marker below, in one go.
-_FULL_RESULTS_ALLOWED = 6
-_FULL_RESULTS_KEPT = 2
-_CLEARED = "[Cleared to save context. Search again if this is still needed.]"
 
 # Opens the history of a conversation in which the assistant is to speak first. The
 # model's own words never come first: its opening line is an answer to this.
@@ -184,15 +171,14 @@ class VoiceConversation:
         self._turn_began_at = 0.0
         self._user_scripts: set[str] = set()
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
+        # Tool calls that outlived their replies, until their results are told. A result
+        # that comes in is told at the next quiet moment.
+        self._late = LateResults(self._announce_when_quiet)
         # `llm` has to be the adapter of the provider that `model` belongs to.
         # The gem is offered only the tools its config names. A name with no tool behind
         # it here is passed over, so a config saved before a tool went still opens a call.
         offers_search = search.configured and "web_search" in gem.tools
-        self._tools = Toolbox(
-            [web_search_tool(search), Tool(_CANCEL_TOOL, self._cancel_call)]
-            if offers_search
-            else []
-        )
+        self._tools = Toolbox([web_search_tool(search), self._late.tool] if offers_search else [])
         self._model = model_for(llm, model, self._tools.specs)
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
@@ -212,22 +198,10 @@ class VoiceConversation:
         # either been heard in full or is being cut off.
         self._reply: _Reply | None = None
         self._user_speaking = False
-        # Calls still running after their reply was cut off, by call id.
-        self._outliving: dict[str, ToolCall] = {}
-        # Results of such calls, waiting for a quiet moment to be given to the model.
-        self._late: list[tuple[ToolCall, str]] = []
         # Whether a late result is in the history that the user has heard no reply to
         # and has not spoken since. The reply about it is then made again.
         self._results_owed = False
         self._announcing: asyncio.Task[None] | None = None
-        # The calls in the history that we wrote to carry a late result: stub call id to
-        # the id of the call the model really made.
-        self._stubs: dict[str, str] = {}
-        # Every real search result in the history, oldest first, and how many of them
-        # the model has been sent. Only those may be cleared.
-        self._results: list[CallResult] = []
-        self._results_sent = 0
-        self._closed = False
         # The speech connection for the next reply, opened before it is needed.
         self._standby = Standby(tts, clock)
         self._standby.ready()
@@ -252,18 +226,19 @@ class VoiceConversation:
 
     async def close(self) -> None:
         """End the conversation: stop any reply and release the speech connections."""
-        self._closed = True
+        # First, so that no result coming in from here on starts a reply.
+        outliving = self._late.stop()
         tasks = [
             task
             for task in (self._listening, self._producing, self._announcing)
             if task is not None
         ]
-        calls = [*self._outliving.values(), *(self._reply.calls() if self._reply else [])]
+        calls = self._reply.calls() if self._reply else []
         others = [call.running for call in calls if call.running is not None]
         for task in (*tasks, *others):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.gather(*others, return_exceptions=True)
+        await asyncio.gather(*others, *outliving, return_exceptions=True)
         await self._standby.close()
         with contextlib.suppress(Exception):
             await self._stt.close()
@@ -319,8 +294,7 @@ class VoiceConversation:
             return None
         reply.speech.silence()
         for call in reply.calls():
-            if call.output is None:
-                self._outlive(call)
+            self._late.settle(call)
         heard = reply.delivered(self._playback.hearing())
         if reply.brings_results and (heard.any_text or (reply.finished and heard.kept is None)):
             # Heard at least in part, or produced in full and played to its end: the
@@ -332,36 +306,12 @@ class VoiceConversation:
             self._history.append({"role": "user", "content": "\n".join(self._turn)})
             self._turn = []
         self._history.extend(heard.items)
-        for call in reply.calls():
-            if (result := call.clearable_result) is not None:
-                self._results.append(result)
-                if call.seen:
-                    self._results_sent = len(self._results)
         return heard
-
-    def _outlive(self, call: ToolCall) -> None:
-        """Let a call that is still running carry on without the reply that made it."""
-        running = call.running
-        if running is None or running.done():
-            # It finished in the instant before the reply was cut: nothing is late.
-            call.output = running.result() if running and not running.cancelled() else ""
-            return
-        call.output = _PLACEHOLDER.format(call_id=call.call_id)
-        call.placeholder = True
-        self._outliving[call.call_id] = call
-        running.add_done_callback(lambda finished: self._finished_late(call, finished))
-
-    def _finished_late(self, call: ToolCall, finished: asyncio.Task[str]) -> None:
-        self._outliving.pop(call.call_id, None)
-        if finished.cancelled() or self._closed:
-            return
-        self._late.append((call, finished.result()))
-        self._announce_when_quiet()
 
     def _announce_when_quiet(self) -> None:
         """Make sure something is waiting to give the model its late results."""
         waiting = self._announcing is not None and not self._announcing.done()
-        owed = bool(self._late) or self._results_owed
+        owed = self._late.ready or self._results_owed
         if owed and not self._user_speaking and not waiting:
             self._announcing = asyncio.create_task(self._announce_late_results())
 
@@ -385,7 +335,7 @@ class VoiceConversation:
             else:
                 break
         self._settle()
-        if self._late:
+        if self._late.ready:
             self._add_late_results()
             self._results_owed = True
         elif not self._results_owed:
@@ -402,27 +352,11 @@ class VoiceConversation:
             self._turn = []
 
     def _add_late_results(self) -> None:
-        """Add each late result to the history as a stub call followed by the result.
-
-        A result has to follow its own call directly, and the real call already has its
-        placeholder. So we write a call ourselves that names the real one.
-        """
-        if self._late:
-            # An unanswered turn has already been sent to the model: the results follow it.
-            self._close_turn()
-        for call, output in self._late:
-            stub = ToolCall(
-                call_id=f"late_{uuid.uuid4().hex[:16]}",
-                name=call.name,
-                arguments=json.dumps({"deferred_result_for": call.call_id}),
-                tool=call.tool,
-                output=output,
-            )
-            self._stubs[stub.call_id] = call.call_id
-            self._history.extend(stub.items())
-            if (result := stub.clearable_result) is not None:
-                self._results.append(result)
-        self._late.clear()
+        """Add each waiting result to the history, as a stub call followed by the result."""
+        # An unanswered turn has already been sent to the model: the results follow it.
+        self._close_turn()
+        for late in self._late.take():
+            self._history.extend(late.stub.items())
 
     async def _start_reply(self, transcript: str) -> None:
         """A turn ended: answer it, or put back what it interrupted if nothing was said."""
@@ -449,7 +383,6 @@ class VoiceConversation:
         if said:
             # The result is in front of the model along with what the user now says.
             self._results_owed = False
-            self._clear_old_results()
             self._turn.append(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
@@ -487,7 +420,6 @@ class VoiceConversation:
 
     def _next_round(self) -> RoundInput:
         """What the reply's next model call is sent ahead of the reply's own items."""
-        self._results_sent = len(self._results)
         # No thinking before it speaks: in a conversation the wait is worse than the gain.
         # The exception is while the history ends in a search with no result yet: one
         # still running in the background, or finished and waiting to be delivered.
@@ -496,9 +428,7 @@ class VoiceConversation:
         # little thinking it was about one in twenty. That costs about half a second at
         # the median and 1.5 s for the slowest tenth, on every request made while this
         # holds. An Anthropic model is not asked to: see `model.py`.
-        return RoundInput(
-            [*self._history, *self._open_turn()], think=bool(self._outliving or self._late)
-        )
+        return RoundInput([*self._history, *self._open_turn()], think=self._late.pending)
 
     def _is_noise(self, transcript: str) -> bool:
         """Whether a turn's words are a stray fragment trailing the user's last sentence."""
@@ -507,23 +437,6 @@ class VoiceConversation:
         )
         return trailing and _is_stray(transcript, self._said, self._user_scripts)
 
-    def _clear_old_results(self) -> None:
-        """Replace all but the newest search results with a marker, once enough pile up.
-
-        This rewrites items the model has already been sent, which breaks a prompt cache
-        from the first one onward. So it is done only between turns, never while a reply
-        is being made, and for a whole batch at a time.
-
-        Only real search results count, and only ones the model has been sent: not a
-        placeholder, not the answer to a cancel, and not a result it has yet to see.
-        """
-        full = [
-            result for result in self._results[: self._results_sent] if result["output"] != _CLEARED
-        ]
-        if len(full) > _FULL_RESULTS_ALLOWED:
-            for result in full[:-_FULL_RESULTS_KEPT]:
-                result["output"] = _CLEARED
-
     def _open_turn(self) -> list[Item]:
         """The user's unanswered turn as one message, for a model call."""
         return [{"role": "user", "content": "\n".join(self._turn)}] if self._turn else []
@@ -531,26 +444,6 @@ class VoiceConversation:
     def _show_call(self, text: str) -> None:
         """Tell the client what a tool call is doing, such as what a search looks up."""
         self._emit("tool.call", text)
-
-    async def _cancel_call(self, arguments: str) -> str:
-        """Stop a call that outlived its reply. Its result will never arrive.
-
-        This is the `cancel_tool_call` tool. It needs the conversation's own state, so the
-        conversation makes it, not the tools module.
-        """
-        call_id = str(json.loads(arguments)["call_id"])
-        # The model may name the call by a stub that already delivered its result.
-        call_id = self._stubs.get(call_id, call_id)
-        waiting = [late for late in self._late if late[0].call_id == call_id]
-        if waiting:
-            # It finished while the user was speaking and has not been delivered yet.
-            self._late.remove(waiting[0])
-            return "Cancelled."
-        call = self._outliving.get(call_id)
-        if call is None or call.running is None:
-            return "Nothing is running under that call_id."
-        call.running.cancel()
-        return "Cancelled."
 
 
 class VoiceEntityClass:

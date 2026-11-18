@@ -17,8 +17,9 @@ moment. That is what the history keeps, by the same rules everywhere:
 - Nothing the model has been sent is changed afterwards. So text that was sent back to
   the model, in a later round of the same reply, is kept in full however much of it was
   delivered.
-- Every tool call keeps a valid result. What a call still running at a cut gets as its
-  result is decided by the conversation that made it.
+- Every tool call keeps a valid result. A call still running at a cut is left running
+  with a placeholder as its result, the same in a call and in writing (see
+  `late_results.py`).
 
 Which history a round is sent, whether the model thinks first, and where the text and
 tool events go are the conversation's own. It hands them over at the start of each round.
@@ -28,9 +29,9 @@ import asyncio
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple, Protocol
+from typing import Literal, NamedTuple, Protocol
 
-from app.entities.model import CallResult, Item, Model, RoundDone, TextDelta
+from app.entities.model import Item, Model, RoundDone, TextDelta
 from app.entities.tools import Tool, Toolbox
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "Delivered",
     "Part",
     "Reply",
+    "ResultMark",
     "RoundInput",
     "Surface",
     "ToolCall",
@@ -81,6 +83,12 @@ class Surface(Protocol):
         ...
 
 
+# What a call's result stands for, beyond its text: the placeholder a call left running
+# was given, or the answer of a `cancel_tool_call` that stopped such a call. It is kept
+# with the result, so that a result is never recognised by its wording.
+type ResultMark = Literal["placeholder", "cancelled"]
+
+
 @dataclass(slots=True)
 class ToolCall:
     call_id: str
@@ -90,20 +98,9 @@ class ToolCall:
     tool: Tool | None = None
     output: str | None = None  # None while the tool is still running
     running: asyncio.Task[str] | None = None
-    # Whether `output` is a placeholder standing in for a result that comes later.
-    placeholder: bool = False
-    # Whether the result has been sent back to the model, in a later call of its reply.
-    seen: bool = False
-    # The result item most recently built by `items()`: the one in the history, once
-    # this call is there.
-    result_item: CallResult | None = None
+    mark: ResultMark | None = None
 
     def items(self) -> list[Item]:
-        self.result_item = {
-            "type": "function_call_output",
-            "call_id": self.call_id,
-            "output": self.output or "",
-        }
         return [
             {
                 "type": "function_call",
@@ -111,14 +108,8 @@ class ToolCall:
                 "name": self.name,
                 "arguments": self.arguments,
             },
-            self.result_item,
+            {"type": "function_call_output", "call_id": self.call_id, "output": self.output or ""},
         ]
-
-    @property
-    def clearable_result(self) -> CallResult | None:
-        """The item holding this call's result, if it is a real one that may be cleared."""
-        clearable = self.tool is not None and self.tool.clearable
-        return self.result_item if clearable and not self.placeholder else None
 
 
 @dataclass(slots=True)
@@ -159,7 +150,6 @@ class Reply:
         items: list[Item] = []
         for part in self._parts:
             if isinstance(part, ToolCall):
-                part.seen = True
                 items.extend(part.items())
             elif text := part.text.strip():
                 items.append({"role": "assistant", "content": text})
