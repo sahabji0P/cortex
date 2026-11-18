@@ -8,13 +8,25 @@ router = APIRouter(prefix="/v1/link", tags=["link"])
 
 @router.websocket("")
 async def link(websocket: WebSocket, service: LinkServiceRegistry.V1) -> None:
-    """The app's standing socket. It carries written chat with the gems.
+    """The app's standing socket. It carries written chat with the gems, and calls.
 
-    The server sends `{"type": "link.ready", "version": 1}` once it is open. Send
-    `{"type": "chat.send", "gem": <id>, "text": ...}` to write to a gem: a reply still
-    being written to that gem is cut first. The reply comes as `chat.text` and
-    `chat.tool` frames, then exactly one of `chat.done`, `chat.cut` or `chat.error`,
-    each with `gem` and `text`. A frame that cannot be read gets `{"type": "error",
-    "text": ...}`, and the socket stays open. See `docs/chat-contract.md`.
+    The server sends `{"type": "link.ready", "version": 2}` once it is open.
+
+    Chat: send `{"type": "chat.send", "gem": <id>, "text": ...}` to write to a gem: a
+    reply still being written to that gem is cut first. The reply comes as `chat.text`
+    and `chat.tool` frames, then exactly one of `chat.done`, `chat.cut` or `chat.error`,
+    each with `gem` and `text`.
+
+    A call, one at a time: send `{"type": "call.start"}` with optional `gem`, `model`
+    and `first`, as on `/v1/voice/converse`. Send mic audio as binary frames (raw 16-bit
+    mono PCM at 16 kHz, about 100 ms each), `{"type": "call.playback", "delay": seconds}`
+    for the sound device's delay, and `{"type": "call.end"}` to hang up. The call comes
+    as `call.ready`, then speech as binary frames (raw 16-bit mono PCM at 24 kHz) and the
+    call's events with `call.` before their type, then exactly one of `call.ended` or
+    `call.failed`; or, if it never opened, `call.refused` or `call.failed`, or
+    `call.ended` if it was hung up while it opened.
+
+    A frame that cannot be read gets `{"type": "error", "text": ...}`, and the socket
+    stays open. See `docs/chat-contract.md`.
     """
     await service.link(websocket)

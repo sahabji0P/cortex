@@ -5,10 +5,10 @@ from typing import Annotated
 from fastapi import Depends, WebSocket
 from pydantic import ValidationError
 
-from app.core.errors import NotFoundError
 from app.entities import EntitiesRegistry
+from app.entities.call_ent import CallEntityClass, CallFault, CallRefused
 from app.entities.darbar_ent import DarbarEntityClass
-from app.entities.gem_ent import GemConfig, GemEntityClass
+from app.entities.gem_ent import GemEntityClass
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
 from app.routers.voice.models import VoiceModels
 
@@ -24,6 +24,9 @@ class VoiceServiceV1Class:
         self.voice = EntitiesRegistry.Voice if voice is None else voice
         self.gems = EntitiesRegistry.Gems if gems is None else gems
         self.darbar = EntitiesRegistry.Darbar if darbar is None else darbar
+        # Opening a call is shared with the standing socket, which carries calls too. It
+        # is made from the three above, so a test that hands in its own gets them used.
+        self.call = CallEntityClass(gems=self.gems, darbar=self.darbar, voice=self.voice)
 
     def models(self) -> list[VoiceModels.V1.Output.Model]:
         """Every model a conversation can be held with, in the order to show them."""
@@ -52,6 +55,9 @@ class VoiceServiceV1Class:
         Uplink: client binary frames are mic audio, and a JSON text frame can report the
         client's playback delay. Downlink: binary frames are speech audio, text frames
         are JSON `VoiceEvent`s. Ends when either side drops.
+
+        This is the old call socket, kept as it is until the desktop app holds its calls
+        over `/v1/link`. Opening the call is shared with that socket (`CallEntityClass`).
         """
         await websocket.accept()
         try:
@@ -61,39 +67,22 @@ class VoiceServiceV1Class:
             # is not offered.
             await websocket.close(code=1008, reason="unknown model or setting")
             return
-        gem: GemConfig | None = None
-        # Read once, here, so the call keeps the text it opened with. A call without a
-        # gem is not told it, so it does not read it.
-        darbar: str | None = None
-        if asked.gem is not None:
-            try:
-                gem = await self.gems.get(asked.gem)
-            except NotFoundError:
-                # 1008 again: there is no gem with that id, or it is not an id at all.
-                await websocket.close(code=1008, reason="unknown gem")
-                return
-            except ValidationError:
-                # 1011: the gem is there, but its stored config cannot be read here, as
-                # when a newer cortex wrote it.
-                with contextlib.suppress(Exception):
-                    await websocket.close(code=1011, reason="the gem's config cannot be read")
-                raise
-            darbar = (await self.darbar.read()).text
         # Left out, it is the gem's to say. Without a gem, that means the user.
         first = asked.first == "assistant" if "first" in asked.model_fields_set else None
         try:
-            conversation = await self.voice.open_conversation(
-                asked.model, speaks_first=first, gem=gem, darbar=darbar
-            )
-        except LookupError as exc:
-            # 1008 again: the model is offered, but its provider has no key here.
-            await websocket.close(code=1008, reason=str(exc))
+            conversation = await self.call.open(asked.gem, model=asked.model, speaks_first=first)
+        except CallRefused as exc:
+            # 1008 again: no gem with that id (or not an id at all), or the model is
+            # offered but its provider has no key here.
+            await websocket.close(code=1008, reason=exc.reason)
             return
-        except Exception:
-            # 1011: internal error — a speech service is unreachable or not configured.
+        except CallFault as exc:
+            # 1011: internal error — the gem's config cannot be read, or a speech service
+            # is unreachable or not configured. The failure itself is raised, as it
+            # always was.
             with contextlib.suppress(Exception):
-                await websocket.close(code=1011, reason="speech services unavailable")
-            raise
+                await websocket.close(code=1011, reason=exc.reason)
+            raise exc.cause from None
 
         uplink = asyncio.create_task(self._relay_mic(websocket, conversation))
         downlink = asyncio.create_task(self._relay_outputs(websocket, conversation))

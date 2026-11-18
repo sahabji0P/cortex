@@ -16,6 +16,7 @@ from bson import ObjectId
 from pydantic import BaseModel
 
 from app.core.errors import NotFoundError
+from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
 from app.entities.chat_store import ChatItem, ChatStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
@@ -414,7 +415,13 @@ class _Chat(SimpleNamespace):
     gem: GemConfig
 
     def service(self) -> LinkServiceV1Class:
-        return LinkServiceV1Class(self.chat)
+        # No call is held in these tests, so the call entity's voice is never reached.
+        call = CallEntityClass(
+            gems=self.gems,
+            darbar=DarbarEntityClass(cast("Any", self.docdb)),
+            voice=cast("Any", None),
+        )
+        return LinkServiceV1Class(self.chat, call)
 
     def again(self) -> "_Chat":
         """The same database, read by a new chat entity, as after a restart."""
@@ -480,7 +487,7 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
 
-    assert socket.frames[0] == {"type": "link.ready", "version": 1}
+    assert socket.frames[0] == {"type": "link.ready", "version": 2}
     assert socket.frames[1:] == [
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "Hi "},
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "there."},
@@ -764,19 +771,19 @@ class _BlindStore:
         json.dumps({"type": "chat.send", "gem": "x"}),
         json.dumps({"type": "chat.send", "gem": "x", "text": "   "}),
         json.dumps({"type": "chat.send", "gem": "x", "text": "a" * 20_001}),
-        None,  # a binary frame
+        json.dumps({"text": "hi"}),
+        json.dumps(["chat.send"]),
     ],
 )
 async def test_a_frame_that_cannot_be_read_gets_error_and_the_socket_stays_open(
-    frame: str | None,
+    frame: str,
 ) -> None:
+    # A binary frame is mic audio for a call, and is dropped without an answer when
+    # there is none: that is in `test_link_call.py`.
     setup = await _chat(_said("Hi."))
     socket, linked = await _open(setup.service())
 
-    if frame is None:
-        socket.raw(data=b"\x00\x01")
-    else:
-        socket.raw(frame)
+    socket.raw(frame)
     await socket.until("error")
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
