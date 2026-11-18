@@ -64,6 +64,12 @@ A one or two word fragment in a writing system the user has not spoken in during
 
 The conversation is in [`app/entities/voice_ent.py`](app/entities/voice_ent.py). Speaking, and working out what was heard, is in [`app/entities/voice_speech.py`](app/entities/voice_speech.py). What the model is told is put together in [`app/entities/instructions.py`](app/entities/instructions.py). What differs between the providers is in [`app/entities/model.py`](app/entities/model.py), and the web search tool is in [`app/entities/tools.py`](app/entities/tools.py). Neither is particular to a call.
 
+### The loop, and the surface a reply is delivered on
+
+Making a reply is not particular to a call either. The loop in [`app/entities/loop.py`](app/entities/loop.py) runs one: a model round, then the tool calls it made, then their results back to the model in the next round, until a round only says something. Every gem, however it is reached, is to run this one loop. What differs is its config and the surface its reply is delivered on. A surface takes the reply's text and can say how much of it got through by a given moment. In a call the surface is speech, and what got through is what was heard. The history holds what was delivered, by the rules above, on any surface.
+
+[`app/entities/written_ent.py`](app/entities/written_ent.py) is a second surface, writing, kept as small as it can be to show the loop is cut in the right place. One message in, its reply streamed out as text, one reply at a time. What was delivered is what the reader was handed: if they stop reading part-way, the history keeps that text ending in "…", and a tool still running is stopped and given a result saying so. It has no route yet.
+
 ## Try it
 
 ```bash
@@ -145,7 +151,7 @@ Imports only go one way: `config ← core ← adapters ← entities ← routers 
 app/
   adapters/    one file per outside service; the only place an SDK is called
                openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · docdb_adp · redis_adp
-  entities/    the logic: voice_ent and voice_speech (the cascade), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), gem_ent (a gem's config), user_ent
+  entities/    the logic: loop (making one reply, on any surface), voice_ent and voice_speech (the cascade), written_ent (a written conversation, no route yet), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), gem_ent (a gem's config), user_ent
   routers/     HTTP and WebSocket endpoints: voice, gems, user
 ```
 

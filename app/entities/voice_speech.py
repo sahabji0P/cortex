@@ -180,9 +180,16 @@ class Utterance:
         whole = self.complete and heard == len(tokens)
         return self.text[: tokens[heard - 1].end()].strip(), whole
 
+    def delivered(self, at: float) -> tuple[str, bool]:
+        """The same as `heard`: in a call, what was delivered is what was heard."""
+        return self.heard(at)
+
 
 class Speech:
     """The spoken side of one reply: text in, audio sent to the client.
+
+    It is the surface a call's replies are delivered on (see `loop.py`), and each of
+    its utterances is one part of a reply.
 
     Each reply gets its own text-to-speech connection and closes it when the reply
     ends. It is handed one that is open already or still opening (see `Standby`). A
@@ -263,7 +270,7 @@ class Speech:
                 utterance.add_words(event)
         utterance.complete = True
 
-    async def end_utterance(self) -> None:
+    async def end_part(self) -> None:
         """No more text for this utterance. Its remaining audio is still sent."""
         if self._utterance is not None and self._open:
             self._open = False
@@ -273,7 +280,7 @@ class Speech:
     async def finish(self) -> None:
         """No more text at all. Return once all the audio has been sent."""
         try:
-            await self.end_utterance()
+            await self.end_part()
             if self._forwarding is not None:
                 await self._forwarding
         finally:

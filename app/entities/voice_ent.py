@@ -14,7 +14,9 @@ One `VoiceConversation` per client. The speech-to-text service also detects turn
 
 The model may call `web_search` (Parallel) before it answers. Which model it is is chosen
 when the conversation opens, and everything here is the same for either provider: what
-differs between them is in `model.py`.
+differs between them is in `model.py`. Running a reply's model calls and its searches
+is not particular to a call either: that loop is in `loop.py`, and speech is the surface
+the call's replies are delivered on.
 
 The history is what the model is sent on every call, and it holds what the user heard,
 not what was generated. Speech is generated much faster than it plays, so a reply only
@@ -47,7 +49,6 @@ import time
 import unicodedata
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel
@@ -60,6 +61,7 @@ from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
 from app.entities.instructions import instructions
+from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import (
     LLM,
     MODELS,
@@ -67,14 +69,12 @@ from app.entities.model import (
     Item,
     ModelInfo,
     ModelName,
-    RoundDone,
-    TextDelta,
     ToolSpec,
     is_openai,
     model_for,
 )
 from app.entities.tools import Tool, Toolbox, web_search_tool
-from app.entities.voice_speech import Clock, Playback, Speech, Standby, Utterance
+from app.entities.voice_speech import Clock, Playback, Speech, Standby
 
 __all__ = ["VoiceConversation", "VoiceEntityClass", "VoiceEvent"]
 
@@ -118,9 +118,6 @@ _SENTENCE_ENDS = (".", "?", "!", "।", "。", "\uff1f", "\uff01")
 # to while it waits, so it does not sleep through to a time worked out in advance.
 _QUIET_CHECK_SECONDS = 0.1
 
-# Ends the stored text of a reply that the user cut off.
-_CUT_MARK = "…"
-
 
 class VoiceEvent(BaseModel):
     """One JSON message for the client. Speech audio travels separately, as binary.
@@ -148,125 +145,14 @@ class VoiceEvent(BaseModel):
     text: str = ""
 
 
-@dataclass(slots=True)
-class _ToolCall:
-    call_id: str
-    name: str
-    arguments: str
-    # The tool called, or None if the conversation has no tool of that name.
-    tool: Tool | None = None
-    output: str | None = None  # None while the tool is still running
-    running: asyncio.Task[str] | None = None
-    # Whether `output` is a placeholder standing in for a result that comes later.
-    placeholder: bool = False
-    # Whether the result has been sent back to the model, in a later call of its reply.
-    seen: bool = False
-    # The result item most recently built by `items()`: the one in the history, once
-    # this call is there.
-    result_item: CallResult | None = None
-
-    def items(self) -> list[Item]:
-        self.result_item = {
-            "type": "function_call_output",
-            "call_id": self.call_id,
-            "output": self.output or "",
-        }
-        return [
-            {
-                "type": "function_call",
-                "call_id": self.call_id,
-                "name": self.name,
-                "arguments": self.arguments,
-            },
-            self.result_item,
-        ]
-
-    @property
-    def search_result(self) -> CallResult | None:
-        """The item holding this call's result, if it is a real one that may be cleared."""
-        clearable = self.tool is not None and self.tool.clearable
-        return self.result_item if clearable and not self.placeholder else None
-
-
-@dataclass(slots=True)
-class _Heard:
-    """A reply as the user heard it."""
-
-    items: list[Item]  # what joins the history
-    spoke: bool  # whether the user heard any of the reply's speech
-    kept: str | None  # the text kept of a reply that was cut short; None if heard in full
-
-
-class _Reply:
-    """One reply while it is produced and played: what was said and what was looked up."""
+class _Reply(Reply):
+    """One reply of the call's, delivered as speech."""
 
     def __init__(self, speech: Speech, *, brings_results: bool = False) -> None:
+        super().__init__(speech)
         self.speech = speech
         # Whether this reply is the one that tells the user of a late search result.
         self.brings_results = brings_results
-        # Whether it was produced to the end, as opposed to cut off or failed.
-        self.finished = False
-        self._parts: list[Utterance | _ToolCall] = []
-        # How many of the parts have been sent back to the model, in a later call of
-        # this same reply. Those are final: the model has seen them as they are.
-        self._sent_back = 0
-
-    async def say(self, text: str) -> None:
-        utterance = await self.speech.say(text)
-        if not self._parts or self._parts[-1] is not utterance:
-            self._parts.append(utterance)
-
-    def add_call(self, call: _ToolCall) -> None:
-        self._parts.append(call)
-
-    def calls(self) -> list[_ToolCall]:
-        return [part for part in self._parts if isinstance(part, _ToolCall)]
-
-    def send_back(self) -> list[Item]:
-        """Everything produced so far, for this reply's own next model call."""
-        self._sent_back = len(self._parts)
-        items: list[Item] = []
-        for part in self._parts:
-            if isinstance(part, _ToolCall):
-                part.seen = True
-                items.extend(part.items())
-            elif text := part.text.strip():
-                items.append({"role": "assistant", "content": text})
-        return items
-
-    def heard(self, at: float) -> _Heard:
-        """The reply as the user had heard it by time `at`.
-
-        Two things are kept whatever was heard:
-
-        - Tool calls: they happened, and the history has to stay a valid chain of calls
-          and results.
-        - Text already sent back to the model, which is what it said before a search.
-          Shortening it now would change something the model has been shown, and with
-          it everything a prompt cache holds from there on.
-        """
-        items: list[Item] = []
-        spoken: list[str] = []
-        cut = False
-        heard_any = False
-        for index, part in enumerate(self._parts):
-            if isinstance(part, _ToolCall):
-                items.extend(part.items())
-                continue
-            said = part.text.strip()
-            if cut and index >= self._sent_back:
-                continue  # generated after the user stopped listening
-            text, whole = part.heard(at)
-            heard_any = heard_any or bool(text)
-            if index < self._sent_back:
-                text = said
-            elif not whole:
-                text = f"{text}{_CUT_MARK}" if text else ""
-            cut = cut or not whole
-            if text:
-                spoken.append(text)
-                items.append({"role": "assistant", "content": text})
-        return _Heard(items, heard_any, " ".join(spoken) if cut else None)
 
 
 class VoiceConversation:
@@ -331,9 +217,9 @@ class VoiceConversation:
         self._reply: _Reply | None = None
         self._user_speaking = False
         # Calls still running after their reply was cut off, by call id.
-        self._outliving: dict[str, _ToolCall] = {}
+        self._outliving: dict[str, ToolCall] = {}
         # Results of such calls, waiting for a quiet moment to be given to the model.
-        self._late: list[tuple[_ToolCall, str]] = []
+        self._late: list[tuple[ToolCall, str]] = []
         # Whether a late result is in the history that the user has heard no reply to
         # and has not spoken since. The reply about it is then made again.
         self._results_owed = False
@@ -419,18 +305,18 @@ class VoiceConversation:
         heard = self._settle()
         kept = heard.kept if heard is not None else None
         self._cut_a_reply = kept is not None
-        self._cut_after_hearing = heard is not None and heard.spoke
+        self._cut_after_hearing = heard is not None and heard.any_text
         if producing is not None:
             producing.cancel()
         self._playback.reset()
         # Sent every time: the server cannot see the client's playback queue. Its text is
         # empty only when no reply was cut, so a reply cut before its first word shows
         # as the bare mark.
-        self._emit("interrupt", "" if kept is None else kept or _CUT_MARK)
+        self._emit("interrupt", "" if kept is None else kept or CUT_MARK)
         if producing is not None:
             await asyncio.gather(producing, return_exceptions=True)
 
-    def _settle(self) -> _Heard | None:
+    def _settle(self) -> Delivered | None:
         """Move the latest reply into the history as the user heard it, if there is one."""
         reply, self._reply = self._reply, None
         if reply is None:
@@ -439,8 +325,8 @@ class VoiceConversation:
         for call in reply.calls():
             if call.output is None:
                 self._outlive(call)
-        heard = reply.heard(self._playback.hearing())
-        if reply.brings_results and (heard.spoke or (reply.finished and heard.kept is None)):
+        heard = reply.delivered(self._playback.hearing())
+        if reply.brings_results and (heard.any_text or (reply.finished and heard.kept is None)):
             # Heard at least in part, or produced in full and played to its end: the
             # user has been told. (One that was cut off or failed before it said
             # anything also has nothing "cut", but has told them nothing.)
@@ -451,13 +337,13 @@ class VoiceConversation:
             self._turn = []
         self._history.extend(heard.items)
         for call in reply.calls():
-            if (result := call.search_result) is not None:
+            if (result := call.clearable_result) is not None:
                 self._results.append(result)
                 if call.seen:
                     self._results_sent = len(self._results)
         return heard
 
-    def _outlive(self, call: _ToolCall) -> None:
+    def _outlive(self, call: ToolCall) -> None:
         """Let a call that is still running carry on without the reply that made it."""
         running = call.running
         if running is None or running.done():
@@ -469,7 +355,7 @@ class VoiceConversation:
         self._outliving[call.call_id] = call
         running.add_done_callback(lambda finished: self._finished_late(call, finished))
 
-    def _finished_late(self, call: _ToolCall, finished: asyncio.Task[str]) -> None:
+    def _finished_late(self, call: ToolCall, finished: asyncio.Task[str]) -> None:
         self._outliving.pop(call.call_id, None)
         if finished.cancelled() or self._closed:
             return
@@ -529,7 +415,7 @@ class VoiceConversation:
             # An unanswered turn has already been sent to the model: the results follow it.
             self._close_turn()
         for call, output in self._late:
-            stub = _ToolCall(
+            stub = ToolCall(
                 call_id=f"late_{uuid.uuid4().hex[:16]}",
                 name=call.name,
                 arguments=json.dumps({"deferred_result_for": call.call_id}),
@@ -538,7 +424,7 @@ class VoiceConversation:
             )
             self._stubs[stub.call_id] = call.call_id
             self._history.extend(stub.items())
-            if (result := stub.search_result) is not None:
+            if (result := stub.clearable_result) is not None:
                 self._results.append(result)
         self._late.clear()
 
@@ -589,23 +475,22 @@ class VoiceConversation:
         reply = _Reply(speech, brings_results=brings_results)
         self._reply = reply
         try:
-            # The model calls what it needs: there is no cap on how many rounds of tool
-            # calls one reply may make. It ends with a round that makes none.
-            while await self._model_round(reply):
-                pass
-            await reply.speech.finish()
-        except asyncio.CancelledError:
-            await reply.speech.stop()
-            raise
+            await run_reply(
+                reply,
+                self._model,
+                self._tools,
+                instructions=self._instructions,
+                next_round=self._next_round,
+                said=lambda text: self._emit("assistant.delta", text),
+                show=self._show_call,
+            )
         except Exception as exc:
-            await reply.speech.stop()
             self._emit("error", f"reply failed: {exc}")
         else:
-            reply.finished = True
             self._emit("assistant.done", reply.speech.text.strip())
 
-    async def _model_round(self, reply: _Reply) -> bool:
-        """Run one model call, speaking its text. Return True if it searched (so: call again)."""
+    def _next_round(self) -> RoundInput:
+        """What the reply's next model call is sent ahead of the reply's own items."""
         self._results_sent = len(self._results)
         # No thinking before it speaks: in a conversation the wait is worse than the gain.
         # The exception is while the history ends in a search with no result yet: one
@@ -615,42 +500,9 @@ class VoiceConversation:
         # little thinking it was about one in twenty. That costs about half a second at
         # the median and 1.5 s for the slowest tenth, on every request made while this
         # holds. An Anthropic model is not asked to: see `model.py`.
-        events = self._model.round(
-            [*self._history, *self._open_turn(), *reply.send_back()],
-            instructions=self._instructions,
-            think=bool(self._outliving or self._late),
+        return RoundInput(
+            [*self._history, *self._open_turn()], think=bool(self._outliving or self._late)
         )
-        calls: list[_ToolCall] = []
-        # Closed on the way out whatever happens, so the model call never outlives this.
-        async with contextlib.aclosing(events):
-            async for event in events:
-                if isinstance(event, TextDelta):
-                    await reply.say(event.text)
-                    self._emit("assistant.delta", event.text)
-                elif isinstance(event, RoundDone):
-                    calls = [
-                        _ToolCall(
-                            call.call_id,
-                            call.name,
-                            call.arguments,
-                            tool=self._tools.get(call.name),
-                        )
-                        for call in event.calls
-                    ]
-        if not calls:
-            return False
-        # Whatever was said before searching ("Let me check") is complete as it stands.
-        await reply.speech.end_utterance()
-        # Each call runs as its own task, so that interrupting the reply does not stop it.
-        for call in calls:
-            reply.add_call(call)
-            call.running = asyncio.create_task(
-                self._tools.run(call.name, call.arguments, show=self._show_call)
-            )
-        for call in calls:
-            if call.running is not None:
-                call.output = await asyncio.shield(call.running)
-        return True
 
     def _is_noise(self, transcript: str) -> bool:
         """Whether a turn's words are a stray fragment trailing the user's last sentence."""
