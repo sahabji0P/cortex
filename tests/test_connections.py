@@ -803,10 +803,12 @@ def test_the_routes_are_the_ones_a_client_expects() -> None:
     assert routes == [
         ("/v1/connections", "GET"),
         ("/v1/connections", "POST"),
+        ("/v1/connections/sign-in/callback", "GET"),
         ("/v1/connections/{connection_id}", "DELETE"),
         ("/v1/connections/{connection_id}", "GET"),
         ("/v1/connections/{connection_id}", "PATCH"),
         ("/v1/connections/{connection_id}/refresh", "POST"),
+        ("/v1/connections/{connection_id}/sign-in", "POST"),
     ]
 
 
@@ -861,6 +863,8 @@ async def test_a_connection_is_sent_without_what_lets_us_in(setup: _Setup) -> No
         },
     ]
     assert sent["tools_left_out"] == 0
+    # It gets in by its headers: it does not sign in.
+    assert sent["sign_in"] is None
     assert [one.id for one in await service.list_connections()] == [made.id]
     assert (await service.get_connection(made.id)).id == made.id
     assert (await service.refresh_connection(made.id)).tools[1].gems == []

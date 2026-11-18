@@ -16,6 +16,8 @@ class ConnectionsModels:
                 url: ConnectionUrl
                 # Sent with every request to the server, such as
                 # `{"Authorization": "Bearer ..."}`. Their values are never sent back.
+                # With no `Authorization` header, a server that asks for a sign-in is
+                # kept, needing one.
                 headers: ConnectionHeaders = Field(default_factory=dict)
                 # The gems it is open to: "all", or a list of ids. Left out, none.
                 gems: GemScope = Field(default_factory=list[str])
@@ -60,6 +62,27 @@ class ConnectionsModels:
                 # Null for no limit: it is open to whoever the connection is.
                 gems: list[str] | None
 
+            class SignIn(BaseModel):
+                """A connection's sign-in, as far as the app needs to show it.
+
+                Nothing that lets us in is here: not the pass, not what renews it, not
+                the registration.
+                """
+
+                # "signed_in": it has a pass that may still let us in. "sign_in_needed":
+                # it has none, or its pass ran out and cannot be renewed, or the server
+                # refused it.
+                state: Literal["signed_in", "sign_in_needed"]
+                # When the pass runs out. Null when it is not known, or there is none:
+                # a sign-in server that does not say leaves it unknown, not never.
+                expires_at: datetime | None
+                # Whether the pass is renewed without the user before it runs out.
+                renews: bool
+
+            class SignInStart(BaseModel):
+                # The address to open in the user's browser. It works once, for 10 minutes.
+                url: str
+
             class Connection(BaseModel):
                 id: str
                 # The start of its tools' names as the model is told them. Never changes.
@@ -74,6 +97,8 @@ class ConnectionsModels:
                 tools: list["ConnectionsModels.V1.Output.Tool"]
                 # How many tools the server listed that cannot be used here.
                 tools_left_out: int
+                # Null for a connection that does not sign in: it uses its headers only.
+                sign_in: "ConnectionsModels.V1.Output.SignIn | None"
                 checked_at: datetime
                 created_at: datetime
                 updated_at: datetime
