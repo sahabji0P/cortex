@@ -246,13 +246,17 @@ async def test_an_update_is_checked_like_a_new_gem() -> None:
     assert (await gems.get(str(made.id))).name == "Lata"
 
 
-async def test_gems_are_listed_with_the_latest_change_first() -> None:
+async def test_gems_are_listed_in_the_order_they_were_made_whatever_was_changed_since() -> None:
     gems, docdb = _gems()
-    for name, day in (("Old", 1), ("Newest", 3), ("Middle", 2)):
-        document = _stored(name=name, updated_at=datetime(2026, 11, day, tzinfo=UTC))
+    for name, made, changed in (("Second", 2, 9), ("Third", 3, 3), ("First", 1, 5)):
+        document = _stored(
+            name=name,
+            created_at=datetime(2026, 11, made, tzinfo=UTC),
+            updated_at=datetime(2026, 11, changed, tzinfo=UTC),
+        )
         docdb.documents[document["_id"]] = document
 
-    assert [gem.name for gem in await gems.list_all()] == ["Newest", "Middle", "Old"]
+    assert [gem.name for gem in await gems.list_all()] == ["First", "Second", "Third"]
 
 
 async def test_a_deleted_gem_is_gone() -> None:
@@ -300,14 +304,90 @@ def test_a_config_whose_version_is_not_a_version_is_refused(version: object) -> 
         upgrade_gem_document(_stored(version=version))
 
 
-def test_a_config_without_a_version_is_read_as_version_1() -> None:
+def test_a_config_without_a_version_is_read_as_version_1_and_brought_up_to_date() -> None:
     # Version 1 is the first shape, so a config with no version cannot be older.
     # Reading it as version 1 lets a config written by hand leave the field out.
     document = _stored()
     assert "version" not in document
 
-    assert upgrade_gem_document(document)["version"] == 1
-    assert GemConfig.model_validate(document).version == 1
+    assert upgrade_gem_document(document)["version"] == GEM_CONFIG_VERSION
+    assert GemConfig.model_validate(document).version == GEM_CONFIG_VERSION
+
+
+def test_a_version_1_config_gains_what_version_2_added_with_nothing_chosen() -> None:
+    document = _stored(version=1, name="Lata", instructions="A patient tutor.")
+
+    gem = GemConfig.model_validate(document)
+
+    assert gem.version == 2
+    assert (gem.description, gem.image, gem.voice, gem.speech_speed) == ("", None, None, 1.0)
+    # What it already held is as it was.
+    assert (gem.name, gem.instructions, gem.tools) == ("Lata", "A patient tutor.", ["web_search"])
+
+
+async def test_a_version_1_config_is_stored_in_the_new_shape_once_it_is_changed() -> None:
+    gems, docdb = _gems()
+    document = _stored(version=1)
+    docdb.documents[document["_id"]] = document
+
+    await gems.update(str(document["_id"]), {"description": "Keeps the accounts."})
+
+    stored = docdb.documents[document["_id"]]
+    assert stored["version"] == 2
+    assert stored["description"] == "Keeps the accounts."
+    assert (stored["image"], stored["voice"], stored["speech_speed"]) == (None, None, 1.0)
+
+
+async def test_a_gem_keeps_what_the_app_shows_of_it_and_how_it_is_to_be_spoken() -> None:
+    gems, _ = _gems()
+
+    made = await gems.create(
+        name="Kuber",
+        description="Looks after my money.",
+        image="owl#6aa9ff",
+        voice="Asha",
+        speech_speed=1.25,
+    )
+    read = await gems.get(str(made.id))
+
+    assert (read.description, read.image, read.voice, read.speech_speed) == (
+        "Looks after my money.",
+        "owl#6aa9ff",
+        "Asha",
+        1.25,
+    )
+    # The picture and the voice can be taken away again. The rest cannot be null.
+    cleared = await gems.update(str(made.id), {"image": None, "voice": None})
+    assert (cleared.image, cleared.voice) == (None, None)
+    assert cleared.description == "Looks after my money."
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"description": "x" * 201},
+        {"image": ""},
+        {"image": "x" * 501},
+        {"voice": ""},
+        {"speech_speed": 0.4},
+        {"speech_speed": 2.1},
+    ],
+)
+async def test_a_gem_s_new_fields_keep_to_their_limits(fields: dict[str, Any]) -> None:
+    gems, docdb = _gems()
+
+    with pytest.raises(ValidationError):
+        await gems.create(name="Kuber", **fields)
+    assert docdb.documents == {}
+
+
+def test_a_patch_may_set_the_picture_and_the_voice_to_null_but_not_the_rest() -> None:
+    patch = GemsModels.V1.Input.UpdateGem.model_validate({"image": None, "voice": None})
+    assert patch.changes() == {"image": None, "voice": None}
+
+    for field in ("description", "speech_speed"):
+        with pytest.raises(ValidationError, match="cannot be null"):
+            GemsModels.V1.Input.UpdateGem.model_validate({field: None})
 
 
 def _service() -> GemsServiceV1Class:

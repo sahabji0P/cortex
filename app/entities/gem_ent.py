@@ -1,8 +1,10 @@
 """
 A gem's config: one object that says who a gem is, kept in the `Gems` collection.
 
-It is stored in the database but treated like a config file. It holds only what a call
-can honour today. Anything new is added by raising `GEM_CONFIG_VERSION` and writing one
+It is stored in the database but treated like a config file. It is the one home of a
+gem: what a call or a chat acts on (its name, instructions, model, tools), and what the
+app shows of it and wants spoken (its description, picture, voice and speed), which the
+backend only keeps. Anything new is added by raising `GEM_CONFIG_VERSION` and writing one
 step in `upgrade_gem_document` that brings older documents up to the new shape.
 
 A call is held with a gem when the voice WebSocket names it with `?gem=`.
@@ -29,18 +31,22 @@ __all__ = [
     "DEFAULT_GEM_TOOLS",
     "GEM_CONFIG_VERSION",
     "GemConfig",
+    "GemDescription",
     "GemEntityClass",
+    "GemImage",
     "GemInstructions",
     "GemModelName",
     "GemName",
+    "GemSpeechSpeed",
     "GemTools",
     "GemToolsToSave",
     "GemVersionError",
+    "GemVoice",
     "upgrade_gem_document",
 ]
 
 # The version of the config's shape. Raise it when a field is added, renamed or changed.
-GEM_CONFIG_VERSION = 1
+GEM_CONFIG_VERSION = 2
 
 # The models a gem can be answered by: the same names a call accepts.
 type GemModelName = ModelName
@@ -54,6 +60,10 @@ _NAME_MAX_LENGTH = 100
 _INSTRUCTIONS_MAX_LENGTH = 20_000
 _TOOL_NAME_MAX_LENGTH = 64
 _TOOLS_MAX = 32
+_DESCRIPTION_MAX_LENGTH = 200
+# Room for the address of a picture, should it become one.
+_IMAGE_MAX_LENGTH = 500
+_VOICE_MAX_LENGTH = 100
 
 
 def _check_name(value: str) -> str:
@@ -87,6 +97,12 @@ def _check_known_tools(value: list[str]) -> list[str]:
 # The rules for each field, shared by the stored config and the routes' input.
 type GemName = Annotated[str, AfterValidator(_check_name)]
 type GemInstructions = Annotated[str, Field(max_length=_INSTRUCTIONS_MAX_LENGTH)]
+# What the app shows of a gem, and how its replies are to be spoken. The backend keeps
+# these and gives them back. None of them changes what a call or a chat does yet.
+type GemDescription = Annotated[str, Field(max_length=_DESCRIPTION_MAX_LENGTH)]
+type GemImage = Annotated[str, Field(min_length=1, max_length=_IMAGE_MAX_LENGTH)]
+type GemVoice = Annotated[str, Field(min_length=1, max_length=_VOICE_MAX_LENGTH)]
+type GemSpeechSpeed = Annotated[float, Field(ge=0.5, le=2.0)]
 type GemTools = Annotated[
     list[Annotated[str, Field(max_length=_TOOL_NAME_MAX_LENGTH)]],
     Field(max_length=_TOOLS_MAX),
@@ -105,9 +121,13 @@ class GemVersionError(ValueError):
     """A stored config is in a shape this code cannot read."""
 
 
+def _version_1_to_2(document: dict[str, Any]) -> dict[str, Any]:
+    """Version 2 added what the app shows of a gem and how it is to be spoken."""
+    return {"description": "", "image": None, "voice": None, "speech_speed": 1.0, **document}
+
+
 # One step per version: the step under key N takes a document from version N to N + 1.
-# When version 2 exists, its step goes here as `1: _version_1_to_2`.
-_UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+_UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {1: _version_1_to_2}
 
 
 def upgrade_gem_document(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -115,7 +135,7 @@ def upgrade_gem_document(document: Mapping[str, Any]) -> dict[str, Any]:
 
     A document without a version is read as version 1. Version 1 is the first shape,
     so there is nothing older it could be, and a config written by hand need not
-    name it.
+    name it. It is then brought up to date like any other version 1 document.
     """
     upgraded = dict(document)
     version = upgraded.get("version", 1)
@@ -143,6 +163,11 @@ class GemConfig(BaseModel):
     id: PydanticObjectId = Field(default_factory=ObjectId, alias="_id")
     version: int = GEM_CONFIG_VERSION
     name: GemName
+    # One line on what the gem is for, shown under its name. The model is not told it.
+    description: GemDescription = ""
+    # The gem's picture, as one value the backend does not read. Today the app writes
+    # its built-in face and colour there; later it could be the address of a picture.
+    image: GemImage | None = None
     # Who this gem is and how it behaves, in plain words.
     instructions: GemInstructions = ""
     # The model that answers. None means the configured default.
@@ -151,6 +176,10 @@ class GemConfig(BaseModel):
     speaks_first: bool = False
     # The tools this gem may use, by name.
     tools: GemTools = Field(default_factory=lambda: list(DEFAULT_GEM_TOOLS))
+    # The voice its replies are spoken in, and how fast: 1.0 is normal speed. Kept here
+    # so they have one home. A call does not use them yet.
+    voice: GemVoice | None = None
+    speech_speed: GemSpeechSpeed = 1.0
     created_at: datetime
     updated_at: datetime
 
@@ -171,7 +200,19 @@ class GemConfig(BaseModel):
 
 
 # The fields a client may change. Everything else is the store's to keep.
-_EDITABLE = frozenset({"name", "instructions", "model", "speaks_first", "tools"})
+_EDITABLE = frozenset(
+    {
+        "name",
+        "description",
+        "image",
+        "instructions",
+        "model",
+        "speaks_first",
+        "tools",
+        "voice",
+        "speech_speed",
+    }
+)
 
 
 def _gem_id(value: str) -> PydanticObjectId:
@@ -193,21 +234,29 @@ class GemEntityClass:
         self,
         *,
         name: str,
+        description: str = "",
+        image: str | None = None,
         instructions: str = "",
         model: GemModelName | None = None,
         speaks_first: bool = False,
         tools: list[str] | None = None,
+        voice: str | None = None,
+        speech_speed: float = 1.0,
     ) -> GemConfig:
         now = datetime.now(UTC)
         gem = GemConfig.model_validate(
             {
                 "name": name,
+                "description": description,
+                "image": image,
                 "instructions": instructions,
                 "model": _MODEL_TO_SAVE.validate_python(model),
                 "speaks_first": speaks_first,
                 "tools": _TOOLS_TO_SAVE.validate_python(
                     list(DEFAULT_GEM_TOOLS) if tools is None else tools
                 ),
+                "voice": voice,
+                "speech_speed": speech_speed,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -215,8 +264,12 @@ class GemEntityClass:
         return await self._docdb.insert(gem)
 
     async def list_all(self) -> list[GemConfig]:
-        """Every gem, the one changed most recently first."""
-        return await self._docdb.get_many(GemConfig, filters={}, sort=[("updated_at", -1)])
+        """Every gem, in the order they were made.
+
+        The order does not move when a gem is changed: the app shows them in a row, and
+        a gem that jumped to the front on every edit would be hard to find.
+        """
+        return await self._docdb.get_many(GemConfig, filters={}, sort=[("created_at", 1)])
 
     async def get(self, gem_id: str) -> GemConfig:
         gem = await self._docdb.get(GemConfig, filters={"id": _gem_id(gem_id)})
