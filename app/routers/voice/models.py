@@ -11,8 +11,12 @@ class VoiceModels:
             class Query(BaseModel):
                 """The WebSocket's query string. Anything else in it is ignored."""
 
+                # The id of the gem to talk to. Its config says who answers and how.
+                gem: str | None = None
                 model: ModelName | None = None
-                # Who says the first words. By default the assistant waits for the user.
+                # Who says the first words. By default the assistant waits for the user,
+                # or does what the gem says. Whether it was sent at all is told apart by
+                # `model_fields_set`, since a value sent wins over the gem's.
                 first: Literal["user", "assistant"] = "user"
 
             class Playback(BaseModel):

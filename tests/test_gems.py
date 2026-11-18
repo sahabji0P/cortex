@@ -15,12 +15,14 @@ from app.entities.gem_ent import (
     GemVersionError,
     upgrade_gem_document,
 )
+from app.entities.tools import GEM_TOOL_NAMES, web_search_tool
 from app.routers.gems.controller import router
 from app.routers.gems.models import GemsModels
 from app.routers.gems.service import GemsServiceV1Class
 
 if TYPE_CHECKING:
     from app.adapters.docdb_adp import DocDBAdapterClass
+    from app.adapters.parallel_adp import ParallelAdapterClass
 
 
 class _DocDBFake:
@@ -146,6 +148,40 @@ async def test_a_tool_cannot_be_named_twice() -> None:
 
     with pytest.raises(ValidationError, match="more than once"):
         await gems.create(name="Lata", tools=["web_search", " web_search"])
+
+
+async def test_a_gem_can_only_be_given_a_tool_there_is() -> None:
+    gems, docdb = _gems()
+
+    with pytest.raises(ValidationError, match="cannot be given these tools: weather"):
+        await gems.create(name="Lata", tools=["web_search", "weather"])
+    assert docdb.documents == {}
+
+    made = await gems.create(name="Lata", tools=[" web_search "])
+    assert made.tools == ["web_search"]
+    with pytest.raises(ValidationError, match="cannot be given these tools: weather"):
+        await gems.update(str(made.id), {"tools": ["weather"]})
+    assert (await gems.get(str(made.id))).tools == ["web_search"]
+
+
+def test_every_tool_a_gem_can_be_given_is_a_tool_there_is() -> None:
+    search = web_search_tool(cast("ParallelAdapterClass", object()))
+
+    assert (search.name,) == GEM_TOOL_NAMES
+
+
+async def test_a_stored_gem_with_a_tool_that_has_gone_still_loads_and_can_be_changed() -> None:
+    # The tool is only left out when a call opens. The config keeps what it was given.
+    gems, docdb = _gems()
+    document = _stored(tools=["web_search", "weather"])
+    docdb.documents[document["_id"]] = document
+
+    read = await gems.get(str(document["_id"]))
+    changed = await gems.update(str(document["_id"]), {"name": "Asha"})
+
+    assert read.tools == ["web_search", "weather"]
+    assert changed.name == "Asha"
+    assert changed.tools == ["web_search", "weather"]
 
 
 async def test_a_gem_cannot_be_answered_by_a_model_that_does_not_exist() -> None:
@@ -312,6 +348,7 @@ async def test_the_service_deletes_and_then_cannot_find_a_gem() -> None:
         {"name": "  "},
         {"name": "Lata", "model": "GPT-2"},
         {"name": "Lata", "tools": ["web_search", "web_search"]},
+        {"name": "Lata", "tools": ["weather"]},
         {"name": "Lata", "instructions": "x" * 20_001},
     ],
 )
@@ -324,6 +361,11 @@ def test_a_new_gem_that_breaks_a_rule_is_refused(body: dict[str, Any]) -> None:
 def test_a_patch_cannot_set_a_field_other_than_the_model_to_null(field: str) -> None:
     with pytest.raises(ValidationError, match="cannot be null"):
         GemsModels.V1.Input.UpdateGem.model_validate({field: None})
+
+
+def test_a_patch_cannot_give_a_tool_there_is_not() -> None:
+    with pytest.raises(ValidationError, match="cannot be given these tools"):
+        GemsModels.V1.Input.UpdateGem.model_validate({"tools": ["weather"]})
 
 
 def test_a_patch_keeps_only_the_fields_sent_and_a_null_model() -> None:

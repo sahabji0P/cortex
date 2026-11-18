@@ -17,7 +17,11 @@ from dataclasses import dataclass
 from app.adapters.parallel_adp import ParallelAdapterClass, SearchResult
 from app.entities.model import ToolSpec
 
-__all__ = ["Tool", "Toolbox", "web_search_tool"]
+__all__ = ["GEM_TOOL_NAMES", "Tool", "Toolbox", "web_search_tool"]
+
+# The tools a gem can be given, by name. A gem's config is checked against this when it
+# is saved. Each is offered on a call only when it can run there.
+GEM_TOOL_NAMES: tuple[str, ...] = ("web_search",)
 
 
 def _not_shown(arguments: str) -> str | None:

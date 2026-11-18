@@ -5,14 +5,20 @@ from typing import Annotated
 from fastapi import Depends, WebSocket
 from pydantic import ValidationError
 
+from app.core.errors import NotFoundError
 from app.entities import EntitiesRegistry
-from app.entities.voice_ent import VoiceConversation
+from app.entities.gem_ent import GemConfig, GemEntityClass
+from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
 from app.routers.voice.models import VoiceModels
 
 
 class VoiceServiceV1Class:
-    def __init__(self) -> None:
-        self.voice = EntitiesRegistry.Voice
+    def __init__(
+        self, voice: VoiceEntityClass | None = None, gems: GemEntityClass | None = None
+    ) -> None:
+        # Tests hand in their own. The app uses the ones the registry made at startup.
+        self.voice = EntitiesRegistry.Voice if voice is None else voice
+        self.gems = EntitiesRegistry.Gems if gems is None else gems
 
     def models(self) -> list[VoiceModels.V1.Output.Model]:
         """Every model a conversation can be held with, in the order to show them."""
@@ -31,9 +37,12 @@ class VoiceServiceV1Class:
     async def converse(self, websocket: WebSocket) -> None:
         """Bridge a client WebSocket to one voice conversation.
 
-        The query string may name the model to talk to (`?model=Haiku 5.5`); without it
-        the configured one is used. It may also ask the assistant to speak first
-        (`?first=assistant`); without it the assistant waits for the user.
+        The query string may name a gem to talk to (`?gem=<id>`): its config says who
+        answers, with which model and tools, and whether it speaks first. It may name the
+        model (`?model=Haiku 5.5`) and who speaks first (`?first=assistant`). Either one
+        that is sent wins over the gem's for this call. Without a gem or a model, the
+        configured model is used, and without a gem or `first`, the assistant waits for
+        the user.
 
         Uplink: client binary frames are mic audio, and a JSON text frame can report the
         client's playback delay. Downlink: binary frames are speech audio, text frames
@@ -47,9 +56,25 @@ class VoiceServiceV1Class:
             # is not offered.
             await websocket.close(code=1008, reason="unknown model or setting")
             return
+        gem: GemConfig | None = None
+        if asked.gem is not None:
+            try:
+                gem = await self.gems.get(asked.gem)
+            except NotFoundError:
+                # 1008 again: there is no gem with that id, or it is not an id at all.
+                await websocket.close(code=1008, reason="unknown gem")
+                return
+            except ValidationError:
+                # 1011: the gem is there, but its stored config cannot be read here, as
+                # when a newer cortex wrote it.
+                with contextlib.suppress(Exception):
+                    await websocket.close(code=1011, reason="the gem's config cannot be read")
+                raise
+        # Left out, it is the gem's to say. Without a gem, that means the user.
+        first = asked.first == "assistant" if "first" in asked.model_fields_set else None
         try:
             conversation = await self.voice.open_conversation(
-                asked.model, speaks_first=asked.first == "assistant"
+                asked.model, speaks_first=first, gem=gem
             )
         except LookupError as exc:
             # 1008 again: the model is offered, but its provider has no key here.
