@@ -14,7 +14,7 @@ One `VoiceConversation` per client. The speech-to-text service also detects turn
 
 The model may call `web_search` (Parallel) before it answers. Which model it is is chosen
 when the conversation opens, and everything here is the same for either provider: what
-differs between them is in `voice_model`.
+differs between them is in `model.py`.
 
 The history is what the model is sent on every call, and it holds what the user heard,
 not what was generated. Speech is generated much faster than it plays, so a reply only
@@ -59,18 +59,18 @@ from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass, SearchResult
 from app.config import settings
-from app.entities.voice_model import (
-    VOICE_MODELS,
+from app.entities.model import (
+    LLM,
+    MODELS,
     CallResult,
     Item,
     ModelInfo,
+    ModelName,
     RoundDone,
     TextDelta,
     ToolSpec,
-    VoiceLLM,
-    VoiceModelName,
     is_openai,
-    voice_model,
+    model_for,
 )
 from app.entities.voice_speech import Clock, Playback, Speech, Standby, Utterance
 
@@ -318,9 +318,9 @@ class VoiceConversation:
         *,
         stt: CartesiaSTTSession,
         tts: CartesiaTTSAdapterClass,
-        llm: VoiceLLM,
+        llm: LLM,
         search: ParallelAdapterClass,
-        model: VoiceModelName = "6 Luna",
+        model: ModelName = "6 Luna",
         speaks_first: bool = False,
         clock: Clock = time.monotonic,
     ) -> None:
@@ -348,7 +348,7 @@ class VoiceConversation:
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
         # `llm` has to be the adapter of the provider that `model` belongs to.
         tools = [_WEB_SEARCH_TOOL, _CANCEL_TOOL] if search.configured else []
-        self._model = voice_model(llm, model, tools)
+        self._model = model_for(llm, model, tools)
         # The instructions and the tool list are the start of every request, so they are
         # fixed for the whole conversation: a prompt cache only helps while that start
         # stays the same. The date goes last, after whatever the model adds of its own.
@@ -648,7 +648,7 @@ class VoiceConversation:
         # third to a half of measured runs where the user only said "hello?". With a
         # little thinking it was about one in twenty. That costs about half a second at
         # the median and 1.5 s for the slowest tenth, on every request made while this
-        # holds. An Anthropic model is not asked to: see `voice_model`.
+        # holds. An Anthropic model is not asked to: see `model.py`.
         events = self._model.round(
             [*self._history, *self._open_turn(), *reply.send_back()],
             instructions=self._instructions,
@@ -757,12 +757,10 @@ class VoiceEntityClass:
     def models(self) -> list[tuple[ModelInfo, bool, bool]]:
         """Every model, with whether its provider has a key and whether it is the default."""
         ready = {"OpenAI": self._openai.configured, "Anthropic": self._anthropic.configured}
-        return [
-            (info, ready[info.provider], info.name == settings.voice_model) for info in VOICE_MODELS
-        ]
+        return [(info, ready[info.provider], info.name == settings.voice_model) for info in MODELS]
 
     async def open_conversation(
-        self, model: VoiceModelName | None = None, *, speaks_first: bool = False
+        self, model: ModelName | None = None, *, speaks_first: bool = False
     ) -> VoiceConversation:
         """Start listening. The caller owns the conversation and must `close()` it.
 
@@ -772,7 +770,7 @@ class VoiceEntityClass:
         provider has no key.
         """
         model = model or settings.voice_model
-        llm: VoiceLLM = self._openai if is_openai(model) else self._anthropic
+        llm: LLM = self._openai if is_openai(model) else self._anthropic
         if not llm.configured:
             # Said now, not as a failed reply after the user has spoken.
             provider = "OpenAI" if is_openai(model) else "Anthropic"

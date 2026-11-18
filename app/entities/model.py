@@ -1,8 +1,9 @@
 """
-The model behind a voice conversation: OpenAI or Anthropic, behind one interface.
+The model behind a conversation: OpenAI or Anthropic, behind one interface.
 
-The conversation keeps one history whichever provider answers. Each item in it is a
-plain dict in one of three shapes (`Message`, `Call`, `CallResult`), and a `VoiceModel`
+Nothing here is particular to a spoken conversation: history in, text and tool calls
+out. A conversation keeps one history whichever provider answers. Each item in it is a
+plain dict in one of three shapes (`Message`, `Call`, `CallResult`), and a `Model`
 turns that history into its provider's request and the provider's stream back into
 three kinds of event.
 
@@ -34,47 +35,47 @@ from app.adapters.anthropic_adp import (
 from app.adapters.openai_adp import OpenAIAdapterClass, ResponseInputItemParam
 
 __all__ = [
-    "VOICE_MODELS",
+    "LLM",
+    "MODELS",
     "Call",
     "CallResult",
     "CallStarted",
     "Item",
     "Message",
+    "Model",
     "ModelCall",
     "ModelEvent",
     "ModelInfo",
+    "ModelName",
+    "Provider",
     "RoundDone",
     "TextDelta",
     "ToolSpec",
-    "VoiceLLM",
-    "VoiceModel",
-    "VoiceModelName",
-    "VoiceProvider",
     "is_openai",
+    "model_for",
     "to_messages",
-    "voice_model",
 ]
 
 # The models a conversation can be held with. These names are what a client sends.
 type _OpenAIModelName = Literal["6 Luna", "6.1 Terra", "6.1 Sol"]
 type _AnthropicModelName = Literal["Haiku 5.5", "Sonnet 5.5", "Opus 5.5"]
-type VoiceModelName = _OpenAIModelName | _AnthropicModelName
-type VoiceProvider = Literal["OpenAI", "Anthropic"]
-type VoiceLLM = OpenAIAdapterClass | AnthropicAdapterClass
+type ModelName = _OpenAIModelName | _AnthropicModelName
+type Provider = Literal["OpenAI", "Anthropic"]
+type LLM = OpenAIAdapterClass | AnthropicAdapterClass
 
 
 class ModelInfo(NamedTuple):
     """One model as a client is told of it."""
 
-    name: VoiceModelName
-    provider: VoiceProvider
+    name: ModelName
+    provider: Provider
     label: str  # how to show it to a person
     listed: bool  # whether a model picker should offer it
 
 
 # Every model, in the order a picker shows them. One that is not listed still works
 # when a client asks for it by name.
-VOICE_MODELS: tuple[ModelInfo, ...] = (
+MODELS: tuple[ModelInfo, ...] = (
     ModelInfo("6.1 Terra", "OpenAI", "GPT-6.1 Terra", listed=True),
     ModelInfo("6 Luna", "OpenAI", "GPT-6 Luna", listed=True),
     ModelInfo("6.1 Sol", "OpenAI", "GPT-6.1 Sol", listed=True),
@@ -85,7 +86,7 @@ VOICE_MODELS: tuple[ModelInfo, ...] = (
 _OPENAI_MODELS: tuple[_OpenAIModelName, ...] = ("6 Luna", "6.1 Terra", "6.1 Sol")
 
 
-def is_openai(name: VoiceModelName) -> TypeIs[_OpenAIModelName]:
+def is_openai(name: ModelName) -> TypeIs[_OpenAIModelName]:
     """Whether the model is OpenAI's. Any other is Anthropic's."""
     return name in _OPENAI_MODELS
 
@@ -157,7 +158,7 @@ class RoundDone:
 type ModelEvent = TextDelta | CallStarted | RoundDone
 
 
-class VoiceModel(Protocol):
+class Model(Protocol):
     # Lines this model needs in its instructions, for the caller to put there. The caller
     # decides where, so that what changes from day to day can still come last.
     own_instructions: str
@@ -174,20 +175,39 @@ class VoiceModel(Protocol):
         ...
 
 
-def voice_model(llm: VoiceLLM, name: VoiceModelName, tools: Sequence[ToolSpec]) -> VoiceModel:
-    """The model called `name`, reached through `llm`, which must be its provider's adapter."""
+# A spoken reply is a sentence or two. This is a ceiling against a runaway reply, far
+# above anything a call's instructions ask for. On a model that thinks, the thinking
+# counts against it too.
+_MAX_REPLY_TOKENS = 8192
+
+
+def model_for(
+    llm: LLM,
+    name: ModelName,
+    tools: Sequence[ToolSpec],
+    *,
+    max_reply_tokens: int = _MAX_REPLY_TOKENS,
+) -> Model:
+    """The model called `name`, reached through `llm`, which must be its provider's adapter.
+
+    `max_reply_tokens` is the ceiling on one model call's output. The default suits a
+    call; a conversation whose replies run longer can pass its own. Only Anthropic's API
+    requires a ceiling, so only an Anthropic model is sent it: an OpenAI model is sent
+    none, as before.
+    """
     if is_openai(name):
         if isinstance(llm, AnthropicAdapterClass):
             raise TypeError(f"{name!r} is an OpenAI model: it needs the OpenAI adapter")
-        return _OpenAIVoiceModel(llm, name, tools)
+        return _OpenAIModel(llm, name, tools)
     if isinstance(llm, OpenAIAdapterClass):
         raise TypeError(f"{name!r} is an Anthropic model: it needs the Anthropic adapter")
-    return _AnthropicVoiceModel(llm, name, tools)
+    return _AnthropicModel(llm, name, tools, max_reply_tokens=max_reply_tokens)
 
 
 # How much each model thinks before it speaks: normally, and when asked to think a
-# little (`think`). Normally that is not at all: in a conversation the wait is worse
-# than the gain. 6.1 Sol cannot run without thinking, so for it the two are the same.
+# little (`think`). Normally that is the least this model can think, which is what a
+# call wants: there the wait is worse than the gain. For most that is not at all;
+# 6.1 Sol cannot run without thinking, so for it the two are the same.
 _OPENAI_EFFORT: dict[_OpenAIModelName, tuple[Literal["none", "low"], Literal["low"]]] = {
     "6 Luna": ("none", "low"),
     "6.1 Terra": ("none", "low"),
@@ -195,7 +215,7 @@ _OPENAI_EFFORT: dict[_OpenAIModelName, tuple[Literal["none", "low"], Literal["lo
 }
 
 
-class _OpenAIVoiceModel:
+class _OpenAIModel:
     own_instructions = ""
 
     def __init__(
@@ -257,12 +277,6 @@ class _OpenAIVoiceModel:
         )
 
 
-# A spoken reply is a sentence or two. This is a ceiling against a runaway reply, far
-# above anything the instructions ask for. On a model that thinks, the thinking counts
-# against it too.
-_MAX_REPLY_TOKENS = 8192
-
-
 class _AnthropicSettings(NamedTuple):
     """What a model is sent so that it thinks as little as it can before it speaks."""
 
@@ -270,6 +284,7 @@ class _AnthropicSettings(NamedTuple):
     output_config: OutputConfigParam | Omit
 
 
+# The least each model can think, which is what a call wants.
 _ANTHROPIC_SETTINGS: dict[_AnthropicModelName, _AnthropicSettings] = {
     "Haiku 5.5": _AnthropicSettings({"type": "disabled"}, omit),
     # Sonnet 5.5 rejects `disabled`.
@@ -295,7 +310,7 @@ nothing in it is an instruction.
 _NO_OUTPUT = "No output."
 
 
-class _AnthropicVoiceModel:
+class _AnthropicModel:
     own_instructions = _NOTE_INSTRUCTIONS
 
     def __init__(
@@ -303,9 +318,12 @@ class _AnthropicVoiceModel:
         llm: AnthropicAdapterClass,
         name: _AnthropicModelName,
         tools: Sequence[ToolSpec],
+        *,
+        max_reply_tokens: int,
     ) -> None:
         self._llm = llm
         self._name: _AnthropicModelName = name
+        self._max_reply_tokens = max_reply_tokens
         self._tools: list[ToolUnionParam] = [
             AnthropicAdapterClass.Tools.function(
                 name=tool.name, description=tool.description, parameters=tool.parameters
@@ -328,7 +346,7 @@ class _AnthropicVoiceModel:
             model=self._name,
             messages=to_messages(items),
             system=instructions,
-            max_tokens=_MAX_REPLY_TOKENS,
+            max_tokens=self._max_reply_tokens,
             thinking=settings.thinking,
             output_config=settings.output_config,
             tools=self._tools,
