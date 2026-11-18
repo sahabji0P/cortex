@@ -84,3 +84,20 @@ no long paragraphs.
 the pipeline, interruption, tool calls, the instructions in full, and the known gaps.
 `docs/voice-context.excalidraw` is the same thing as a picture. When how a call behaves
 changes, change both.
+
+## Commits
+
+Never commit a piece of work as one commit, and not as "the code" plus "the docs" either.
+Split it into small commits, one for each step a reader would follow:
+
+- Go from the bottom up, in the order of the layers: a setting, an adapter, an entity,
+  the routes, the link's frames, then the tests, then the docs.
+- A test goes with the code it tests. A test file that needs every layer at once is a
+  commit of its own, after the last layer.
+- The docs are split by what they are: the contract and this file, the README and the
+  spec, the notes.
+- Each commit passes `uv run pytest` and `uv run ruff check app tests` by itself. Check
+  that at each commit, not only at the last one.
+- A commit that changes the contract says "Contract change:" in its message, and what.
+- Read the whole diff before the first commit and plan the groups. If the work is already
+  in one commit and not pushed, undo it and commit it again in groups.
