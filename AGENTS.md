@@ -21,7 +21,7 @@ a change here needs a matching change there:
 | `/v1/gems` (`app/routers/gems`, `GemConfig` in `app/entities/gem_ent.py`) | `src/gem_routes.rs` | The gems and their configs |
 | `GET /v1/gems/{id}/chat` | `src/chat.rs` | A gem's conversation so far, a call's turns included |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
-| `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`) | not built yet | The tool servers gems can use, their tools, and which gem may use which |
+| `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | not built yet | The tool servers gems can use, their tools, which gem may use which, and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
 | `GET /v1/voice/models` | `src/models.rs` | The models a call can be held with |
 
 What that means in practice:
@@ -45,6 +45,16 @@ What that means in practice:
   for one tool a narrower list. A new connection is open to no gem. The app has no
   screen for connections yet: when it gets one, it is the only place this is changed.
   A header's value is never sent to the app, only its name.
+- **A connection can sign in through the browser.** Added with only an address, to a
+  server that asks for a sign-in, it is kept with no tools and `sign_in.state`
+  `"sign_in_needed"`. The app asks `POST /v1/connections/{id}/sign-in` for an address,
+  opens it in the browser, and the browser comes back to this backend, not to the app
+  (on localhost: the backend runs on the user's Mac). The link then says
+  `connection.changed` with the connection's `id`, and the app reads it again. The same
+  frame comes when a pass is refused and cannot be renewed. When a pass is expired or
+  close to it, the app shows a badge only: when `sign_in.state` is `"sign_in_needed"`, or
+  when `sign_in.expires_at` (null when unknown) is near and `sign_in.renews` is false. A
+  pass that renews by itself gets no badge for its time. The pass never reaches the app.
 - **What a gem is told is two parts, the same in a call and in writing.** The Darbar
   text, which by default says how things are here (calls, writing, a cut reply, a late
   tool result), and the gem's own instructions. Both are the user's to change.

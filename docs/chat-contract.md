@@ -35,7 +35,8 @@ a `type`. Binary frames are a call's audio.
 
 | `type` | Fields | Meaning |
 | --- | --- | --- |
-| `link.ready` | `version` (4) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later. Version 4: a call's reply comes as words timed to its audio (`call.assistant.word`), and `call.assistant.delta` is gone |
+| `link.ready` | `version` (5) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later. Version 4: a call's reply comes as words timed to its audio (`call.assistant.word`), and `call.assistant.delta` is gone. Version 5: `connection.changed` |
+| `connection.changed` | `id` (a connection's id) | A connection's sign-in has changed: it needs a sign-in now, or one was just finished. Sent to every open socket. Read the connection again (`GET /v1/connections/{id}`) for its `sign_in` and its tools |
 | `chat.result` | `gem`, `text` | A search, or another tool call, the gem started in an earlier reply has come back, and a reply about it follows, unasked. `text` is what the search looked up, as its `chat.tool` said, or "" |
 | `chat.text` | `gem`, `text` | The next piece of the reply, as it is written |
 | `chat.tool` | `gem`, `text` | The gem is using a tool. `text` says what: what a search looks up, or for a connection's tool the connection and the tool, as "Issue Tracker: Find issues" |
@@ -322,8 +323,10 @@ write takes its place whole. It applies to every conversation opened after the c
 
 A connection is a tool server (an MCP server) the user has added. Its tools are offered
 to the gems it is open to, in a call and in writing, next to web search. The app is where
-the user adds one and says who may use it. Nothing about a connection travels on the
-socket: a tool call of one shows as `chat.tool` or `call.tool.call`, like a search.
+the user adds one, signs in to it, and says who may use it. A tool call of one shows as
+`chat.tool` or `call.tool.call`, like a search. One frame about a connection travels on
+the socket: `connection.changed`, when its sign-in changes. Nothing that lets us in ever
+does.
 
 | Route | Does |
 | --- | --- |
@@ -332,6 +335,8 @@ socket: a tool call of one shows as `chat.tool` or `call.tool.call`, like a sear
 | `GET /v1/connections/{id}` | One connection |
 | `PATCH /v1/connections/{id}` | Changes only the fields sent: `name`, `url`, `headers`, `enabled`, `gems`, `tool_gems`. None may be null |
 | `POST /v1/connections/{id}/refresh` | Asks the server for its tools again, and keeps what it lists now |
+| `POST /v1/connections/{id}/sign-in` | Begins a sign-in. Answers `{"url": "..."}`: open it in the user's browser. It works once, for 10 minutes |
+| `GET /v1/connections/sign-in/callback` | Where the browser comes back to after signing in. It answers the browser with a small page. The app never calls it |
 | `DELETE /v1/connections/{id}` | Deletes it (204) |
 
 A connection, as every route but `DELETE` answers:
@@ -362,6 +367,7 @@ A connection, as every route but `DELETE` answers:
     }
   ],
   "tools_left_out": 0,
+  "sign_in": null,
   "checked_at": "2026-11-18T09:00:00Z",
   "created_at": "2026-11-18T09:00:00Z",
   "updated_at": "2026-11-18T09:05:00Z"
@@ -397,3 +403,39 @@ A connection, as every route but `DELETE` answers:
   that is not http or https) is FastAPI's 422, without its `input`: what was sent may
   hold a header's value. An id that names no connection is a 404.
 - Deleting a gem takes it out of every connection's `gems` and every limit.
+
+### Signing in through the browser
+
+A server can let us in by a header the user gives, or by a sign-in in the user's
+browser (OAuth). Add the connection with only its `url`, and no `Authorization` header:
+if its server asks for a sign-in, the connection is added (201) with `tools: []` and
+
+```json
+"sign_in": {"state": "sign_in_needed", "expires_at": null, "renews": false}
+```
+
+- **`sign_in`** is null for a connection that does not sign in. Otherwise `state` is
+  `"signed_in"` or `"sign_in_needed"`, `expires_at` is when the pass runs out (null when
+  the server did not say: unknown, not never, and null when there is no pass), and
+  `renews` says whether the backend renews the pass by itself before it runs out.
+- **To sign in**, the app calls `POST /v1/connections/{id}/sign-in` and opens the `url`
+  it answers with in the browser. The browser comes back to the backend, not to the
+  app: the backend is on the user's own Mac, at `http://127.0.0.1:8000` by default
+  (`BACKEND_URL`). That has to be rethought when the backend is deployed or runs on
+  another machine. The user is shown a page that says to go back to Cortex. When the
+  sign-in is done, every socket gets `connection.changed` with the connection's `id`,
+  and the app reads it again: it is `"signed_in"` and has its tools.
+- **When a pass runs out.** The backend renews it by itself when it can (`renews`).
+  When the server refuses a pass that cannot be renewed, the connection becomes
+  `"sign_in_needed"` and every socket gets `connection.changed`. A pass past its
+  `expires_at` that cannot be renewed reads as `"sign_in_needed"` without a frame. The
+  app shows a badge for a connection that needs a sign-in, or whose `expires_at` is near
+  while `renews` is false, and nothing more. With `renews` true the time passes and the
+  pass is renewed, so `expires_at` is no reason for a badge. Its tools are still offered; a call of one is answered, for the gem,
+  with "This tool needs the user to sign in to {name} again."
+- **Failures.** `sign-in` on a connection with its own `Authorization` header, or whose
+  server lets us in without one, is a 422. A server whose sign-in cannot be found or
+  used (it does not let a client register itself, say) is a 502, and so is adding one
+  that answers 401 and publishes no sign-in.
+- A new `url` drops the sign-in, and the connection needs one again if the new server
+  asks. An `Authorization` header in a `PATCH` drops it too.
