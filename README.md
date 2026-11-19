@@ -147,7 +147,7 @@ The two are kept apart because they differ. A request is often sent things that 
 
 What it does not show: thinking a provider does not hand over, whatever the ChatGPT proxy does on its own side, and the requests a provider's library retries by itself (a failed request is retried up to twice without a trace; making those visible is next). Speech-to-text and speech are not in the log yet either.
 
-`GET /v1/gems/{id}/log` reads the log back in pages and `GET /v1/gems/{id}/log/{seq}` one entry. Every kind of entry and its fields are in [`docs/chat-contract.md`](docs/chat-contract.md). It is written down in [`app/entities/gem_log.py`](app/entities/gem_log.py), through hooks the loop offers to whoever records a reply ([`app/entities/loop.py`](app/entities/loop.py)): with a record or without one, the model is sent the same.
+`GET /v1/gems/{id}/log` reads the log back in pages, `GET /v1/gems/{id}/log/{seq}` one entry, and `GET /v1/gems/{id}/log/{seq}/sent` everything a request was sent, worked out from the requests before it. Every kind of entry and its fields are in [`docs/chat-contract.md`](docs/chat-contract.md). It is written down in [`app/entities/gem_log.py`](app/entities/gem_log.py), through hooks the loop offers to whoever records a reply ([`app/entities/loop.py`](app/entities/loop.py)): with a record or without one, the model is sent the same.
 
 ## Gems
 
