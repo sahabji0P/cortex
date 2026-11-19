@@ -63,8 +63,26 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - OpenAI can go through a proxy (CLIProxyAPI on a ChatGPT login) by its own two settings. The API key stays. With both set up, the user switches between them in the app; the choice is kept.
 - Measured 2026-11-19: with a real-sized request (about 3,400 tokens) a reply through the proxy on a free plan starts about 5.4 s in, against 1.6 s with the API key. Why is not known. So the API key is the default.
 - The proxy's ChatGPT account is changed from the app: a sign-in in the browser, and the new account replaces the old logins on the proxy.
+- Trajectory: the name for seeing everything a gem did. In the app it is a channel of each gem, beside its chat. Home shows totals.
+- A gem has one log. Everything that happens with it is written there, in order, beside what it remembers. Built.
+- The log is the base. A new thing a gem does is a new kind of entry in it, never a store of its own.
+- Nothing is hidden in it: every request, what it was sent, its tokens, its cost, every tool call, every change of model, instructions or tools.
+- What happened is written when it happens. What is remembered is written when a reply is settled. Two kinds of entry, one order.
+- A cut reply shows what was heard. Its tokens and cost are the whole of what the provider charged.
+- Cost is worked out by us from a price table kept by hand. No provider reports one. Unknown is shown as unknown, never as nothing.
+- Through the ChatGPT proxy the cost shown is what the API key would have paid.
+- A gem is never told which model it runs on. A model change is in the log only.
+- A late tool result is the tool's own row, ending late. Not a context row.
+- Writing the log never holds a reply up and never fails one.
+- No plugin system. The log is the one place to listen: the next thing that looks at a gem reads it.
 
 ## Base (next, order not fixed, no rush)
+
+- The log: a provider library's own retries, each written as a request of its own. Today up to two are made unseen.
+- The log: listening and speaking as entries, with their times and cost (speech-to-text is charged by the second of audio sent, speech by the character).
+- The log: totals by gem, by day and by service, for the app's home.
+- Prices: none yet for 6.1 Terra, Sonnet 5.5 and Opus 5.5, and none for Haiku 5.5 writing to a cache.
+- Our lines sent the same way on every model: a user message in a tag, the developer role kept for instructions. The line that explains the tag in the instructions for every model. A change to what the model is sent, so on its own.
 
 - GemConfig on the backend: character, instructions, model, tools, skills, permissions, sandbox.
 - The shared loop, taken out of the call code without changing how a call behaves.
@@ -101,7 +119,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Vichar Dhara toggle per gem: keep the thinking and pass it back, or drop it.
 - Config: how you control and customise a gem.
 - Characters: animated raja and rani types, GIF or Rive.
-- Cost: the backend sends none yet.
+- Cost: of model requests, in the log. Not yet of speech or search.
 - Old text code (Project, Session, SessionTurn, the Agent SDK pipeline): keep or remove.
 - Which mode each message was in, in the history route's answer: on hold.
 - A user's turn that never gets a reply is lost: it is kept in memory only, never stored.
