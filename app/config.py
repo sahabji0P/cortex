@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = ""
 
+    # OpenAI through a proxy that speaks its API, such as CLIProxyAPI signed in with a
+    # ChatGPT account. When the address is set, every OpenAI request goes there with this
+    # key, and `openai_api_key` is kept but not used. Empty = straight to OpenAI.
+    openai_proxy_url: str = ""
+    openai_proxy_key: str = ""
+
     # Anthropic: a key for the Claude API itself (platform.claude.com), not a cloud
     # provider's.
     anthropic_api_key: str = ""
