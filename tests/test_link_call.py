@@ -21,7 +21,7 @@ from app.entities.gem_ent import GEM_CONFIG_VERSION
 from app.entities.history import Added
 from app.entities.voice_ent import VoiceEvent
 from app.routers.link.service import LinkServiceV1Class
-from tests.test_chat import _Chat, _chat, _said
+from tests.test_chat import _Chat, _chat, _said, _stored_items
 from tests.test_voice_conversation import _completed, _delta
 
 if TYPE_CHECKING:
@@ -944,13 +944,13 @@ async def test_what_a_call_settles_is_stored_as_it_goes_and_the_call_carries_on(
     [conversation] = setup.voice.made
 
     _said_in_the_call(conversation)
-    await _eventually(lambda: len(setup.chat.docdb.collections.get("ChatItems", [])) == 2)
+    await _eventually(lambda: len(_stored_items(setup.chat.docdb)) == 2)
 
     assert await setup.chat.stored() == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "Hi."},
     ]
-    assert [d["mode"] for d in setup.chat.docdb.collections["ChatItems"]] == ["call", "call"]
+    assert [d["mode"] for d in _stored_items(setup.chat.docdb)] == ["call", "call"]
     assert "call.failed" not in socket.types()
     await _close(socket, linked)
 

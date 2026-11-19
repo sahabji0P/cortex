@@ -109,6 +109,13 @@ class _DocDB:
         def same(found: Any, wanted: Any) -> bool:
             if isinstance(wanted, dict) and set(wanted) == {"$in"}:
                 return found in wanted["$in"]
+            if isinstance(wanted, dict) and set(wanted) <= {"$gte", "$lt"}:
+                # As in Mongo, a document without the field, or with none, is not found.
+                return (
+                    found is not None
+                    and ("$gte" not in wanted or found >= wanted["$gte"])
+                    and ("$lt" not in wanted or found < wanted["$lt"])
+                )
             return found == wanted
 
         return all(
@@ -136,11 +143,12 @@ class _DocDB:
         *,
         filters: MutableMapping[str, Any],
         sort: Iterable[tuple[str, Literal[-1, 1]]] | None = None,
+        limit: int | None = None,
     ) -> list[T]:
         found = [d for d in self._all(collection) if self._matches(d, filters)]
         for field, direction in reversed(list(sort or [])):
             found.sort(key=lambda document: document[field], reverse=direction == -1)
-        return [collection.model_validate(document) for document in found]
+        return [collection.model_validate(document) for document in found[:limit]]
 
     async def count(self, collection: type[BaseModel], *, filters: MutableMapping[str, Any]) -> int:
         return len([d for d in self._all(collection) if self._matches(d, filters)])
@@ -210,6 +218,11 @@ def _docdb() -> tuple[_DocDB, "DocDBAdapterClass"]:
     return docdb, cast("DocDBAdapterClass", docdb)
 
 
+def _stored_items(docdb: _DocDB) -> list[dict[str, Any]]:
+    """The items stored of every gem's conversation, without what else its log holds."""
+    return [d for d in docdb.collections.get("GemLog", []) if d.get("kind") == "item"]
+
+
 def _item(gem_id: ObjectId, place: int, text: str, **fields: Any) -> ConversationItem:
     return ConversationItem(
         gem_id=gem_id,
@@ -236,7 +249,7 @@ async def test_a_conversation_is_read_back_in_order_with_its_times_in_utc() -> N
         {"role": "user", "content": "third"},
     ]
     # Stored without a zone, as Mongo keeps them, and read back in UTC.
-    assert docdb.collections["ChatItems"][0]["at"].tzinfo is None
+    assert _stored_items(docdb)[0]["at"].tzinfo is None
     assert all(item.at == _NOW and item.at.tzinfo is UTC for item in read)
 
 
@@ -272,7 +285,7 @@ async def test_deleting_a_gem_deletes_its_conversation() -> None:
 
     assert await store.load(gem.id) == []
     assert len(await store.load(other.id)) == 1
-    assert len(docdb.collections["ChatItems"]) == 1
+    assert len(_stored_items(docdb)) == 1
 
 
 # ---- chat over the standing socket, with the model and the search faked
@@ -728,7 +741,7 @@ async def test_a_message_no_reply_can_be_made_to_gets_chat_error_and_stores_noth
     await socket.until("chat.error")
 
     assert socket.frames[1:] == [{"type": "chat.error", "gem": gem_id, "text": reason}]
-    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert _stored_items(setup.docdb) == []
     assert setup.llm.requests == []
     await _close(socket, linked)
 
@@ -773,6 +786,9 @@ class _BlindStore:
 
     async def load(self, gem_id: ObjectId) -> list[ConversationItem]:
         return []
+
+    async def last(self, gem_id: ObjectId, kind: str | None = None) -> None:
+        return None
 
     async def add(self, items: Sequence[ConversationItem]) -> None:
         await self._store.add(items)
@@ -968,7 +984,7 @@ async def test_a_deleted_gem_has_no_history() -> None:
 
     await setup.gems.delete(str(setup.gem.id))
 
-    assert setup.docdb.collections["ChatItems"] == []
+    assert _stored_items(setup.docdb) == []
     with pytest.raises(NotFoundError):
         await GemsServiceV1Class(setup.gems, setup.conversations).get_chat(str(setup.gem.id))
 
@@ -1070,7 +1086,7 @@ async def test_a_gem_deleted_while_its_reply_is_written_leaves_no_conversation()
     held.set()
     await socket.until("chat.done")
 
-    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert _stored_items(setup.docdb) == []
     await _close(socket, linked)
 
 
@@ -1951,7 +1967,7 @@ async def test_a_deleted_gems_late_result_is_dropped() -> None:
     searches.gates[_WEATHER].set()
     await _settle()
 
-    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert _stored_items(setup.docdb) == []
     assert ("chat.result", _WEATHER) not in socket.chat()
     assert len(setup.llm.requests) == 2
     await _close(socket, linked)
@@ -2288,7 +2304,7 @@ async def test_a_search_running_when_its_gem_is_deleted_is_stopped() -> None:
     await _settle()
 
     assert searches.cancelled == [_WEATHER]
-    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert _stored_items(setup.docdb) == []
     assert setup.conversations._kept == {}
 
 

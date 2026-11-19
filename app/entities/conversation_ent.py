@@ -31,6 +31,7 @@ from bson import ObjectId
 from app.core.errors import NotFoundError
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.gem_ent import GemEntityClass
+from app.entities.gem_log import LogEntityClass
 from app.entities.history import Added, Mode, UserTurn, stubs
 from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
@@ -122,9 +123,18 @@ class GemConversation:
 
 
 class ConversationEntityClass:
-    def __init__(self, *, gems: GemEntityClass, store: ConversationStoreClass) -> None:
+    def __init__(
+        self,
+        *,
+        gems: GemEntityClass,
+        store: ConversationStoreClass,
+        log: LogEntityClass | None = None,
+    ) -> None:
         self._gems = gems
         self._store = store
+        # Hands out the numbers of each gem's log. Left out, the conversations keep
+        # their own.
+        self.log = LogEntityClass(store) if log is None else log
         # What is kept of each gem's conversation, by `gem_key`.
         self._kept: dict[str, GemConversation] = {}
         self._quiet: Callable[[str], None] = _nobody
@@ -199,7 +209,7 @@ class ConversationEntityClass:
         found = await self._store.load(gem_id)
         stored = Stored([entry.item for entry in found], found[-1].mode if found else "chat")
         lost = self._lost(str(gem_id), found, told)
-        return await self.add(gem_id, stored, stubs(lost), stored.mode)
+        return await self.add(gem_id, stored, stubs(lost, "lost-call"), stored.mode)
 
     async def add(
         self, gem_id: ObjectId, stored: Stored, added: Sequence[Added], mode: Mode
@@ -210,18 +220,22 @@ class ConversationEntityClass:
         """
         if not added:
             return stored
+        await self.log.open(gem_id)
+        numbers = self.log.take(gem_id, len(added))
         await self._store.add(
             [
                 ConversationItem(
                     gem_id=gem_id,
+                    seq=seq,
                     place=len(stored.items) + offset,
                     at=one.at,
                     item=one.item,
+                    source=one.source,
                     shown=one.shown,
                     mark=one.mark,
                     mode=mode,
                 )
-                for offset, one in enumerate(added)
+                for offset, (seq, one) in enumerate(zip(numbers, added, strict=True))
             ]
         )
         return Stored([*stored.items, *(one.item for one in added)], mode)
@@ -234,6 +248,7 @@ class ConversationEntityClass:
         """
         if await self._gems.exists(str(gem_id)):
             return False
+        self.log.drop(gem_id)
         await self._store.forget(gem_id)
         return True
 
