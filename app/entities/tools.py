@@ -290,10 +290,11 @@ def tool_search_tool(deferred: Sequence[Tool]) -> Tool:
 def search_tools(query: str, tools: Sequence[Tool]) -> list[str]:
     """The names of the tools that best fit `query`, best first, at most `_FOUND_MAX`.
 
-    A tool scores one for each word of the query found among the words of its name, its
-    description and its arguments' names (a word found as the start of one counts: "issue"
-    finds "issues"). A query that is a tool's name finds that tool first. Ties keep the
-    tools' own order, and a tool that scores nothing is not found.
+    A tool scores one for each word of the query found among the words of its name
+    (without its connection's key), its description and its arguments' names (a word
+    found as the start of one counts: "issue" finds "issues"). A query that is a tool's
+    name finds that tool first. Ties keep the tools' own order, and a tool that scores
+    nothing is not found.
     """
     asked = set(_words(query))
     scored: list[tuple[int, int, str]] = []
@@ -304,7 +305,10 @@ def search_tools(query: str, tools: Sequence[Tool]) -> list[str]:
         properties = tool.spec.parameters.get("properties")
         named = cast("dict[object, object]", properties) if isinstance(properties, dict) else {}
         arguments = " ".join(str(name) for name in named)
-        own = _words(f"{tool.name} {tool.spec.description} {arguments}")
+        # A connection's tool is named `{key}__{tool}`. The key is left out: it is in
+        # every name of the connection, so a query that names the connection would find
+        # all its tools, and load the eight first ones whatever was asked for.
+        own = _words(f"{tool.name.split('__', 1)[-1]} {tool.spec.description} {arguments}")
         score = sum(1 for word in asked if any(one.startswith(word) for one in own))
         if score:
             scored.append((-score, index, tool.name))
