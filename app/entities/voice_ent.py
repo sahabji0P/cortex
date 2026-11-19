@@ -242,6 +242,8 @@ class VoiceConversation:
         )
         # The task producing a reply, while one is being produced.
         self._producing: asyncio.Task[None] | None = None
+        # The turn opened in the log for a reply whose task has not begun yet.
+        self._unstarted: TurnRecord | None = None
         # The latest reply, until it joins the history. That happens when the user next
         # speaks, or when a late tool result is about to be answered: by then it has
         # either been heard in full or is being cut off.
@@ -265,6 +267,7 @@ class VoiceConversation:
             turn = self._record.turn("gem")
             self._add(line(_GREETING_NOTE, "greeting"))
             turn.line("greeting", _GREETING_NOTE)
+            self._unstarted = turn
             self._producing = asyncio.create_task(self._respond(turn=turn))
         # A result that came in before the call opened is told in it.
         self._announce_when_quiet()
@@ -359,6 +362,11 @@ class VoiceConversation:
         """Move the latest reply into the history as the user heard it, if there is one."""
         reply, self._reply = self._reply, None
         if reply is None:
+            # A reply asked for and stopped before it began has its turn open in the
+            # log. Whoever settles is about to stop it, so the turn is closed here.
+            unstarted, self._unstarted = self._unstarted, None
+            if unstarted is not None:
+                unstarted.closed(finished=False, kept=None)
             return None
         reply.speech.silence()
         for call in reply.calls():
@@ -460,6 +468,7 @@ class VoiceConversation:
             # as it was, and is simply made again.)
             self._add(line(_NO_WORDS_NOTE, "no-words"))
             turn.line("no-words", _NO_WORDS_NOTE)
+        self._unstarted = turn
         self._producing = asyncio.create_task(self._respond(turn=turn))
         # A result that comes in from here on, or one left waiting by a turn with no
         # words, waits until this reply has been heard, and is told in a reply of its own.
@@ -475,6 +484,9 @@ class VoiceConversation:
         """
         if turn is None:
             turn = self._record.turn("late_result" if brings_results else "user")
+        # It has begun: from here on its turn is closed when the reply is settled.
+        if self._unstarted is turn:
+            self._unstarted = None
         speech = Speech(
             self._tts,
             self._out.put_nowait,

@@ -305,16 +305,21 @@ class CallEntityClass:
             # What happens in the call is written down in the gem's log.
             record = self._conversations.recording(gem_id, "call")
             record.call_opened()
-            # Nothing is awaited after this, so a caller that cancels the opening either
-            # gets the call back, to close, or none was made.
-            conversation = line.open(
-                darbar=darbar,
-                history=stored.items,
-                last_mode=stored.mode,
-                late=kept.late,
-                connected=connected,
-                record=record,
-            )
+            try:
+                # Nothing is awaited after this, so a caller that cancels the opening
+                # either gets the call back, to close, or none was made.
+                conversation = line.open(
+                    darbar=darbar,
+                    history=stored.items,
+                    last_mode=stored.mode,
+                    late=kept.late,
+                    connected=connected,
+                    record=record,
+                )
+            except BaseException:
+                # It did not open after all: the log does not leave it open.
+                record.call_closed()
+                raise
         except BaseException:
             call.let_go()
             raise
