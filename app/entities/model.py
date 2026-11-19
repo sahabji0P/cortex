@@ -65,6 +65,7 @@ __all__ = [
     "RoundDone",
     "TextDelta",
     "ToolSpec",
+    "Usage",
     "found",
     "is_openai",
     "model_for",
@@ -193,10 +194,29 @@ class ModelCall:
 
 
 @dataclass(frozen=True, slots=True)
+class Usage:
+    """The tokens one model call was charged for, as its provider reported them.
+
+    The three kinds of input do not overlap: what was sent is their sum. `thinking` is
+    part of `output`, never added to it, and None where the provider does not say.
+    """
+
+    input: int  # read in full: neither read from a cache nor written to one
+    cache_read: int
+    cache_write: int
+    output: int
+    thinking: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RoundDone:
-    """The model call finished. Always the last event; `calls` is empty if it only spoke."""
+    """The model call finished. Always the last event; `calls` is empty if it only spoke.
+
+    `usage` is None if the provider reported none.
+    """
 
     calls: list[ModelCall]
+    usage: Usage | None = None
 
 
 type ModelEvent = TextDelta | CallStarted | RoundDone
@@ -295,6 +315,7 @@ class _OpenAIModel:
             store=False,
         )
         output = None
+        usage: Usage | None = None
         # Leaving this block closes the connection, which is what stops the model when
         # the reply is cut off while it is busy with something else, such as speaking.
         async with contextlib.aclosing(stream):
@@ -308,6 +329,7 @@ class _OpenAIModel:
                         yield CallStarted(SEARCH_TOOL)
                 elif event.type == "response.completed":
                     output = event.response.output
+                    usage = _openai_usage(event.response)
                 elif event.type == "response.failed":
                     error = event.response.error
                     raise RuntimeError(error.message if error else "the model call failed")
@@ -325,7 +347,24 @@ class _OpenAIModel:
                 calls.append(ModelCall(item.call_id, item.name, item.arguments))
             elif item.type == "tool_search_call" and item.call_id:
                 calls.append(ModelCall(item.call_id, SEARCH_TOOL, json.dumps(item.arguments)))
-        yield RoundDone(calls)
+        yield RoundDone(calls, usage)
+
+
+def _openai_usage(response: object) -> Usage | None:
+    """What a finished response says it used. Its input count includes what a cache held."""
+    used = getattr(response, "usage", None)
+    if used is None:
+        return None
+    details = getattr(used, "input_tokens_details", None)
+    cache_read = getattr(details, "cached_tokens", None) or 0
+    cache_write = getattr(details, "cache_write_tokens", None) or 0
+    return Usage(
+        input=max(used.input_tokens - cache_read - cache_write, 0),
+        cache_read=cache_read,
+        cache_write=cache_write,
+        output=used.output_tokens,
+        thinking=getattr(getattr(used, "output_tokens_details", None), "reasoning_tokens", None),
+    )
 
 
 def to_input(
@@ -471,8 +510,22 @@ class _AnthropicModel:
                 ModelCall(block.id, block.name, json.dumps(block.input))
                 for block in message.content
                 if block.type == "tool_use"
-            ]
+            ],
+            _anthropic_usage(message),
         )
+
+
+def _anthropic_usage(message: object) -> Usage | None:
+    """What a finished message says it used. Its input count leaves out what a cache held."""
+    used = getattr(message, "usage", None)
+    if used is None:
+        return None
+    return Usage(
+        input=used.input_tokens,
+        cache_read=getattr(used, "cache_read_input_tokens", None) or 0,
+        cache_write=getattr(used, "cache_creation_input_tokens", None) or 0,
+        output=used.output_tokens,
+    )
 
 
 def to_messages(items: Sequence[Item], tools: Collection[str] = ()) -> list[MessageParam]:
