@@ -36,6 +36,8 @@ A conversation is held with one model from start to end, chosen when it opens:
 
 A conversation is always held with the gem's model. `VOICE_MODEL` sets the model for a gem that names none. `GET /v1/voice/models` lists them, with whether each one's key is set. A call with a gem whose model's provider has no key gets `call.refused`, with the reason in words.
 
+OpenAI can also be reached through a proxy that speaks its API, such as [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) signed in with a ChatGPT account. Set `OPENAI_PROXY_URL` (for CLIProxyAPI on this Mac, `http://127.0.0.1:8317/v1`) and `OPENAI_PROXY_KEY` (one of the proxy's own keys): every OpenAI request then goes there, and `OPENAI_API_KEY` is kept but not used. Clear the address to go straight to OpenAI again. The plan's models must include the gem's, and its usage limits apply to calls.
+
 Everything below is the same for either provider. The conversation keeps one history, and only the last step differs: OpenAI is sent it as it stands, and for Anthropic it is translated into alternating user and assistant messages on every request. These things differ on an Anthropic model:
 
 - **Thinking is fixed for the conversation.** It is off on Haiku 5.5, on Sonnet 5.5 it is set to the nearest that model allows, and Opus 5.5 is asked for as little as it will do. What a model writes as thinking is never sent back to it, because the history is cut down to what the user heard. The switch to a little thinking while a search is pending (rule 2 below) is not made, and is not needed: asked "hello?" over a running search, Haiku 5.5 and Opus 5.5 each started no second search in 20 runs of 20.
