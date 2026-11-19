@@ -18,6 +18,7 @@ from anthropic.types import (
     ThinkingConfigParam,
     ToolChoiceParam,
     ToolParam,
+    ToolReferenceBlockParam,
     ToolResultBlockParam,
     ToolUnionParam,
     ToolUseBlock,
@@ -116,6 +117,7 @@ class AnthropicAdapterClass:
             parameters: dict[str, object],
             eager_input_streaming: bool = False,
             strict: bool = True,
+            defer_loading: bool = False,
         ) -> ToolParam:
             """Build a function tool the caller runs itself, strict unless told otherwise.
 
@@ -129,6 +131,11 @@ class AnthropicAdapterClass:
             With `eager_input_streaming` the call's input streams as it is written
             instead of arriving whole. The API then no longer checks it against the
             schema, so the caller has to.
+
+            A tool with `defer_loading` is not shown to the model until a search loads
+            it: a `tool_result` holding a `reference` to it. It stays in `tools` on
+            every request, and is left out of the start of the prompt, so the prompt
+            cache holds. It may not carry `cache_control`.
             """
             tool: ToolParam = {
                 "name": name,
@@ -139,7 +146,17 @@ class AnthropicAdapterClass:
                 tool["strict"] = True
             if eager_input_streaming:
                 tool["eager_input_streaming"] = True
+            if defer_loading:
+                tool["defer_loading"] = True
             return tool
+
+        @staticmethod
+        def reference(name: str) -> ToolReferenceBlockParam:
+            """Loads the tool called `name`, as a block of a search's `tool_result`.
+
+            The tool must be in the request's `tools`, or the request is refused.
+            """
+            return {"type": "tool_reference", "tool_name": name}
 
         @staticmethod
         def pydantic_function(
