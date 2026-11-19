@@ -59,7 +59,8 @@ class LinkModels:
 
                 `gem` is the gem's id. Left out, or null, every gem's log is sent.
                 Nothing is sent of what was written down before: that is read with
-                `GET /v1/gems/{id}/log`. `log.unwatch` stops it, the same way.
+                `GET /v1/gems/{id}/log`. `log.unwatch` with a gem's id stops that
+                gem's, and with none stops them all, whatever was asked for.
                 """
 
                 type: Literal["log.watch", "log.unwatch"]
@@ -81,9 +82,10 @@ class LinkModels:
                 """One entry of a gem's log, as it is written down, for a socket that watches it.
 
                 `entry` has `seq`, `at`, `kind` and `turn`, then its own fields by kind
-                (see `docs/chat-contract.md`). A long text in it is cut short here, and
-                the entry then says `partial`: the whole of it is read with
-                `GET /v1/gems/{id}/log/{seq}`.
+                (see `docs/chat-contract.md`). A long text or list in it is cut short
+                here, and the entry then says `partial`: the whole of it is read with
+                `GET /v1/gems/{id}/log/{seq}`. An entry is placed by its `seq`: an item
+                can come after an entry with a higher number.
                 """
 
                 type: Literal["log.entry"] = "log.entry"

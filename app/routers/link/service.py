@@ -3,7 +3,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from functools import cache
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import Depends, WebSocket
 from pydantic import BaseModel, ValidationError
@@ -30,8 +30,10 @@ _CALL_ALREADY_OPEN = "a call is already open"
 # piles up, and a call that far behind is of no use: it is failed.
 _MIC_FRAMES_WAITING = 300
 
-# The longest text a log entry carries on the link. A longer one is cut to this.
+# The longest text, and the longest list, a log entry carries on the link. A longer one
+# is cut to this.
 _LOG_TEXT_MAX = 4000
+_LOG_LIST_MAX = 50
 
 _log = logging.getLogger(__name__)
 
@@ -192,6 +194,9 @@ class LinkServiceV1Class:
                     which = None if watch.gem is None else gem_key(watch.gem)
                     if watch.type == "log.watch":
                         watched.add(which)
+                    elif which is None:
+                        # Naming no gem stops it all, whatever was asked for.
+                        watched.clear()
                     else:
                         watched.discard(which)
                 else:
@@ -438,11 +443,12 @@ def _frame(output: VoiceEvent | bytes) -> BaseModel | bytes:
 
 
 def _trimmed(entry: dict[str, Any]) -> dict[str, Any]:
-    """A log entry as the link carries it: a long text in it cut short, and said to be.
+    """A log entry as the link carries it: a long text or list in it cut short, and said to be.
 
     The link carries a call's audio too, and a client slow to take one frame counts as
-    gone. So a tool's long result, or a request's long list of items, is not sent whole:
-    the entry says `partial`, and the whole of it is read over its route.
+    gone. So a tool's long result, or a request's long list of items (the first request
+    after a restart is sent the gem's whole conversation), is not sent whole: the entry
+    says `partial`, and the whole of it is read over its route.
     """
     cut = False
 
@@ -454,7 +460,10 @@ def _trimmed(entry: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, dict):
             return {key: short(inner) for key, inner in value.items()}
         if isinstance(value, list):
-            return [short(inner) for inner in value]
+            listed = cast("list[Any]", value)
+            if len(listed) > _LOG_LIST_MAX:
+                cut = True
+            return [short(inner) for inner in listed[:_LOG_LIST_MAX]]
         return value
 
     trimmed = short(entry)
