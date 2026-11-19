@@ -325,14 +325,19 @@ Every entry has these four fields, and then its own, by `kind`:
 
 | Field | Meaning |
 | --- | --- |
-| `seq` | The entry's number in this gem's log: 0, 1, 2, …. The order of the log is the order of `seq` |
-| `at` | When it was written down, in UTC |
+| `seq` | The entry's number in this gem's log. The order of the log is the order of `seq`. The numbers rise from 0, and one can be missing: an entry that could not be written |
+| `at` | When it happened, in UTC, to the millisecond. An item's is when the message arrived, or when its reply was settled, so it can be earlier than the entry before it. Order by `seq`, never by `at` |
 | `kind` | What it is: one of the kinds below |
 | `turn` | The number of the turn it belongs to (1, 2, 3, … for this gem, by call and in writing alike), or null |
 
 A turn is one reply, from when it is asked for to when it is settled. What belongs to a
 turn says so in `turn`: do not group by where an entry falls, since a tool call can end
 long after its turn has closed.
+
+An entry that opens something (`call.opened`, `turn.opened`, `request.sent`,
+`tool.started`) is followed by the one that closes it, with one exception: if the
+backend stops in between, the closing entry is never written. Show such a thing as not
+ended, not as running.
 
 ### The kinds
 
@@ -341,13 +346,13 @@ long after its turn has closed.
 | `call.opened`, `call.closed` | none | A call began, or ended. No turn. Writing has neither |
 | `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) or `late_result` (a tool call that outlived its reply came back). `mode` is `call` or `chat` |
 | `user.said` | `text`, `mode` | The user's words as they arrived, typed or spoken |
-| `note.written` | `reason`, `text` | A line of ours was put in front of the model. `reason` is `call-line` (a call started), `chat-line` (the conversation is written again), `greeting` (the gem is asked to speak first) or `no-words` (the user made a sound with no words). The line that opens a call has no turn |
+| `note.written` | `reason`, `text` | A line of ours was put in front of the model. `reason` is `call-line` (a call started), `chat-line` (the conversation is written again), `greeting` (the gem is asked to speak first) or `no-words` (the user made a sound with no words). A line that marks a change of mode (`call-line`, `chat-line`) has no turn. The same line is written down again if the reply after it left nothing remembered, since it is then sent again |
 | `settings.changed` | any of `model`, `instructions`, `tools` | What the gem's requests are made with differs from its last request. Only the parts that changed are there, each in full (see below) |
-| `request.sent` | `request`, `attempt`, `think`, `kept`, `added`, `count` | A request went to the model. `request` is its number for this gem. `think` is whether the model was asked to think first. `kept`, `added` and `count` say what it was sent (see below) |
+| `request.sent` | `request`, `attempt`, `think`, `kept`, `added`, `count` | A request went to the model. `request` is its number for this gem. `attempt` is always 1 for now: a request the provider's library tries again by itself is not seen. `think` is whether the model was asked to think first. `kept`, `added` and `count` say what it was sent (see below) |
 | `request.done` | `request`, `attempt`, `outcome`, `text`, `calls`, `first_token_at`, `usage`, `cost_usd`, `priced`, `error` | How that request ended (see below) |
 | `tool.started` | `request`, `call_id`, `name`, `arguments`, `connection` | A tool call started running. `request` is the request that made it. `arguments` is JSON text. `connection` is the connection's name, or null for a built-in tool |
 | `tool.done` | `call_id`, `outcome`, `result`, `late` | The tool call ended. `outcome` is `done`, `failed` or `cancelled`. `result` is what the model is told, in full, or null if it was cancelled. `late` is true if its reply was over before it was |
-| `turn.closed` | `outcome`, `kept`, `error` | The reply was settled into what the gem remembers. `outcome` is `finished`, `cut` or `failed`. `kept` is the text kept of a cut reply, ending in "…", or null. `error` is why it failed, or null |
+| `turn.closed` | `outcome`, `kept`, `error` | The reply was settled into what the gem remembers. `outcome` is `finished`, `cut` or `failed`. `kept` is null unless text of the reply was cut off. Then it is the text that is kept: what was delivered, ending in "…", or "" if none of it was. A reply cut while a tool ran, with its text before the call whole, is `cut` with `kept` null. `error` is why it failed, or null |
 | `item` | `place`, `item`, `source`, `mode`, and maybe `mark`, `shown` | One thing the gem now remembers, exactly as the model is sent it from then on. No turn (see below) |
 
 **What a request was sent.** `kept` and `added` say it by difference: the request was
@@ -370,11 +375,14 @@ whatever was delivered of it. `calls` are its tool calls, each `call_id`, `name`
 `cache_write`, `output`, and `thinking` (part of `output`, or null where the provider
 does not say). The three kinds of input do not overlap: what was sent is their sum.
 `cost_usd` is what that cost in US dollars, worked out by the backend from its own price
-table, and `priced` is the date of the prices used. **`usage` and `cost_usd` can be
-null, which means unknown, never nothing**: a request cut while the model produced is
-never told what it used, and a model with no price in the table has no cost. Through
-the ChatGPT proxy the plan pays: `cost_usd` is then what the request would have cost
-with the API key.
+table, and `priced` is the date of the prices used, null whenever `cost_usd` is.
+**`usage` and `cost_usd` can be null, which means unknown, never nothing.** `usage` is
+null for a request cut while the model produced, which is never told what it used, and
+for one whose provider reported no count that can be read. `cost_usd` is null whenever
+`usage` is, and also for a model with no price in the table, a request longer than the
+prices cover, and a request that wrote to a cache on a model with no price for that.
+Through the ChatGPT proxy the plan pays: `cost_usd` is then what the request would have
+cost with the API key.
 
 **Times.** A request took `request.done.at` − `request.sent.at`. Its first output came
 after `first_token_at` − `request.sent.at`. A tool call took `tool.done.at` −
@@ -383,7 +391,8 @@ in a call a reply is settled when the user next speaks, a late result is told, o
 call ends. A reply the user cuts into is settled at that instant and its request is
 stopped after, so its `turn.closed` can come before its `request.done`.
 
-**What changed.** `model` is `{"name", "provider", "via"}`, `via` being `api` or `proxy`.
+**What changed.** `model` is `{"name", "provider", "via"}`: `name` as `GET
+/v1/voice/models` gives it, `provider` `OpenAI` or `Anthropic`, `via` `api` or `proxy`.
 `instructions` is the four layers in order, each `{"name", "text"}`: `darbar`, `gem`,
 `model`, `date`. Joined, they are the instructions as sent. `tools` is every tool the
 model is told of, each `{"name", "description", "parameters", "connection", "deferred"}`,
@@ -396,7 +405,10 @@ it. The first request of a gem writes all three.
 tool's result), `placeholder` (the result we gave a call left running), `late-result`
 (the call we wrote to carry a late result, and that result), `lost-call` (the same, for
 a call lost to a restart), or one of the four line reasons above. `mode` is `call` or
-`chat`. Items are written when a reply is settled, after its `turn.closed`.
+`chat`. `mark`, on a tool's result only, is `placeholder` or `cancelled` (the answer of
+a call that stopped another). `shown`, on a tool call only, is what its `chat.tool` or
+`call.tool.call` frame said. Items are written when a reply is settled, after its
+`turn.closed`.
 
 ### `GET /v1/gems/{gem_id}/log`
 
@@ -414,14 +426,22 @@ One entry, in full. A 404 if the gem or the entry is not there.
 | Sent by | `type` | Fields | Meaning |
 | --- | --- | --- | --- |
 | The app | `log.watch` | `gem` (a gem's id, or left out) | Send this socket each entry of that gem's log as it is written down. With no `gem`, every gem's. Nothing written down before is sent: read that over the route |
-| The app | `log.unwatch` | `gem`, as above | Stop |
-| The backend | `log.entry` | `gem` (the gem's id), `entry` | One entry, as it is written down, in the order of `seq` |
+| The app | `log.unwatch` | `gem`, as above | Stop being sent that gem's log. With no `gem`, stop being sent any log, whatever was asked for. A socket that watches every gem keeps being sent a gem it then names here |
+| The backend | `log.entry` | `gem` (the gem's id), `entry` | One entry, as it is written down |
 
-A socket that has not asked is sent none. The link carries a call's audio too, so a long
-text in an entry (a tool's result, a long message) is cut to 4,000 characters on the
-link. The entry then has `partial: true`, and the whole of it is read over
-`GET /v1/gems/{gem_id}/log/{seq}`. An entry can reach the socket a moment before the
-route has it.
+A socket that has not asked is sent none.
+
+**Place an entry by its `seq`, not by when its frame comes.** What happened is sent the
+instant it happens. An item is sent once it is stored, and its number was taken before
+that. So an item can come after an entry with a higher number, as when the user speaks
+in a call while the last reply is being stored.
+
+The link carries a call's audio too, so a long entry is cut short on it: a text to 4,000
+characters (a tool's result, a long message), and a list to its first 50 (the items of
+a request). The entry then has `partial: true`, and the whole of it is read over
+`GET /v1/gems/{gem_id}/log/{seq}`. A text that was cut may no longer parse as the JSON
+it was. An entry can reach the socket a moment before the route has it, and one that
+could not be written is a 404 there.
 
 What is written down of what happened is not owed like an item is: if the backend stops,
 the last moment of it can be lost. Everything the gem remembers is stored before a
