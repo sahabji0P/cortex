@@ -41,6 +41,7 @@ from app.entities.model import Item
 __all__ = [
     "Added",
     "Mode",
+    "Source",
     "UserTurn",
     "added_reply",
     "line",
@@ -53,6 +54,31 @@ __all__ = [
 
 # How the conversation is held: spoken in a call, or written.
 type Mode = Literal["call", "chat"]
+
+# Who wrote an item of the history. The model is not sent this: it is kept beside the
+# item, so that what is stored can be told apart without reading its wording.
+#
+# - `user`         the user's words, typed or spoken
+# - `gem`          the gem's own text, or a tool call it made
+# - `tool`         a tool's result
+# - `placeholder`  the result we gave a call left running when its reply was cut
+# - `late-result`  the stub call we wrote to carry a late result, and that result
+# - `lost-call`    the stub that closes a call lost to a restart, and its result
+# - `call-line`, `chat-line`  our line that says a call started, or ended
+# - `greeting`     our line that asks the gem to speak first in a call
+# - `no-words`     our line that says the user made a sound with no words in it
+type Source = Literal[
+    "user",
+    "gem",
+    "tool",
+    "placeholder",
+    "late-result",
+    "lost-call",
+    "call-line",
+    "chat-line",
+    "greeting",
+    "no-words",
+]
 
 # The line of ours that goes before the first turn in each mode, after a turn in the
 # other. The gem is told one instruction text however it is reached, and that text says
@@ -75,6 +101,8 @@ class Added:
     shown: str | None = None
     # For a call's result, what it stands for beyond its text (see `ResultMark`).
     mark: ResultMark | None = None
+    # Who wrote it (see `Source`).
+    source: Source = "user"
 
 
 class UserTurn:
@@ -121,9 +149,12 @@ class UserTurn:
         return self.close() if items else []
 
 
-def line(text: str) -> Added:
-    """A line of ours: an item that records what happened, in the history's own voice."""
-    return Added({"role": "developer", "content": text}, datetime.now(UTC))
+def line(text: str, source: Source) -> Added:
+    """A line of ours: an item that records what happened, in the history's own voice.
+
+    `source` says which line it is.
+    """
+    return Added({"role": "developer", "content": text}, datetime.now(UTC), source=source)
 
 
 def mode_line(mode: Mode, before: Mode) -> list[Added]:
@@ -134,7 +165,9 @@ def mode_line(mode: Mode, before: Mode) -> list[Added]:
     something that happened, and the second line says the first call is over. Writing
     gets its line only after a call.
     """
-    return [line(_MODE_LINES[mode])] if mode == "call" or mode != before else []
+    if mode != "call" and mode == before:
+        return []
+    return [line(_MODE_LINES[mode], "call-line" if mode == "call" else "chat-line")]
 
 
 def settled(added: Sequence[Added]) -> int:
@@ -150,10 +183,13 @@ def settled(added: Sequence[Added]) -> int:
     return 0
 
 
-def stubs(calls: Iterable[ToolCall]) -> list[Added]:
-    """Stub calls and their results, as they are added. A stub shows nothing."""
+def stubs(calls: Iterable[ToolCall], source: Source = "late-result") -> list[Added]:
+    """Stub calls and their results, as they are added. A stub shows nothing.
+
+    `source` says what they carry: a late result, or the close of a call that was lost.
+    """
     now = datetime.now(UTC)
-    return [Added(item, now) for call in calls for item in call.items()]
+    return [Added(item, now, source=source) for call in calls for item in call.items()]
 
 
 def told(turn: UserTurn, results: Sequence[LateResult]) -> list[Added]:
@@ -177,11 +213,13 @@ def added_reply(items: Sequence[Item], calls: Sequence[ToolCall], at: datetime) 
     added: list[Added] = []
     for item in items:
         if "type" not in item:
-            added.append(Added(item, at))
+            added.append(Added(item, at, source="gem"))
         elif item["type"] == "function_call":
-            added.append(Added(item, at, shown=shown(by_id[item["call_id"]])))
+            added.append(Added(item, at, shown=shown(by_id[item["call_id"]]), source="gem"))
         else:
-            added.append(Added(item, at, mark=by_id[item["call_id"]].mark))
+            mark = by_id[item["call_id"]].mark
+            source: Source = "placeholder" if mark == "placeholder" else "tool"
+            added.append(Added(item, at, mark=mark, source=source))
     return added
 
 

@@ -244,7 +244,7 @@ class VoiceConversation:
         self._listening = asyncio.create_task(self._listen())
         if speaks_first:
             # Otherwise nothing is said until the user has spoken.
-            self._add(line(_GREETING_NOTE))
+            self._add(line(_GREETING_NOTE, "greeting"))
             self._producing = asyncio.create_task(self._respond())
         # A result that came in before the call opened is told in it.
         self._announce_when_quiet()
@@ -434,7 +434,7 @@ class VoiceConversation:
             # Nothing was said, yet it stopped a reply that was being heard, which now
             # ends the history. (A reply cut before any of it was heard left the history
             # as it was, and is simply made again.)
-            self._add(line(_NO_WORDS_NOTE))
+            self._add(line(_NO_WORDS_NOTE, "no-words"))
         self._producing = asyncio.create_task(self._respond())
         # A result that comes in from here on, or one left waiting by a turn with no
         # words, waits until this reply has been heard, and is told in a reply of its own.
