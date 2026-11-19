@@ -872,13 +872,35 @@ async def test_a_connection_is_sent_without_what_lets_us_in(setup: _Setup) -> No
     assert await service.list_connections() == []
 
 
+async def test_a_connection_is_not_deferred_until_the_user_says_so(setup: _Setup) -> None:
+    service = ConnectionsServiceV1Class(setup.connections)
+    made = await service.create_connection(
+        ConnectionsModels.V1.Input.CreateConnection(name="Tracker", url=_URL, gems="all")
+    )
+    assert made.deferred is False
+    assert not any(tool.spec.deferred for tool in await setup.connections.tools_for(setup.one.id))
+
+    changed = await service.update_connection(
+        made.id, ConnectionsModels.V1.Input.UpdateConnection(deferred=True)
+    )
+
+    assert changed.deferred is True
+    assert (await service.get_connection(made.id)).deferred is True
+    tools = await setup.connections.tools_for(setup.one.id)
+    assert [(tool.spec.deferred, tool.connection) for tool in tools] == [(True, "Tracker")] * 3
+    deferred = await service.create_connection(
+        ConnectionsModels.V1.Input.CreateConnection(name="Other", url=_URL, deferred=True)
+    )
+    assert deferred.deferred is True
+
+
 def test_a_change_names_only_what_changes_and_nothing_may_be_null() -> None:
     change = ConnectionsModels.V1.Input.UpdateConnection(
         gems="all", tool_gems={"close_issue": None}
     )
 
     assert change.changes() == {"gems": "all", "tool_gems": {"close_issue": None}}
-    for field in ("name", "url", "headers", "gems", "enabled", "tool_gems"):
+    for field in ("name", "url", "headers", "gems", "enabled", "deferred", "tool_gems"):
         with pytest.raises(ValidationError, match=f"A connection's {field} cannot be null"):
             ConnectionsModels.V1.Input.UpdateConnection(**{field: None})
 
