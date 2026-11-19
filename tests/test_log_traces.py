@@ -10,6 +10,7 @@ from bson import ObjectId
 
 from app.core.errors import NotFoundError
 from app.routers.gems.service import GemsServiceV1Class
+from app.routers.link.service import _trimmed
 from tests.test_chat import (
     _WEATHER,
     _Chat,
@@ -350,6 +351,117 @@ async def test_a_call_and_writing_share_one_log_and_one_count_of_turns() -> None
     assert kinds.index("call.closed") < kinds.index("turn.opened", kinds.index("call.closed"))
 
 
+async def test_a_reply_that_fails_in_a_call_closes_its_turn_as_failed() -> None:
+    failed = SimpleNamespace(
+        type="response.failed",
+        response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
+    )
+    world = await _world([failed], _spoken("Hi."))
+
+    call, f, keeping = await world.call()
+    f.stt.say("hello")
+    await _read_until(f.conversation, "error")
+    await _said_and_heard(f, "hello?")
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    first, second = _shown(log, "turn.closed")
+    assert (first["turn"], first["outcome"], first["error"]) == (1, "failed", "overloaded")
+    assert second["outcome"] == "finished"
+    stopped, done = _shown(log, "request.done")
+    assert (stopped["outcome"], stopped["error"], stopped["usage"]) == (
+        "failed",
+        "overloaded",
+        None,
+    )
+    assert done["outcome"] == "done"
+
+
+async def test_a_call_closed_as_it_opens_leaves_no_turn_open_in_the_log() -> None:
+    world = await _world(_spoken("Hello."), speaks_first=True)
+
+    # The gem is to speak first, and the call ends before its reply has begun: nothing
+    # is waited for in between.
+    call = await world.calls.open(str(world.gem.id))
+    await call.close()
+    log = await _call_log(world)
+
+    assert [entry["kind"] for entry in log] == [
+        "call.opened",
+        "note.written",
+        "turn.opened",
+        "note.written",
+        "turn.closed",
+        "call.closed",
+    ]
+    (closed,) = _shown(log, "turn.closed")
+    assert (closed["turn"], closed["outcome"], closed["kept"]) == (1, "cut", None)
+    # Nothing was said, so nothing is remembered.
+    assert await world.stored() == []
+
+
+async def test_a_greeting_cut_before_a_word_of_it_is_heard_keeps_nothing() -> None:
+    never = asyncio.Event()
+    world = await _world([_delta("Hello there."), never], _spoken("Yes?"), speaks_first=True)
+
+    call, f, keeping = await world.call()
+    await _read_until(f.conversation, "assistant.word")
+    # The user speaks before the sound device has played any of it.
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    f.stt.turn_end("wait")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    greeting, _ = _shown(log, "turn.closed")
+    # Cut, with nothing delivered: the text kept is empty, not missing.
+    assert (greeting["outcome"], greeting["kept"]) == ("cut", "")
+    cut, _ = _shown(log, "request.done")
+    assert (cut["outcome"], cut["text"]) == ("cut", "Hello there.")
+
+
+async def test_a_call_that_ends_mid_reply_closes_the_turn_then_the_request_then_the_call() -> None:
+    never = asyncio.Event()
+    world = await _world([_delta("Once upon a time."), never])
+
+    call, f, keeping = await world.call()
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.word")
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    kinds = [entry["kind"] for entry in log]
+    assert kinds[-1] == "call.closed"
+    assert kinds.index("turn.closed") < kinds.index("request.done") < kinds.index("call.closed")
+    assert _shown(log, "request.done")[0]["outcome"] == "cut"
+    # Every turn and every request that opened has closed.
+    assert kinds.count("turn.opened") == kinds.count("turn.closed") == 1
+    assert kinds.count("request.sent") == kinds.count("request.done") == 1
+
+
+async def test_a_message_cut_before_the_model_is_asked_leaves_a_turn_with_no_request() -> None:
+    gate = asyncio.Event()
+    setup = await _chat([_delta("Hi."), gate, _completed()], _said("Hello to all three."))
+    socket, linked = await _open(setup.service())
+
+    # The first is being answered when two more come at once: the second never is.
+    socket.send(setup.gem.id, "one")
+    await socket.until("chat.text")
+    for text in ("two", "three"):
+        socket.send(setup.gem.id, text)
+    await socket.until("chat.done")
+    log = await _log(setup)
+
+    turns = {turn: [e["kind"] for e in log if e.get("turn") == turn] for turn in (1, 2, 3)}
+    assert turns[2] == ["turn.opened", "user.said", "turn.closed"]
+    assert [closed["outcome"] for closed in _of(log, "turn.closed")] == ["cut", "cut", "finished"]
+    assert [said["text"] for said in _of(log, "user.said")] == ["one", "two", "three"]
+    assert len(_of(log, "request.sent")) == len(_of(log, "request.done")) == 2
+    await _close(socket, linked)
+
+
 # ---- read back over the routes
 
 
@@ -445,6 +557,33 @@ async def test_a_socket_is_sent_no_log_it_did_not_ask_for() -> None:
 
     assert _entries(socket) == []
     await _close(socket, linked)
+
+
+async def test_unwatching_with_no_gem_named_stops_every_watch() -> None:
+    setup = await _chat(_said("Hi."))
+    socket, linked = await _open(_watching(setup))
+
+    socket.raw(json.dumps({"type": "log.watch", "gem": str(setup.gem.id)}))
+    socket.raw(json.dumps({"type": "log.watch"}))
+    socket.raw(json.dumps({"type": "log.unwatch"}))
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done")
+    await setup.conversations.log.written()
+    await asyncio.sleep(0)
+
+    assert _entries(socket) == []
+    await _close(socket, linked)
+
+
+def test_a_long_list_is_cut_short_on_the_link_too() -> None:
+    items = [{"role": "user", "content": str(n)} for n in range(80)]
+
+    trimmed = _trimmed({"seq": 3, "kind": "request.sent", "kept": 0, "added": items, "count": 80})
+    whole = _trimmed({"seq": 4, "kind": "request.sent", "kept": 80, "added": items[:2]})
+
+    assert (len(trimmed["added"]), trimmed["partial"], trimmed["count"]) == (50, True, 80)
+    assert trimmed["added"] == items[:50]
+    assert "partial" not in whole
 
 
 async def test_a_socket_that_names_no_gem_watches_every_gem() -> None:
