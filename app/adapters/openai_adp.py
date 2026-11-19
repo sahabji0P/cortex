@@ -159,11 +159,14 @@ class OpenAIAdapterClass:
         self._client: AsyncOpenAI | None = None
 
     async def initialize(self) -> None:
-        """Initialize the AsyncOpenAI client when an API key is configured."""
-        if not settings.openai_api_key:
-            return
-
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        """Initialize the AsyncOpenAI client: through the proxy when one is set, else
+        straight to OpenAI when an API key is configured."""
+        if settings.openai_proxy_url:
+            self._client = AsyncOpenAI(
+                base_url=settings.openai_proxy_url, api_key=settings.openai_proxy_key
+            )
+        elif settings.openai_api_key:
+            self._client = AsyncOpenAI(api_key=settings.openai_api_key)
 
     async def close(self) -> None:
         """Close the AsyncOpenAI client if it was initialized."""

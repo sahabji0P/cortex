@@ -117,3 +117,32 @@ async def test_structured_response_requires_a_handler_for_custom_tools() -> None
             output_model=_Answer,
             tools=[adapter.Tools.pydantic_function(_LookupArgs, name="lookup")],
         )
+
+
+@pytest.mark.asyncio
+async def test_the_client_goes_through_the_proxy_when_one_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = "app.adapters.openai_adp.settings"
+    monkeypatch.setattr(f"{settings}.openai_api_key", "sk-openai")
+    monkeypatch.setattr(f"{settings}.openai_proxy_url", "")
+    monkeypatch.setattr(f"{settings}.openai_proxy_key", "proxy-key")
+
+    adapter = OpenAIAdapterClass()
+    await adapter.initialize()
+    assert adapter.client.api_key == "sk-openai"
+    assert str(adapter.client.base_url) == "https://api.openai.com/v1/"
+    await adapter.close()
+
+    monkeypatch.setattr(f"{settings}.openai_proxy_url", "http://127.0.0.1:8317/v1")
+    adapter = OpenAIAdapterClass()
+    await adapter.initialize()
+    assert adapter.client.api_key == "proxy-key"
+    assert str(adapter.client.base_url) == "http://127.0.0.1:8317/v1/"
+    await adapter.close()
+
+    monkeypatch.setattr(f"{settings}.openai_api_key", "")
+    monkeypatch.setattr(f"{settings}.openai_proxy_url", "")
+    adapter = OpenAIAdapterClass()
+    await adapter.initialize()
+    assert not adapter.configured
