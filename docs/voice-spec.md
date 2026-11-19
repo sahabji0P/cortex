@@ -450,7 +450,9 @@ A fourth, added on 16 November 2026:
   to become a request of its own in the log.
 - **Listening and speaking are not in the log.** Speech-to-text and text-to-speech have
   their own times and their own cost, and neither is written down yet. A reply cut
-  while the model was still producing has no token count: the provider never sends one.
+  while the model was still producing has no token count: the count is read when a
+  reply finishes. Anthropic says what it read at the start of a reply, which could be
+  kept; whether OpenAI says anything before the end is to be checked.
 - **A sound before the greeting's first word.** If a turn with no words cuts the
   greeting before the model has written anything, the greeting is not made again and
   the call stays silent until the user speaks. Found while writing this, by running it.
