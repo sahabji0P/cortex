@@ -256,9 +256,9 @@ class VoiceConversation:
         self._standby.ready()
         # The instructions say a line in the conversation marks when a call starts. Every
         # call opens with it, whatever the conversation held before.
-        for opening in mode_line("call", last_mode):
-            self._add(opening)
-            self._record.line(opening.source, opening.item["content"])
+        opening = mode_line("call", last_mode)
+        self._add(*opening)
+        self._record.wrote(opening)
         self._listening = asyncio.create_task(self._listen())
         if speaks_first:
             # Otherwise nothing is said until the user has spoken.

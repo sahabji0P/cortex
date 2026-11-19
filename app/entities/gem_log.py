@@ -55,7 +55,7 @@ import contextlib
 import functools
 import json
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -67,7 +67,7 @@ from app.entities.conversation_store import (
     LogEntry,
     as_shown,
 )
-from app.entities.history import Mode, Source
+from app.entities.history import Added, Mode, Source
 from app.entities.instructions import Layer
 from app.entities.loop import ToolCall
 from app.entities.model import MODELS, Item, ModelCall, ModelName, Usage
@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 
 # Is told each entry as it is written down: the gem's id, and the entry as a client is
 # shown it.
-type Listener = Callable[[str, dict[str, Any]], Awaitable[None]]
+type Listener = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
 # What opened a turn.
 type OpenedBy = Literal["user", "gem", "late_result"]
@@ -342,6 +342,12 @@ class Recording:
         number = None if turn is None else turn.number
         self.note("note.written", number, {"reason": source, "text": text})
 
+    def wrote(self, lines: Sequence[Added]) -> None:
+        """Lines of ours were added to a history, outside any turn: write each down."""
+        for one in lines:
+            if "role" in one.item:
+                self.line(one.source, one.item["content"])
+
     def turn(self, by: OpenedBy) -> "TurnRecord":
         """A reply is asked for: open its turn."""
         number = None
@@ -473,7 +479,7 @@ class RequestRecord:
         self._recording = recording
         self._turn = turn
         self.number = number
-        self._model = model
+        self._model: ModelName | None = model
         self._first: str | None = None
         self._ended = False
 

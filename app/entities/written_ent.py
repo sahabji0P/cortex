@@ -158,9 +158,10 @@ class WrittenConversation:
         self._record = Recording() if record is None else record
         # After a call, a line says the conversation is written from here on. It is
         # stored with the first item that follows it (see `history.py`).
-        for added in mode_line("chat", last_mode):
+        lines = mode_line("chat", last_mode)
+        for added in lines:
             self._add(added)
-            self._record.line(added.source, added.item["content"])
+        self._record.wrote(lines)
         self._writing = False
         self._cut = False
         self._out: asyncio.Queue[_Handed] | None = None

@@ -435,8 +435,7 @@ class ChatEntityClass:
         added = told(turn, results)
         if added:
             lines = mode_line("chat", history.mode)
-            for one in lines:
-                self._conversations.recording(gem_id, "chat").line(one.source, one.item["content"])
+            self._conversations.recording(gem_id, "chat").wrote(lines)
             added = [*lines, *added]
         return await self._conversations.add(gem_id, history, added, "chat")
 

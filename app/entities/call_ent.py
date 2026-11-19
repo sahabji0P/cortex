@@ -293,10 +293,7 @@ class CallEntityClass:
             if kept.turn.open:
                 # A written turn left open has been sent to the model: the call follows it.
                 lines = mode_line("chat", stored.mode)
-                for one in lines:
-                    self._conversations.recording(gem_id, "chat").line(
-                        one.source, one.item["content"]
-                    )
+                self._conversations.recording(gem_id, "chat").wrote(lines)
                 added = [*lines, *kept.turn.added()]
                 try:
                     stored = await self._conversations.add(gem_id, stored, added, "chat")
