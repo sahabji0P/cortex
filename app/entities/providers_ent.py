@@ -3,8 +3,8 @@ How a provider's models are reached. Only OpenAI has a choice: straight with the
 key, or through a proxy such as CLIProxyAPI signed in with a ChatGPT account (see
 `openai_proxy_url` in the settings).
 
-The user's choice is one document in the `Providers` collection. With none, the proxy is
-used when it is set up. The choice is put back on the adapter when the backend starts,
+The user's choice is one document in the `Providers` collection. With none, the API key
+is used when it is set up. The choice is put back on the adapter when the backend starts,
 unless that way is no longer set up.
 
 The proxy's ChatGPT account can be changed from here too, when the proxy's management

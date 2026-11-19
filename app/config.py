@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     # OpenAI through a proxy that speaks its API, such as CLIProxyAPI signed in with a
     # ChatGPT account. Empty = no proxy. With both this and `openai_api_key` set, the user
-    # chooses between them (`/v1/providers/openai`); the proxy is used until they do.
+    # chooses between them (`/v1/providers/openai`); the API key is used until they do.
     openai_proxy_url: str = ""
     openai_proxy_key: str = ""
     # CLIProxyAPI's management key (`remote-management.secret-key` in its config). With it

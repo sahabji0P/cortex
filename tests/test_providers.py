@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from pydantic import BaseModel
 
-from app.adapters.cliproxy_adp import CLIProxyError, ProxyLogin
+from app.adapters.cliproxy_adp import CLIProxyAdapterClass, CLIProxyError, ProxyLogin
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.core.errors import ConflictError
 from app.entities import providers_ent
@@ -17,7 +17,6 @@ from app.routers.providers.models import ProvidersModels
 from app.routers.providers.service import ProvidersServiceV1Class
 
 if TYPE_CHECKING:
-    from app.adapters.cliproxy_adp import CLIProxyAdapterClass
     from app.adapters.docdb_adp import DocDBAdapterClass
 
 
@@ -108,22 +107,22 @@ async def test_the_choice_is_kept_and_put_back_at_startup(monkeypatch: pytest.Mo
     openai = await _openai(monkeypatch, api=True, proxy=True)
     providers = _providers(docdb, openai)
     assert await providers.openai_route() == OpenAIRoute(
-        via="proxy", api=True, proxy=True, manageable=False, accounts=None
+        via="api", api=True, proxy=True, manageable=False, accounts=None
     )
 
-    assert (await providers.set_openai_via("api")).via == "api"
-    assert openai.client.api_key == "sk-openai"
+    assert (await providers.set_openai_via("proxy")).via == "proxy"
+    assert openai.client.api_key == "proxy-key"
 
-    # A restart: a new adapter starts on the proxy, and the stored choice is put back.
+    # A restart: a new adapter starts on the API key, and the stored choice is put back.
     openai = await _openai(monkeypatch, api=True, proxy=True)
-    assert openai.via == "proxy"
-    await _providers(docdb, openai).restore()
     assert openai.via == "api"
+    await _providers(docdb, openai).restore()
+    assert openai.via == "proxy"
 
     # A stored way that is no longer set up is left aside.
-    openai = await _openai(monkeypatch, api=False, proxy=True)
+    openai = await _openai(monkeypatch, api=True, proxy=False)
     await _providers(docdb, openai).restore()
-    assert openai.via == "proxy"
+    assert openai.via == "api"
 
 
 @pytest.mark.asyncio
@@ -197,4 +196,4 @@ async def test_a_failed_sign_in_removes_nothing_and_a_silent_proxy_keeps_the_cho
 
     proxy.down = True
     route = await providers.openai_route()
-    assert (route.via, route.manageable, route.accounts) == ("proxy", True, None)
+    assert (route.via, route.manageable, route.accounts) == ("api", True, None)

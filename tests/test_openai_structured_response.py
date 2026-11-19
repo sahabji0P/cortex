@@ -120,7 +120,7 @@ async def test_structured_response_requires_a_handler_for_custom_tools() -> None
 
 
 @pytest.mark.asyncio
-async def test_each_way_set_up_gets_a_client_and_the_proxy_is_used_first(
+async def test_each_way_set_up_gets_a_client_and_the_api_key_is_used_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = "app.adapters.openai_adp.settings"
@@ -130,13 +130,21 @@ async def test_each_way_set_up_gets_a_client_and_the_proxy_is_used_first(
 
     adapter = OpenAIAdapterClass()
     await adapter.initialize()
-    assert (adapter.via, adapter.client.api_key) == ("proxy", "proxy-key")
-    assert str(adapter.client.base_url) == "http://127.0.0.1:8317/v1/"
-
-    adapter.use("api")
     assert (adapter.via, adapter.client.api_key) == ("api", "sk-openai")
     assert str(adapter.client.base_url) == "https://api.openai.com/v1/"
+
+    adapter.use("proxy")
+    assert (adapter.via, adapter.client.api_key) == ("proxy", "proxy-key")
+    assert str(adapter.client.base_url) == "http://127.0.0.1:8317/v1/"
     await adapter.close()
+
+    # Only the proxy: it is the way without being chosen.
+    monkeypatch.setattr(f"{settings}.openai_api_key", "")
+    adapter = OpenAIAdapterClass()
+    await adapter.initialize()
+    assert (adapter.via, adapter.configured) == ("proxy", True)
+    await adapter.close()
+    monkeypatch.setattr(f"{settings}.openai_api_key", "sk-openai")
 
     # Only the key: no proxy to switch to.
     monkeypatch.setattr(f"{settings}.openai_proxy_url", "")

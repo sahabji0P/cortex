@@ -169,7 +169,8 @@ class OpenAIAdapterClass:
     async def initialize(self) -> None:
         """Make a client for each way that is set up: the API key, the proxy, or both.
 
-        The proxy is used when it is set up, until `use` picks the other way.
+        The API key is used when it is set up, until `use` picks the other way: the
+        proxy is the user's to choose, and the only way when it alone is set up.
         """
         if settings.openai_api_key:
             self._clients["api"] = AsyncOpenAI(api_key=settings.openai_api_key)
@@ -178,7 +179,7 @@ class OpenAIAdapterClass:
                 base_url=settings.openai_proxy_url, api_key=settings.openai_proxy_key
             )
         if self._clients:
-            self.use("proxy" if "proxy" in self._clients else "api")
+            self.use("api" if "api" in self._clients else "proxy")
 
     def use(self, via: OpenAIVia) -> None:
         """Send the next requests the given way. Requests already running are left alone."""
