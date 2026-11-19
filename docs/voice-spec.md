@@ -131,7 +131,9 @@ In this order (all Enforced):
 
 1. A stray fragment is dropped. If no words are left, see
    [A turn with no words](#a-turn-with-no-words).
-2. The words join the open turn, and the model is called.
+2. The words join the open turn, and the model is called. If a late result is waiting,
+   it goes in first: a turn left open is closed, then come the call written by the
+   server and the result, and the words open a new turn.
 
 Nothing is cleared: every search result stays in the history whole, as it does in chat.
 
@@ -407,7 +409,8 @@ A fourth, added on 16 November 2026:
   as the user's turn ends, it goes in ahead of their words. Run live 20 times on each
   model (scenario 17 of the check script), the gem answered the user every time and never
   searched again, but told the result in that same reply in 14 of 20 runs on 6 Luna and
-  9 of 20 on Haiku 5.5. In the others the user is never told: nothing brings it up again.
+  9 of 20 on Haiku 5.5. In the others the server asks for nothing more: whether the gem
+  brings it up later was not measured.
 - **One instruction text for a call and for writing has no recorded live run.** Whether
   a gem keeps to its call rules in a call and its writing rules in writing is to be
   tried out.
