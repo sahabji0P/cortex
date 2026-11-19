@@ -18,6 +18,7 @@ from anthropic.types import (
     ThinkingConfigParam,
     ToolChoiceParam,
     ToolParam,
+    ToolReferenceBlockParam,
     ToolResultBlockParam,
     ToolUnionParam,
     ToolUseBlock,
@@ -115,26 +116,47 @@ class AnthropicAdapterClass:
             description: str,
             parameters: dict[str, object],
             eager_input_streaming: bool = False,
+            strict: bool = True,
+            defer_loading: bool = False,
         ) -> ToolParam:
-            """Build a strict function tool the caller runs itself.
+            """Build a function tool the caller runs itself, strict unless told otherwise.
 
             The model's call arrives as a `tool_use` content block; send the result back
             as a `tool_result` block with the same `tool_use_id`, in the user message
-            that directly follows. `parameters` must set `additionalProperties: false`.
+            that directly follows. A strict tool's `parameters` must set
+            `additionalProperties: false` and keep to the subset the API allows. A schema
+            written elsewhere, such as a tool server's, may not: sent with `strict` off,
+            the input is the model's best effort.
 
             With `eager_input_streaming` the call's input streams as it is written
             instead of arriving whole. The API then no longer checks it against the
             schema, so the caller has to.
+
+            A tool with `defer_loading` is not shown to the model until a search loads
+            it: a `tool_result` holding a `reference` to it. It stays in `tools` on
+            every request, and is left out of the start of the prompt, so the prompt
+            cache holds. It may not carry `cache_control`.
             """
             tool: ToolParam = {
                 "name": name,
                 "description": description,
                 "input_schema": parameters,
-                "strict": True,
             }
+            if strict:
+                tool["strict"] = True
             if eager_input_streaming:
                 tool["eager_input_streaming"] = True
+            if defer_loading:
+                tool["defer_loading"] = True
             return tool
+
+        @staticmethod
+        def reference(name: str) -> ToolReferenceBlockParam:
+            """Loads the tool called `name`, as a block of a search's `tool_result`.
+
+            The tool must be in the request's `tools`, or the request is refused.
+            """
+            return {"type": "tool_reference", "tool_name": name}
 
         @staticmethod
         def pydantic_function(

@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # App
     environment: Literal["local", "staging", "production"] = "local"
     debug: bool = True
+    # The address the user's browser reaches this backend at. A connection's sign-in
+    # sends the browser back to this backend, at `{backend_url}/v1/connections/sign-in/
+    # callback`, so it has to be reachable from the browser. The default works because
+    # the backend runs on the user's own Mac. Rethink it when the backend is deployed or
+    # runs on another machine. Changing it makes each connection register again.
+    backend_url: str = "http://127.0.0.1:8000"
 
     # The model a gem answers with, in a call or in writing, when its config names none:
     # "6 Luna", "6.1 Terra" or "6.1 Sol" (OpenAI); "Haiku 5.5", "Sonnet 5.5" or "Opus 5.5"

@@ -28,3 +28,17 @@ class ForbiddenError(AppError):
 class ConflictError(AppError):
     def __init__(self, message: str) -> None:
         super().__init__(409, "conflict", message)
+
+
+class InvalidError(AppError):
+    """What was asked cannot be done as it was asked. `message` says why."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(422, "invalid", message)
+
+
+class UpstreamError(AppError):
+    """A service this backend was asked to reach did not answer as needed."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(502, "upstream_failed", message)

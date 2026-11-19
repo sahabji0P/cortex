@@ -12,7 +12,8 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Gyan Kosh (proposed): memory.
 - Granth (proposed): a long document a gem writes, kept in its Bhandar.
 - Vichar Dhara (proposed): the setting that carries a gem's thinking forward.
-- No name yet: skills, tool servers ("connection" for now), the vault.
+- Connection: a tool server (MCP) the user has added. Still "for now".
+- No name yet: skills, the vault.
 - Cortex: the name of the whole project, which holds one or many gems. Never an assistant.
 
 ## Decided
@@ -47,6 +48,18 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Nothing is cleared from the history, in a call or in chat. Keep it simple.
 - A stored result says what it is by a mark, never by its wording.
 - In a call the app shows a reply's words as they are heard: each word is sent with where it starts in the audio. The model's text is not sent early. Chat is unchanged.
+- A connection is an MCP server reached by address. Its tools are offered next to web search, in a call and in chat.
+- Who may use a connection is said on the connection: all gems or some. One tool can be narrowed further. Built.
+- A new connection is open to no gem until you say which.
+- A gem is offered a copy of a server's tools, made when you ask. A server cannot change them behind your back.
+- Closing a tool to a gem holds at once, even in an open call: every call of it reads the connection again.
+- A gem's own `tools` are the built-in ones only.
+- A connection can sign in through the browser (OAuth): add it by address only, and Cortex gets the pass itself. Built.
+- The browser comes back to a route on the backend, on localhost: the backend runs on your Mac. Rethink when it is deployed or runs on another machine.
+- A pass is renewed by itself when it can. One that cannot is dropped when refused, the app is told, and the gem is told in plain words.
+- A tool call never waits on a browser.
+- Fixed headers stay, for servers that take a key.
+- A connection is deferred unless you turn it off: one flag, on by default. Its tools are found with our own `tool_search` and loaded by each provider's deferred loading, at the end of the context, so the cache holds. Built.
 - OpenAI can go through a proxy (CLIProxyAPI on a ChatGPT login) by its own two settings. The API key stays. With both set up, the user switches between them in the app; the choice is kept.
 - Measured 2026-11-19: with a real-sized request (about 3,400 tokens) a reply through the proxy on a free plan starts about 5.4 s in, against 1.6 s with the API key. Why is not known. So the API key is the default.
 - The proxy's ChatGPT account is changed from the app: a sign-in in the browser, and the new account replaces the old logins on the proxy.
@@ -68,7 +81,17 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Workers: a worker returns to its parent gem. A shared worker that is triggered is a new idea.
 - Vault: secrets per gem, and shared ones. The model never sees a secret.
 - Vault: a gem without a secret asks the gem that has it to do the job. The secret is not handed over.
-- Permissions: allow, ask or block, per gem and tool.
+- Permissions: allow, ask or block, per gem and tool. Built so far: which gems, per connection and per tool. No "ask".
+- Connections by local command (stdio): not until there is a sign-in. A route that starts a command is too open.
+- Connection headers, passes and registrations are kept in the database as given. They move to the vault.
+- A pass running out: a badge in the app only. No pop-up, no notification.
+- Sign-in servers that do not let Cortex register itself, and scope step-up on a 403: not built.
+- Connections over SSE: not built.
+- A connection's pictures and sounds are not passed on to the model, only text.
+- A server telling us its tools changed: not listened to. You refresh.
+- A connection document that cannot be read stops every gem's reply. Skip it and say so instead.
+- A deleted connection's key is free again: a new one of the same name takes over its tools' names in old conversations.
+- The app has no screen for connections yet.
 - Sandbox: what a tool can reach even when it is allowed.
 - Hooks: our own code run at fixed moments of the loop.
 - Homes: each gem's own computer, hosted so it works when the Mac is off.
@@ -120,3 +143,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - No cap on tool rounds: does a gem ever loop?
 - Call: three things are now asked of the model and not yet run live: a few words before a wait, carrying on after a sound, telling a late result after answering.
 - One instruction text for call and chat: does a gem keep to the call rules in a call and the writing rules in writing?
+- Connections: no run with a real model yet. Does each provider take every schema a server lists?
+- Many tools in a call: how much later is the first word?
+- A deferred tool's first use in a call costs one more model round. How long is that wait before the first word?
+- A connection's result is cut at 20,000 characters. Is that the right number?

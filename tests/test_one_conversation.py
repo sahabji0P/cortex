@@ -23,6 +23,7 @@ from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.history import Mode
 from app.entities.late_results import LateResults
 from app.entities.model import Item
+from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation
 from tests.test_chat import _NOW, _docdb, _NoKey, _said
 from tests.test_voice_conversation import (
@@ -103,6 +104,7 @@ class _Line:
         history: Sequence[Item] = (),
         last_mode: Mode = "chat",
         late: LateResults | None = None,
+        connected: Sequence[Tool] = (),
     ) -> VoiceConversation:
         voice = self._voice
         stt, tts = _STT(), _TTS()
@@ -117,6 +119,7 @@ class _Line:
             history=history,
             last_mode=last_mode,
             late=late,
+            connected=connected,
             clock=voice.clock,
         )
         voice.calls.append(

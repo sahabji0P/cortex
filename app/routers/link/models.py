@@ -62,7 +62,19 @@ class LinkModels:
                 # 2: the link carries calls as well as chat.
                 # 3: a search carries on after a cut, and its result is told later.
                 # 4: a call's reply comes as words timed to its audio, not as text.
-                version: Literal[4] = 4
+                # 5: a connection whose sign-in changes is told (`connection.changed`).
+                version: Literal[5] = 5
+
+            class ConnectionChanged(BaseModel):
+                """A connection's sign-in has changed: read it again (`GET /v1/connections/{id}`).
+
+                Sent to every socket when a connection comes to need a sign-in, as when
+                the server refuses its pass and it cannot be renewed, and when a sign-in
+                is finished. It says nothing else: what lets us in is never sent.
+                """
+
+                type: Literal["connection.changed"] = "connection.changed"
+                id: str
 
             class CallReady(BaseModel):
                 """The call is open. Its audio and events follow."""

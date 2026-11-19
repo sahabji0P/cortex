@@ -21,6 +21,7 @@ a change here needs a matching change there:
 | `/v1/gems` (`app/routers/gems`, `GemConfig` in `app/entities/gem_ent.py`) | `src/gem_routes.rs` | The gems and their configs |
 | `GET /v1/gems/{id}/chat` | `src/chat.rs` | A gem's conversation so far, a call's turns included |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
+| `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | not built yet | The tool servers gems can use, their tools, which gem may use which, whether a gem finds its tools by searching (`deferred`), and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
 | `/v1/providers/openai` | being built | How OpenAI is reached, with the API key or through a proxy on a ChatGPT login: the way in use, which ways are set up, and the user's switch. Also the proxy's ChatGPT accounts (email, plan, whether usable), and a sign-in that replaces them: a route that gives the address to open in the browser, and one the app asks until it says `ok` or `error` |
 | `GET /v1/voice/models` | `src/models.rs` | The models a call can be held with |
 
@@ -40,6 +41,21 @@ What that means in practice:
   speed are kept but no call uses them yet, so the app shows them as "coming soon".
   A gem made with blank instructions is given the default ones (how to talk in a call
   and how to write), and the app shows what comes back.
+- **A gem's `tools` are the built-in ones only.** A connection's tools are not named
+  on the gem. Who may use them is said on the connection: the gems it is open to, and
+  for one tool a narrower list. A new connection is open to no gem. The app has no
+  screen for connections yet: when it gets one, it is the only place this is changed.
+  A header's value is never sent to the app, only its name.
+- **A connection can sign in through the browser.** Added with only an address, to a
+  server that asks for a sign-in, it is kept with no tools and `sign_in.state`
+  `"sign_in_needed"`. The app asks `POST /v1/connections/{id}/sign-in` for an address,
+  opens it in the browser, and the browser comes back to this backend, not to the app
+  (on localhost: the backend runs on the user's Mac). The link then says
+  `connection.changed` with the connection's `id`, and the app reads it again. The same
+  frame comes when a pass is refused and cannot be renewed. When a pass is expired or
+  close to it, the app shows a badge only: when `sign_in.state` is `"sign_in_needed"`, or
+  when `sign_in.expires_at` (null when unknown) is near and `sign_in.renews` is false. A
+  pass that renews by itself gets no badge for its time. The pass never reaches the app.
 - **What a gem is told is two parts, the same in a call and in writing.** The Darbar
   text, which by default says how things are here (calls, writing, a cut reply, a late
   tool result), and the gem's own instructions. Both are the user's to change.
@@ -69,3 +85,20 @@ no long paragraphs.
 the pipeline, interruption, tool calls, the instructions in full, and the known gaps.
 `docs/voice-context.excalidraw` is the same thing as a picture. When how a call behaves
 changes, change both.
+
+## Commits
+
+Never commit a piece of work as one commit, and not as "the code" plus "the docs" either.
+Split it into small commits, one for each step a reader would follow:
+
+- Go from the bottom up, in the order of the layers: a setting, an adapter, an entity,
+  the routes, the link's frames, then the tests, then the docs.
+- A test goes with the code it tests. A test file that needs every layer at once is a
+  commit of its own, after the last layer.
+- The docs are split by what they are: the contract and this file, the README and the
+  spec, the notes.
+- Each commit passes `uv run pytest` and `uv run ruff check app tests` by itself. Check
+  that at each commit, not only at the last one.
+- A commit that changes the contract says "Contract change:" in its message, and what.
+- Read the whole diff before the first commit and plan the groups. If the work is already
+  in one commit and not pushed, undo it and commit it again in groups.

@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.routers.connections.controller import router as connections_router
 from app.routers.darbar.controller import router as darbar_router
 from app.routers.gems.controller import router as gems_router
 from app.routers.link.controller import router as link_router
@@ -14,6 +15,7 @@ V1: tuple[APIRouter, ...] = (
     voice_router,
     gems_router,
     darbar_router,
+    connections_router,
     providers_router,
     link_router,
 )

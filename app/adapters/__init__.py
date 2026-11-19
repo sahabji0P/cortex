@@ -6,6 +6,7 @@ from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
 from app.adapters.cliproxy_adp import CLIProxyAdapterClass
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.adapters.http_adp import HttpAdapterClass
+from app.adapters.mcp_adp import McpAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.adapters.redis_adp import RedisAdapterClass
@@ -21,6 +22,7 @@ class AdapterRegistry:
         self.CartesiaSTT = CartesiaSTTAdapterClass()
         self.CartesiaTTS = CartesiaTTSAdapterClass()
         self.Parallel = ParallelAdapterClass()
+        self.Mcp = McpAdapterClass()
         self.CLIProxy = CLIProxyAdapterClass()
         await asyncio.gather(
             self.DocDB.initialize(),
@@ -31,6 +33,7 @@ class AdapterRegistry:
             self.CartesiaSTT.initialize(),
             self.CartesiaTTS.initialize(),
             self.Parallel.initialize(),
+            self.Mcp.initialize(),
             self.CLIProxy.initialize(),
         )
 
@@ -44,6 +47,7 @@ class AdapterRegistry:
             self.CartesiaSTT.close(),
             self.CartesiaTTS.close(),
             self.Parallel.close(),
+            self.Mcp.close(),
             self.CLIProxy.close(),
         )
 

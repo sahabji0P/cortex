@@ -16,6 +16,7 @@ from openai.types.responses import (
     ResponseStreamEvent,
     ResponseTextConfigParam,
     ToolParam,
+    ToolSearchToolParam,
     WebSearchToolParam,
     response_create_params,
     tool_param,
@@ -23,8 +24,11 @@ from openai.types.responses import (
 )
 
 # Re-exported (see __all__) so the pipeline can isinstance-narrow web-search citations.
-from openai.types.responses.response_input_param import FunctionCallOutput
+from openai.types.responses.response_input_param import FunctionCallOutput, ToolSearchCall
 from openai.types.responses.response_output_text import AnnotationURLCitation
+from openai.types.responses.response_tool_search_output_item_param_param import (
+    ResponseToolSearchOutputItemParamParam,
+)
 from openai.types.responses.tool_param import ParseableToolParam
 from openai.types.shared_params import Reasoning as OpenAIThinking
 from pydantic import BaseModel
@@ -34,10 +38,12 @@ from app.config import settings
 __all__ = [
     "AnnotationURLCitation",
     "FunctionCallOutput",
+    "FunctionToolParam",
     "OpenAIAdapterClass",
     "OpenAIThinking",
     "OpenAIVia",
     "ResponseInputItemParam",
+    "ToolParam",
 ]
 
 type ToolHandler = Callable[..., object | Awaitable[object]]
@@ -88,18 +94,71 @@ class OpenAIAdapterClass:
             name: str,
             description: str,
             parameters: dict[str, object],
+            strict: bool = True,
+            defer_loading: bool = False,
         ) -> FunctionToolParam:
-            """Build a strict function tool the caller runs itself.
+            """Build a function tool the caller runs itself, strict unless told otherwise.
 
             The model's call arrives as a `function_call` output item; send the result
             back as a `function_call_output` input item with the same `call_id`.
+
+            A strict tool's arguments always fit its schema, which must then keep to
+            the subset the API allows. A schema written elsewhere, such as a tool
+            server's, may not: sent with `strict` off, the arguments are the model's
+            best effort.
+
+            A tool with `defer_loading` is one the model loads by searching: it is sent
+            in a `tool_search_output`, not in the request's `tools`.
             """
-            return {
+            tool: FunctionToolParam = {
                 "type": "function",
                 "name": name,
                 "description": description,
                 "parameters": parameters,
-                "strict": True,
+                "strict": strict,
+            }
+            if defer_loading:
+                tool["defer_loading"] = True
+            return tool
+
+        @staticmethod
+        def tool_search(*, description: str, parameters: dict[str, object]) -> ToolSearchToolParam:
+            """A tool search the caller runs itself, for tools sent with `defer_loading`.
+
+            The model's search arrives as a `tool_search_call` output item, whose
+            `arguments` is an object, not a string. Answer it with `search_output`: the
+            tools found are added at the end of the context, where they were loaded, so
+            the start of the request, and the prompt cache, stay as they were.
+            """
+            return {
+                "type": "tool_search",
+                "execution": "client",
+                "description": description,
+                "parameters": parameters,
+            }
+
+        @staticmethod
+        def search_call(*, call_id: str, arguments: dict[str, object]) -> ToolSearchCall:
+            """A search the model made, as it is sent back in `input`."""
+            return {
+                "type": "tool_search_call",
+                "execution": "client",
+                "call_id": call_id,
+                "status": "completed",
+                "arguments": arguments,
+            }
+
+        @staticmethod
+        def search_output(
+            *, call_id: str, tools: list[FunctionToolParam]
+        ) -> ResponseToolSearchOutputItemParamParam:
+            """What a search found: the full definitions of the tools it loads."""
+            return {
+                "type": "tool_search_output",
+                "execution": "client",
+                "call_id": call_id,
+                "status": "completed",
+                "tools": tools,
             }
 
         @staticmethod

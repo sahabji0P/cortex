@@ -179,7 +179,13 @@ class _DocDB:
             self._all(collection).append({**ids, **update_data})
             return 1
         for document in found[:1]:
-            document.update(update_data)
+            # Times lose their zone on the way in here too, as they do in Mongo.
+            document.update(
+                {
+                    key: value.replace(tzinfo=None) if isinstance(value, datetime) else value
+                    for key, value in update_data.items()
+                }
+            )
         return len(found[:1])
 
     async def delete(self, collection: type[BaseModel], filters: MutableMapping[str, Any]) -> int:
@@ -470,7 +476,7 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
 
-    assert socket.frames[0] == {"type": "link.ready", "version": 4}
+    assert socket.frames[0] == {"type": "link.ready", "version": 5}
     assert socket.frames[1:] == [
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "Hi "},
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "there."},
