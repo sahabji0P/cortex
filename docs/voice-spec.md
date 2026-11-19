@@ -229,7 +229,7 @@ Every request to the conversation model is built the same way, in this order (En
 | Part | What it is | Changes during a call? |
 | --- | --- | --- |
 | 1. Instructions | The text under [The instructions](#the-instructions) | No |
-| 2. Tools | `web_search`, `cancel_tool_call`, then the tools of the gem's connections, then any tool the history holds a call of that is no longer offered (declared as not available). Or none | No |
+| 2. Tools | `web_search`, `cancel_tool_call`, `tool_search` when a connection is deferred, then the tools of the gem's connections (a deferred one marked so, or on OpenAI left out), then any tool the history holds a call of that is no longer offered (declared as not available). Or none | No |
 | 3. History | The gem's stored conversation, then every item the call has finished, oldest first | Only grows at its end |
 | 4. The open user turn | The turn no reply has been heard to yet | Can gain a line |
 | 5. This reply so far | On the second and later calls of one reply: what was said before the search, the call, its result | Grows within the reply |
@@ -361,6 +361,11 @@ cancel_tool_call: Stop a tool call that is still running in the background. Call
 A connection's tool is told to the model by the description its server gave, as it was
 when the user last had the server asked, under the name `{key}__{tool}`. Its schema is
 the server's, sent with `strict` off.
+
+A deferred connection's tools are loaded by a search first (Enforced): the model calls
+`tool_search`, its result loads the tools found at that point of the history, and the
+model calls one in the next round. So a deferred tool's first use in a call is one more
+model round before the reply. The tool list and the instructions do not change.
 
 ## What the server writes into the history
 

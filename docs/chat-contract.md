@@ -330,10 +330,10 @@ does.
 
 | Route | Does |
 | --- | --- |
-| `POST /v1/connections` | Adds one (201). Body: `name`, `url`, and optionally `headers`, `gems`, `enabled`. The server is asked for its tools before anything is kept: this can take up to 20 seconds |
+| `POST /v1/connections` | Adds one (201). Body: `name`, `url`, and optionally `headers`, `gems`, `enabled`, `deferred`. The server is asked for its tools before anything is kept: this can take up to 20 seconds |
 | `GET /v1/connections` | Every connection, in the order they were added |
 | `GET /v1/connections/{id}` | One connection |
-| `PATCH /v1/connections/{id}` | Changes only the fields sent: `name`, `url`, `headers`, `enabled`, `gems`, `tool_gems`. None may be null |
+| `PATCH /v1/connections/{id}` | Changes only the fields sent: `name`, `url`, `headers`, `enabled`, `deferred`, `gems`, `tool_gems`. None may be null |
 | `POST /v1/connections/{id}/refresh` | Asks the server for its tools again, and keeps what it lists now |
 | `POST /v1/connections/{id}/sign-in` | Begins a sign-in. Answers `{"url": "..."}`: open it in the user's browser. It works once, for 10 minutes |
 | `GET /v1/connections/sign-in/callback` | Where the browser comes back to after signing in. It answers the browser with a small page. The app never calls it |
@@ -349,6 +349,7 @@ A connection, as every route but `DELETE` answers:
   "url": "https://tools.example.com/mcp",
   "headers": ["Authorization"],
   "enabled": true,
+  "deferred": false,
   "gems": ["6afdb62efdd277b795ce9401"],
   "tools": [
     {
@@ -392,6 +393,9 @@ A connection, as every route but `DELETE` answers:
   the connection is added, when its `url` or `headers` change, and on a refresh.
   `tools_left_out` counts tools the server lists that cannot be used here.
 - **`enabled: false`** offers its tools to no gem, and keeps who it was open to.
+- **`deferred: true`** keeps its tools out of every request until the gem searches for
+  them (`tool_search`), which loads the ones it needs. Default `false`. A search shows
+  as `chat.tool` or `call.tool.call` with the text "Looking for a tool".
 - **When a change applies.** In writing, from the next message. In a call, the tools
   offered are those of when it opened, but a tool closed to the gem during the call is
   refused when it is called.
