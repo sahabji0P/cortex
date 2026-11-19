@@ -169,7 +169,8 @@ code does it (`app/entities/late_results.py`).
 | --- | --- |
 | The result comes back before the user speaks | The call and its result, then the model's answer as far as it was heard, then the user's turn |
 | The user speaks while the search is running | The call gets a placeholder result, written by the server. The user's turn follows. The call carries on |
-| The late result arrives | At the next quiet moment: a call written by the server that names the original call, then the real result. The model then replies with no user turn before it |
+| The late result arrives while nobody is speaking, or while the gem speaks | At the next quiet moment: a call written by the server that names the original call, then the real result. The model then replies with no user turn before it |
+| The user's turn ends, with words, while a late result is waiting | The call written by the server and the real result go in ahead of the user's words. A turn left open before them is closed first. One reply answers the user and tells the result. A turn with no words leaves the result to the next quiet moment |
 | The model is asked to drop it | It calls `cancel_tool_call` with the original call's id. The result is "Cancelled." |
 | A search left running by a written reply comes back during the call | The same as a late result of the call's own: the gem has one set of calls that outlive their replies |
 | The call ends while a search runs | The reply is stored as heard, the call with its placeholder. The search carries on, and its result is told in writing |
@@ -183,7 +184,9 @@ code does it (`app/entities/late_results.py`).
   not make this call again, in any wording."
 - **The call written by the server** has a new id that starts with `late_`, the same
   tool name, and the arguments `{"deferred_result_for": "<the original id>"}`. A cancel
-  that names it finds nothing running: the result has already come.
+  that names it finds nothing running: the result has already come. So does a cancel
+  that names the original call once its result is in the history. A result still
+  waiting is dropped by a cancel, and never added.
 - **A cancel in the instant the call finishes** still drops the result. The model was
   told "Cancelled.", so the result is never added.
 - **Any call still running** when the user speaks gets a placeholder, however short it
@@ -209,6 +212,18 @@ first, they appear as an assistant item before step 2, if the user heard them.
 If the user speaks over step 8 before hearing any of it, they are answered, and telling
 them of the result is Instructed: "If they say something else before you have told them,
 answer that and then tell them." The server does not bring the result up again.
+
+If the search had come back while the user was saying step 4, steps 6 and 7 would come
+before it instead, and step 5 would tell the user what was found:
+
+1. user: "what's the weather"
+2. call: `web_search`, id `call_1`, `{"query": "weather in Pune"}`
+3. result for `call_1`: the placeholder, written by the server
+4. call: `web_search`, id `late_[...]`, `{"deferred_result_for": "call_1"}`, written by
+   the server
+5. result for `late_[...]`: the real search result
+6. user: "hello, what's happening?"
+7. assistant: answers the user and tells them what was found.
 
 ## What one request contains
 
@@ -306,7 +321,7 @@ The user reaches you in one conversation, by calling you or by writing to you.
 - A call is a live spoken conversation. Everything you write is read aloud by a text-to-speech voice. The user's words come from speech recognition and may contain mistakes: go with the likely meaning, and ask when it is unclear. A line in the conversation says when a call starts and when it ends.
 - Outside a call the conversation is written: the user reads what you write in a chat window.
 - The user can interrupt you at any time, by speaking in a call or by sending a new message in writing. An earlier reply of yours that ends in "…" was cut off at that point. The user heard or read nothing after it, so do not assume they know the rest. Never end a reply with "…" yourself.
-- A tool call that is still running when the user interrupts carries on in the background. Do not make the same call again: say it is still coming, and answer whatever else they asked. Only if they say they no longer want it, call cancel_tool_call: nothing is cancelled unless you make that call. The result reaches you by itself, as a call with "deferred_result_for" in its arguments. You did not make that call: it only delivers the late result. When it arrives, tell the user what it found straight away, without being asked, unless they have said they no longer want it. If they say something else before you have told them, answer that and then tell them. If you have already told them the same thing, do not repeat it: say in a few words that the result confirms it.
+- A tool call that is still running when the user interrupts carries on in the background. Do not make the same call again, and answer whatever else they asked. Only if they say they no longer want it, call cancel_tool_call: nothing is cancelled unless you make that call. The result reaches you by itself, as a call with "deferred_result_for" in its arguments. You did not make that call: it only delivers the late result. When it arrives, tell the user what it found straight away, without being asked, unless they have said they no longer want it. If they say something else before you have told them, answer that and then tell them. If you have already told them the same thing, do not repeat it: say in a few words that the result confirms it.
 ```
 
 A gem made without instructions is given these, which are then its own for the user to
@@ -359,7 +374,7 @@ Everything in the history that neither the user nor the model wrote (all Enforce
 | Cut mark | The end of a reply's text | A reply was cut part-way | "…" |
 | No-words note | Note, after the cut reply | A turn with no words cut a reply the user was hearing | "The user made a sound there, with no words in it." |
 | Placeholder result | The result of the model's own call | A tool call was still running when the user spoke | "Still running in the background, under call_id {call_id}. [...]" |
-| Late result | A call written by the server, then its result | The call finished; added at the next quiet moment | `{"deferred_result_for": "<id>"}`, then the real result |
+| Late result | A call written by the server, then its result | The call finished; added at the next quiet moment, or ahead of the user's words if their turn ends first | `{"deferred_result_for": "<id>"}`, then the real result |
 | Cancel result | The result of `cancel_tool_call` | The model stops a background call | "Cancelled." |
 
 The server speaks nothing for the model.
@@ -388,6 +403,11 @@ A fourth, added on 16 November 2026:
   words before a wait, carrying on after a sound, and telling a late result after
   answering something else. If a model does not follow them, the user hears silence
   during a search, hears a sentence start over, or is never told a result.
+- **A result told with the user's turn is often left out.** When a result is waiting
+  as the user's turn ends, it goes in ahead of their words. Run live 20 times on each
+  model (scenario 17 of the check script), the gem answered the user every time and never
+  searched again, but told the result in that same reply in 14 of 20 runs on 6 Luna and
+  9 of 20 on Haiku 5.5. In the others the user is never told: nothing brings it up again.
 - **One instruction text for a call and for writing has no recorded live run.** Whether
   a gem keeps to its call rules in a call and its writing rules in writing is to be
   tried out.
