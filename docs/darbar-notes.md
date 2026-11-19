@@ -68,7 +68,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The log is the base. A new thing a gem does is a new kind of entry in it, never a store of its own.
 - Nothing is hidden in it: every request, what it was sent, its tokens, its cost, every tool call, every change of model, instructions or tools.
 - What happened is written when it happens. What is remembered is written when a reply is settled. Two kinds of entry, one order.
-- A cut reply shows what was heard. Its tokens and cost are the whole of what the provider charged.
+- A cut reply shows what was heard. Its tokens and cost are the whole of what the provider charged. Cut while the model was still producing, the provider sends no count: shown as unknown.
 - Cost is worked out by us from a price table kept by hand. No provider reports one. Unknown is shown as unknown, never as nothing.
 - Through the ChatGPT proxy the cost shown is what the API key would have paid.
 - A gem is never told which model it runs on. A model change is in the log only.
