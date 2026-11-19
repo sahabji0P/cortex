@@ -68,7 +68,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The log is the base. A new thing a gem does is a new kind of entry in it, never a store of its own.
 - Nothing is hidden in it: every request, what it was sent, its tokens, its cost, every tool call, every change of model, instructions or tools.
 - What happened is written when it happens. What is remembered is written when a reply is settled. Two kinds of entry, one order.
-- A cut reply shows what was heard. Its tokens and cost are the whole of what the provider charged. Cut while the model was still producing, the provider sends no count: shown as unknown.
+- A cut reply shows what was heard. Its tokens and cost are the whole of what the provider charged. Cut while the model was still producing, no count is read yet: shown as unknown.
 - Cost is worked out by us from a price table kept by hand. No provider reports one. Unknown is shown as unknown, never as nothing.
 - Through the ChatGPT proxy the cost shown is what the API key would have paid.
 - A gem is never told which model it runs on. A model change is in the log only.
@@ -81,7 +81,8 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The log: a provider library's own retries, each written as a request of its own. Today up to two are made unseen.
 - The log: listening and speaking as entries, with their times and cost (speech-to-text is charged by the second of audio sent, speech by the character).
 - The log: totals by gem, by day and by service, for the app's home.
-- Prices: none yet for 6.1 Terra, Sonnet 5.5 and Opus 5.5, and none for Haiku 5.5 writing to a cache.
+- Prices: none yet for 6.1 Terra, Sonnet 5.5 and Opus 5.5, and none for Haiku 5.5 writing to a cache. The three rows that are there were carried over from another table, not read from the price lists: to be checked.
+- The log: the tokens of a reply cut while the model was still producing. Anthropic says what it read at the start of a reply. Whether OpenAI says anything before the end is to be checked.
 - Our lines sent the same way on every model: a user message in a tag, the developer role kept for instructions. The line that explains the tag in the instructions for every model. A change to what the model is sent, so on its own.
 
 - GemConfig on the backend: character, instructions, model, tools, skills, permissions, sandbox.
