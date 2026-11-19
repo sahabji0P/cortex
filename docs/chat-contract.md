@@ -377,7 +377,7 @@ does not say). The three kinds of input do not overlap: what was sent is their s
 `cost_usd` is what that cost in US dollars, worked out by the backend from its own price
 table, and `priced` is the date of the prices used, null whenever `cost_usd` is.
 **`usage` and `cost_usd` can be null, which means unknown, never nothing.** `usage` is
-null for a request cut while the model produced, which is never told what it used, and
+null for a request cut while the model produced, since the count is read from a reply that finished, and
 for one whose provider reported no count that can be read. `cost_usd` is null whenever
 `usage` is, and also for a model with no price in the table, a request longer than the
 prices cover, and a request that wrote to a cache on a model with no price for that.
