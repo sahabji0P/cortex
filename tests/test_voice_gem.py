@@ -399,6 +399,12 @@ class _NothingStored:
     async def last(self, gem_id: object, kind: str | None = None) -> None:
         return None
 
+    async def of_kind(self, gem_id: object, kind: str) -> list[object]:
+        return []
+
+    async def note(self, entries: object) -> None:
+        pass
+
     async def add(self, items: object) -> None:
         pass
 

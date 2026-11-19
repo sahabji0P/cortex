@@ -165,8 +165,9 @@ class _DocDB:
             if self.breaks_after is not None and written == self.breaks_after:
                 raise ConnectionError("the database went away part-way")
             document = self._stored(item)
+            # Only an item has a place: the index covers the items alone.
             if isinstance(item, ConversationItem) and any(
-                (d["gem_id"], d["place"]) == (document["gem_id"], document["place"])
+                (d["gem_id"], d.get("place")) == (document["gem_id"], document["place"])
                 for d in documents
             ):
                 raise RuntimeError("duplicate key: that place is taken")
@@ -789,6 +790,12 @@ class _BlindStore:
 
     async def last(self, gem_id: ObjectId, kind: str | None = None) -> None:
         return None
+
+    async def of_kind(self, gem_id: ObjectId, kind: str) -> list[Any]:
+        return []
+
+    async def note(self, entries: Sequence[Any]) -> None:
+        await self._store.note(entries)
 
     async def add(self, items: Sequence[ConversationItem]) -> None:
         await self._store.add(items)

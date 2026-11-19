@@ -31,7 +31,7 @@ from bson import ObjectId
 from app.core.errors import NotFoundError
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.gem_ent import GemEntityClass
-from app.entities.gem_log import LogEntityClass
+from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, Mode, UserTurn, stubs
 from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
@@ -206,6 +206,8 @@ class ConversationEntityClass:
         of its last item: closing it changes nothing about how the user is talking.
         `told` are late results about to be added, whose calls are not lost.
         """
+        # Whoever reads the conversation is about to add to the gem's log.
+        await self.log.open(gem_id)
         found = await self._store.load(gem_id)
         stored = Stored([entry.item for entry in found], found[-1].mode if found else "chat")
         lost = self._lost(str(gem_id), found, told)
@@ -222,23 +224,32 @@ class ConversationEntityClass:
             return stored
         await self.log.open(gem_id)
         numbers = self.log.take(gem_id, len(added))
-        await self._store.add(
-            [
-                ConversationItem(
-                    gem_id=gem_id,
-                    seq=seq,
-                    place=len(stored.items) + offset,
-                    at=one.at,
-                    item=one.item,
-                    source=one.source,
-                    shown=one.shown,
-                    mark=one.mark,
-                    mode=mode,
-                )
-                for offset, (seq, one) in enumerate(zip(numbers, added, strict=True))
-            ]
-        )
+        items = [
+            ConversationItem(
+                gem_id=gem_id,
+                seq=seq,
+                place=len(stored.items) + offset,
+                at=one.at,
+                item=one.item,
+                source=one.source,
+                shown=one.shown,
+                mark=one.mark,
+                mode=mode,
+            )
+            for offset, (seq, one) in enumerate(zip(numbers, added, strict=True))
+        ]
+        # What happened before them is written first, so the log is in order on disk.
+        await self.log.written(gem_id)
+        await self._store.add(items)
+        self.log.stored(items)
         return Stored([*stored.items, *(one.item for one in added)], mode)
+
+    def recording(self, gem_id: ObjectId, mode: Mode) -> Recording:
+        """What a conversation with the gem writes down of what happens (see `gem_log.py`).
+
+        The gem's conversation must have been read first (`load`).
+        """
+        return self.log.recording(gem_id, mode)
 
     async def gone(self, gem_id: ObjectId) -> bool:
         """Whether the gem has been deleted. If it has, what was stored since goes too.

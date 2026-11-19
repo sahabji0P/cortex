@@ -20,6 +20,7 @@ A gem's log goes when the gem does (see `GemEntityClass.delete`).
 
 import contextlib
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, ClassVar, Literal
 
 from bson import ObjectId
@@ -27,12 +28,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
-from app.core.times import UtcDatetime
+from app.core.times import UtcDatetime, in_utc
 from app.entities.history import Mode, Source
 from app.entities.loop import ResultMark
 from app.entities.model import Item
 
-__all__ = ["ConversationItem", "ConversationStoreClass", "LogEntry", "LogLine"]
+__all__ = ["ConversationItem", "ConversationStoreClass", "LogEntry", "LogLine", "as_shown"]
 
 _COLLECTION = "GemLog"
 
@@ -107,13 +108,20 @@ class LogLine(BaseModel):
         extra = dict(self.model_extra or {})
         fields: dict[str, Any] = extra.pop("data", None) or {}
         fields.update({key: value for key, value in extra.items() if value is not None})
-        return {
-            "seq": self.seq,
-            "at": self.at.isoformat().replace("+00:00", "Z"),
-            "kind": self.kind,
-            "turn": self.turn,
-            **fields,
-        }
+        return as_shown(self.seq, self.at, self.kind, self.turn, fields)
+
+
+def as_shown(
+    seq: int, at: datetime, kind: str, turn: int | None, fields: dict[str, Any]
+) -> dict[str, Any]:
+    """An entry as a client is sent it: what every entry has, then its own fields."""
+    return {
+        "seq": seq,
+        "at": in_utc(at).isoformat().replace("+00:00", "Z"),
+        "kind": kind,
+        "turn": turn,
+        **fields,
+    }
 
 
 class ConversationStoreClass:
