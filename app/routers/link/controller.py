@@ -17,7 +17,8 @@ async def link(websocket: WebSocket, service: LinkServiceRegistry.V1) -> None:
     and `chat.tool` frames, then exactly one of `chat.done`, `chat.cut` or `chat.error`,
     each with `gem` and `text`. A search that carries on after a cut is told later, in
     a reply of its own that starts with `chat.result`, sent to the socket of the latest
-    message to that gem.
+    message to that gem; or, if a message to that gem is waiting to be answered when it
+    comes back, in the reply to that message.
 
     A call with a gem, one at a time: send `{"type": "call.start", "gem": <id>}`, with
     an optional `first`. Send mic audio as binary frames (raw 16-bit

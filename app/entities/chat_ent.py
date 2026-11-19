@@ -24,10 +24,12 @@ written turn after a call opens with a line that says the call has ended (see
 
 A tool call outlives a reply that is cut, as in a call, and by the same code (see
 `late_results.py`). Its call is stored with the placeholder as its result, and the new
-message is answered first. When the call finishes, at the next moment no reply is being
+message is answered. When the call finishes, at the next moment no reply is being
 written to that gem, its result is added to the stored conversation as a stub call
 followed by the result, and the gem tells the user about it in a reply of its own, sent
-to the socket that sent the latest message to it. Which stub delivered which call is read
+to the socket that sent the latest message to it. If a message is waiting to be answered
+then, the result is added ahead of that message instead, and the reply to the message
+tells it, as in a call (see `history.py`). Which stub delivered which call is read
 from the stub's arguments, and which results are placeholders and which cancels stopped
 a call, from the marks stored with them.
 """
@@ -64,7 +66,8 @@ class ChatEvent(BaseModel):
     """One frame about a gem's reply, for the client that sent the message.
 
     - `chat.result` a search the gem started in an earlier reply has come back, and a
-                    reply about it follows. `text` is what the search showed (its query)
+                    reply about it follows, unasked. `text` is what the search showed
+                    (its query). A result told in the reply to a message has none
     - `chat.text`   the next piece of the reply, as it is written
     - `chat.tool`   the gem is using a tool. `text` says what, such as what a search
                     looks up
@@ -215,8 +218,13 @@ class ChatEntityClass:
             # written to again.
             if not turn.was_cut:
                 self._latest[key] = (gem_id, deliver)
-            # A call lost to a restart is closed before the new message.
-            history = await self._conversations.load(ready.gem.id)
+            # A call lost to a restart is closed before the new message. Late results
+            # waiting go in ahead of it, so the reply to it tells them too. No
+            # `chat.result` goes before that reply: the client takes one as the start of
+            # a reply nobody asked for. A message cut already leaves them to the next.
+            kept = self._conversations.gem(key)
+            results = [] if turn.was_cut else kept.late.take()
+            history = await self._load(ready.gem.id, kept.turn, results)
             await self._write(turn, key, ready, history, text, at, gem_id, deliver)
         except Exception as exc:
             # Anything else, such as the store being out of reach before the reply began.
