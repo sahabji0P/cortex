@@ -304,6 +304,15 @@ words in the call (and with a tool result before it, if the written part ended i
   call sent the model and never settled (an open turn, an unheard greeting with its
   line) is not stored, so the request after the call does not start with it. It is the
   one place the history does not only grow.
+- **What happens in a call is written down, and changes nothing of it.** (Enforced) The
+  call's opening and close, each reply's turn, the user's words as they arrived, our
+  lines, each request with what it was sent, its tokens and its cost, and each tool
+  call are written to the gem's log as they happen (see the README, "A gem's log").
+  The model is sent the same with the log as without it: a test sends a scripted reply
+  both ways and compares the requests. Writing an entry never waits on the database, so
+  it adds nothing to the wait for a reply's first word. A reply's turn closes in the log
+  when the reply is settled, which is when the user next speaks, a late result is told,
+  or the call ends: not when its audio stops.
 
 ## The instructions
 
@@ -435,6 +444,13 @@ A fourth, added on 16 November 2026:
 - **One instruction text for a call and for writing has no recorded live run.** Whether
   a gem keeps to its call rules in a call and its writing rules in writing is to be
   tried out.
+- **A request the provider's library retries is not seen.** Both libraries retry a
+  request that fails before its reply starts, up to twice, by themselves. The log shows
+  one request, and its wait for the first word includes the tries before. Each try is
+  to become a request of its own in the log.
+- **Listening and speaking are not in the log.** Speech-to-text and text-to-speech have
+  their own times and their own cost, and neither is written down yet. A reply cut
+  while the model was still producing has no token count: the provider never sends one.
 - **A sound before the greeting's first word.** If a turn with no words cuts the
   greeting before the model has written anything, the greeting is not made again and
   the call stays silent until the user speaks. Found while writing this, by running it.
