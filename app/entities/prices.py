@@ -5,9 +5,11 @@ No provider says what a request cost. Each reports the tokens it charged for, an
 price of a token is public. So the prices are kept here, by hand, and a cost is the
 tokens times the price.
 
-Every price is in US dollars for a million tokens, as each provider's public price list
-had it on the date in `PRICED`. A model with no price here, or a request no price here
-covers, has no cost: it is shown as unknown, never as nothing.
+Every price is in US dollars for a million tokens. The ones here were carried over, on
+the date in `PRICED`, from a table kept for another project, which names each provider's
+public price list as its source. THE OWNER HAS NOT CHECKED THEM AGAINST THOSE LISTS YET.
+A model with no price here, or a request no price here covers, has no cost: it is shown
+as unknown, never as nothing.
 
 What a cost leaves out: tax, discounts, and anything a provider charges for beyond
 tokens. A request made through the ChatGPT proxy is charged to that plan, not by the

@@ -35,7 +35,8 @@ the user cuts into is settled at that instant, and its request is stopped after:
 `turn.closed` can come before the `request.done` of the request it cut. Entries of one
 turn are told apart by `turn`, not by where they fall.
 
-Tokens: a request cut while the model was still producing is never told what it used.
+Tokens: the count is read from a reply that finished. A request cut while the model was
+still producing has none read.
 Its usage and cost are None, which means unknown, not nothing.
 
 Each gem's entries are numbered here, in one place: a reply being written is not the
