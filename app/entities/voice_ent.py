@@ -36,12 +36,13 @@ sentence in two, and the second half is not a new request. The rule is the same 
 writing, and in one place (`history.py`).
 
 A tool call is not stopped by an interruption. If the user speaks while one is running,
-it carries on, as it does in writing (see `late_results.py`). What the user said is
-answered first. The real result is then added at the next quiet moment, even if it came
-in long before, and the model tells the user about it in a reply of its own, without
-waiting to be asked. The same goes for a tool call left running by a written reply
-before the call: the gem has one set of calls that outlive their replies. A call still
-running when the call ends carries on too, and its result is told in writing.
+it carries on, as it does in writing (see `late_results.py`). When its real result comes
+in, it is added at the next quiet moment, and the model tells the user about it in a
+reply of its own, without waiting to be asked. If the user's turn ends while a result is
+waiting, the result is added ahead of what they said, and one reply answers them and
+tells the result. The same goes for a tool call left running by a written reply before
+the call: the gem has one set of calls that outlive their replies. A call still running
+when the call ends carries on too, and its result is told in writing.
 """
 
 import asyncio
@@ -361,8 +362,8 @@ class VoiceConversation:
 
         Nothing is being said once the reply in progress has been produced and played to
         the end. Only then is that reply final, so only then may another request be made.
-        If the user speaks first, this is cancelled, and it starts again after they have
-        been answered.
+        If the user speaks first, this is cancelled: when their turn ends, results still
+        waiting go in ahead of what they said.
 
         If a noise cuts that reply off before any of it is heard, the history is as it
         was, so the same request is simply made again. If the user speaks first, what
@@ -416,6 +417,10 @@ class VoiceConversation:
         if said:
             # The result is in front of the model along with what the user now says.
             self._results_owed = False
+            # Results waiting go in ahead of their words, so the one reply that answers
+            # them tells the results too.
+            if self._late.ready:
+                self._add_late_results()
             self._turn.add(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
@@ -426,9 +431,8 @@ class VoiceConversation:
             # as it was, and is simply made again.)
             self._add(line(_NO_WORDS_NOTE))
         self._producing = asyncio.create_task(self._respond())
-        # A result that came in while the user was speaking is not slipped in with their
-        # turn: the model would answer what they said and never mention it. It waits
-        # until this reply has been heard, and is then answered in a reply of its own.
+        # A result that comes in from here on, or one left waiting by a turn with no
+        # words, waits until this reply has been heard, and is told in a reply of its own.
         self._announce_when_quiet()
 
     async def _respond(self, *, brings_results: bool = False) -> None:
