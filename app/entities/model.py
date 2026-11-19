@@ -320,8 +320,8 @@ class _OpenAIModel:
         calls: list[ModelCall] = []
         for item in output:
             if item.type == "function_call":
-                # A loaded tool's call also has a `namespace`. It is not kept: a call
-                # sent back without it was tried, and is taken.
+                # The API may give a loaded tool's call a `namespace`. It is not kept:
+                # a call of a loaded tool sent back without one was tried, and is taken.
                 calls.append(ModelCall(item.call_id, item.name, item.arguments))
             elif item.type == "tool_search_call" and item.call_id:
                 calls.append(ModelCall(item.call_id, SEARCH_TOOL, json.dumps(item.arguments)))

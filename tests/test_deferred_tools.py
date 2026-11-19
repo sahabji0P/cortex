@@ -161,6 +161,8 @@ async def test_anthropic_marks_deferred_tools_and_loads_them_by_reference() -> N
     assert [tool.get("defer_loading", False) for tool in tools] == [False, False, False, True, True]
     assert not any("cache_control" in tool for tool in tools)
     assert loaded["tools"] == tools
+    # Made again from a history that has loaded a tool, the tools are the same.
+    assert _toolbox(_searched("tracker__close_issue"), _NOTE, _FIND, _CLOSE) == specs
     result = loaded["messages"][-1]["content"][0]
     assert result["content"] == [{"type": "tool_reference", "tool_name": "tracker__close_issue"}]
     assert none["messages"][-1]["content"][0]["content"] == "No tools were found."

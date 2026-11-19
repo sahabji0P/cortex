@@ -279,8 +279,9 @@ async def main() -> None:
     # should read at least what the one before it read or wrote.
     pairs = zip(llm.rows, llm.rows[1:], strict=False)
     for n, (before, after) in enumerate(pairs, 2):
-        held = before["usage"] and before["usage"][1] + before["usage"][2]
-        if after["usage"] and held and after["usage"][1] < held:
+        if not after["usage"] or not after["usage"][1]:
+            failed.append(f"request {n} read nothing from the cache")
+        elif before["usage"] and after["usage"][1] < before["usage"][1] + before["usage"][2]:
             failed.append(f"request {n} read less from the cache than request {n - 1} held")
     deferred, flat = _payload_sizes()
     print(f"tools payload: {deferred} characters deferred, {flat} not deferred")
