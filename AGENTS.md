@@ -22,6 +22,7 @@ a change here needs a matching change there:
 | `GET /v1/gems/{id}/chat` | `src/chat.rs` | A gem's conversation so far, a call's turns included |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
 | `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | not built yet | The tool servers gems can use, their tools, which gem may use which, and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
+| `/v1/providers/openai` | being built | How OpenAI is reached, with the API key or through a proxy on a ChatGPT login: the way in use, which ways are set up, and the user's switch. Also the proxy's ChatGPT accounts (email, plan, whether usable), and a sign-in that replaces them: a route that gives the address to open in the browser, and one the app asks until it says `ok` or `error` |
 | `GET /v1/voice/models` | `src/models.rs` | The models a call can be held with |
 
 What that means in practice:

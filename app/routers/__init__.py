@@ -4,6 +4,7 @@ from app.routers.connections.controller import router as connections_router
 from app.routers.darbar.controller import router as darbar_router
 from app.routers.gems.controller import router as gems_router
 from app.routers.link.controller import router as link_router
+from app.routers.providers.controller import router as providers_router
 from app.routers.user.controller import router as user_router
 from app.routers.voice.controller import router as voice_router
 
@@ -15,6 +16,7 @@ V1: tuple[APIRouter, ...] = (
     gems_router,
     darbar_router,
     connections_router,
+    providers_router,
     link_router,
 )
 
