@@ -24,6 +24,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
     yield
 
+    await EntitiesRegistry.Providers.close()
     await adapter.close()
 
 

@@ -27,7 +27,9 @@ class EntitiesRegistry:
         )
         cls.Gems = GemEntityClass(docdb=adapter.DocDB)
         cls.Darbar = DarbarEntityClass(docdb=adapter.DocDB)
-        cls.Providers = ProviderEntityClass(docdb=adapter.DocDB, openai=adapter.OpenAI)
+        cls.Providers = ProviderEntityClass(
+            docdb=adapter.DocDB, openai=adapter.OpenAI, proxy=adapter.CLIProxy
+        )
         await cls.Providers.restore()
         cls.ConversationStore = ConversationStoreClass(docdb=adapter.DocDB)
         cls.Conversations = ConversationEntityClass(gems=cls.Gems, store=cls.ConversationStore)
