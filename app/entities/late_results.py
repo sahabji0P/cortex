@@ -6,13 +6,16 @@ When a reply is cut off while one of its tool calls is running, the call is left
 run. It gets the placeholder below as its result, so the history stays a valid chain of
 calls and results. When it finishes, its real result waits here until the conversation
 tells it. It is then added after everything else, as a call we write ourselves (a stub
-that names the real call) followed by the result. The model can stop a call still
-running, or a result not told yet, with `cancel_tool_call`.
+that names the real call) followed by the result, but ahead of the user's turn if one
+ends while it waits: one reply then answers the user and tells it (see `history.py`).
+The model can stop a call still running, or a result not told yet, with
+`cancel_tool_call`.
 
 A gem holds one `LateResults`, whether its calls were made in a call or in writing (see
 `conversation_ent.py`). What is the call's or chat's own is when a waiting result is
-told, and how the reply about it is delivered: a call tells it once nothing is being
-said or played, and chat once no reply is being written to the gem and no call holds it.
+told, and how the reply about it is delivered: a call tells it with the user's turn when
+it ends, or else once nothing is being said or played; chat tells it with the message
+being answered, or else once no reply is being written to the gem and no call holds it.
 """
 
 import asyncio

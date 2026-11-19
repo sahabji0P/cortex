@@ -202,7 +202,8 @@ class VoiceConversation:
         self._user_scripts: set[str] = set()
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
         # Tool calls that outlived their replies, until their results are told. A result
-        # that comes in is told at the next quiet moment.
+        # that comes in is told at the next quiet moment, or with the user's turn if it
+        # ends first.
         self._owns_late = late is None
         self._late = LateResults(self.results_came) if late is None else late
         # `llm` has to be the adapter of the provider that `model` belongs to. The gem is
@@ -258,7 +259,7 @@ class VoiceConversation:
             yield item
 
     def results_came(self) -> None:
-        """A late result has come in. It is told at the next quiet moment."""
+        """A late result has come in: told at the next quiet moment, or with the user's turn."""
         self._announce_when_quiet()
 
     async def close(self) -> None:
