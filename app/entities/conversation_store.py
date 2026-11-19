@@ -58,6 +58,9 @@ class ConversationItem(BaseModel):
     # Its number in the gem's log, among everything that happened. One written by hand,
     # as a test does, may have none.
     seq: int | None = None
+    # The turn whose reply it was settled with, if it was settled with one: a line of
+    # ours and the stub of a late result are not.
+    turn: int | None = None
     # Its place in the gem's conversation: 0 for the first item, then one more each.
     place: int = Field(ge=0)
     # When it was added. The user's message carries when it arrived.

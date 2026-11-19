@@ -55,6 +55,12 @@ async def get_log_entry(gem_id: str, seq: int, service: GemsServiceRegistry.V1) 
     return await service.get_log_entry(gem_id, seq)
 
 
+@router.get("/{gem_id}/log/{seq}/sent")
+async def get_log_sent(gem_id: str, seq: int, service: GemsServiceRegistry.V1) -> dict[str, Any]:
+    """Everything the request written down as entry `seq` was sent: items, instructions, tools."""
+    return await service.get_log_sent(gem_id, seq)
+
+
 @router.patch("/{gem_id}")
 async def update_gem(
     gem_id: str,

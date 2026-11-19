@@ -30,7 +30,7 @@ call in which nothing was said stores nothing.
 """
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -46,6 +46,7 @@ __all__ = [
     "added_reply",
     "line",
     "mode_line",
+    "of_turn",
     "settled",
     "shown",
     "stubs",
@@ -103,6 +104,9 @@ class Added:
     mark: ResultMark | None = None
     # Who wrote it (see `Source`).
     source: Source = "user"
+    # The number of the turn whose reply it was settled with, in the gem's log, if it
+    # was settled with one (see `gem_log.py`). Never sent to a model.
+    turn: int | None = None
 
 
 class UserTurn:
@@ -168,6 +172,11 @@ def mode_line(mode: Mode, before: Mode) -> list[Added]:
     if mode != "call" and mode == before:
         return []
     return [line(_MODE_LINES[mode], "call-line" if mode == "call" else "chat-line")]
+
+
+def of_turn(added: Iterable[Added], turn: int | None) -> list[Added]:
+    """The same items, each saying the turn whose reply it was settled with."""
+    return [replace(one, turn=turn) for one in added]
 
 
 def settled(added: Sequence[Added]) -> int:

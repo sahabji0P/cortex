@@ -235,6 +235,7 @@ class ConversationEntityClass:
                 at=one.at,
                 item=one.item,
                 source=one.source,
+                turn=one.turn,
                 shown=one.shown,
                 mark=one.mark,
                 mode=mode,
@@ -251,19 +252,63 @@ class ConversationEntityClass:
 
     async def log_page(
         self, gem_id: str, *, before: int | None = None, limit: int = 200
-    ) -> list[dict[str, Any]]:
-        """A page of a gem's log as it is shown, oldest first.
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """A page of a gem's log as it is shown, oldest first, and the settings before it.
 
         The latest page, or with `before` the entries just before that number.
         Everything is in it, in the order it happened: what the gem remembers and what
-        happened (see `gem_log.py`). Raises `NotFoundError` if there is no such gem.
+        happened (see `gem_log.py`). With it come the model, instructions and tools in
+        force just before the page's first entry, so that a change inside the page can
+        be shown against what it changed. Raises `NotFoundError` if there is no such gem.
         """
         if not await self._gems.exists(gem_id):
             raise NotFoundError("Gem")
         found = ObjectId(gem_id)
         # What has just happened is on its way to the database: it is waited for.
         await self.log.written(found)
-        return [line.shown() for line in await self._store.page(found, before=before, limit=limit)]
+        entries = [
+            line.shown() for line in await self._store.page(found, before=before, limit=limit)
+        ]
+        first = entries[0]["seq"] if entries else 0
+        return entries, await self._settings(found, upto=first)
+
+    async def log_sent(self, gem_id: str, seq: int) -> dict[str, Any]:
+        """Everything the request written down as entry `seq` was sent.
+
+        Its items, worked out from what each of the gem's requests added to the one
+        before it, and the model, instructions and tools in force. `exact` is False if
+        the items do not come to the count the request wrote down: an entry before it
+        was lost. Raises `NotFoundError` if `seq` is not a request of this gem.
+        """
+        if not await self._gems.exists(gem_id):
+            raise NotFoundError("Gem")
+        found = ObjectId(gem_id)
+        await self.log.written(found)
+        items: list[Any] = []
+        request: dict[str, Any] | None = None
+        for line in await self._store.of_kind(found, "request.sent"):
+            if line.seq > seq:
+                break
+            request = line.shown()
+            items = [*items[: request.get("kept", 0)], *request.get("added", [])]
+        if request is None or request["seq"] != seq:
+            raise NotFoundError("Request")
+        return {
+            "request": request.get("request"),
+            "items": items,
+            "exact": len(items) == request.get("count"),
+            **await self._settings(found, upto=seq),
+        }
+
+    async def _settings(self, gem_id: ObjectId, *, upto: int) -> dict[str, Any]:
+        """The model, instructions and tools in force before entry `upto`, as last written."""
+        parts: dict[str, Any] = {"model": None, "instructions": None, "tools": None}
+        for line in await self._store.of_kind(gem_id, "settings.changed"):
+            if line.seq >= upto:
+                break
+            changed = line.shown()
+            parts.update({part: changed[part] for part in parts if part in changed})
+        return parts
 
     async def log_entry(self, gem_id: str, seq: int) -> dict[str, Any]:
         """One entry of a gem's log, in full. Raises `NotFoundError` if there is none."""

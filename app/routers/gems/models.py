@@ -91,7 +91,11 @@ class GemsModels:
                 """A page of a gem's log, oldest first.
 
                 Every entry has `seq` (its number in the log), `at`, `kind` and `turn`,
-                then its own fields by kind (see `docs/chat-contract.md`).
+                then its own fields by kind (see `docs/chat-contract.md`). `settings` is
+                the `model`, `instructions` and `tools` in force just before the page's
+                first entry, each as a `settings.changed` has it, or null if none was
+                written yet.
                 """
 
                 entries: list[dict[str, Any]]
+                settings: dict[str, Any]

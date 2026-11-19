@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from app.entities.gem_log import Recording, TurnRecord
-from app.entities.history import Added, Mode, UserTurn, added_reply, mode_line
+from app.entities.history import Added, Mode, UserTurn, added_reply, mode_line, of_turn
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import Item, Model
@@ -274,9 +274,11 @@ class WrittenConversation:
             items = delivered.items
             whole = reply.finished and delivered.kept is None
             # The user's turn joins the history only if the reply left something there.
-            for added in self._turn.answered(items):
-                self._add(added)
-            for added in added_reply(items, reply.calls(), datetime.now(UTC)):
+            settled = [
+                *self._turn.answered(items),
+                *added_reply(items, reply.calls(), datetime.now(UTC)),
+            ]
+            for added in of_turn(settled, turn.number):
                 self._add(added)
             turn.closed(finished=reply.finished, kept=delivered.kept)
             kept = " ".join(item["content"] for item in items if "role" in item)

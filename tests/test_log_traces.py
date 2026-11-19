@@ -72,8 +72,8 @@ async def test_a_written_reply_leaves_its_turn_its_request_and_what_is_remembere
         "item",
     ]
     assert [entry["seq"] for entry in log] == list(range(8))
-    # Everything of the turn names it; what is remembered belongs to no turn.
-    assert [entry.get("turn") for entry in log] == [1, 1, 1, 1, 1, 1, None, None]
+    # Everything of the turn names it, what was settled with its reply included.
+    assert [entry.get("turn") for entry in log] == [1] * 8
     assert _of(log, "turn.opened") == [{"by": "user", "mode": "chat"}]
     assert _of(log, "user.said") == [{"text": "hello", "mode": "chat"}]
     (settings,) = _of(log, "settings.changed")
@@ -616,6 +616,60 @@ async def test_a_long_text_is_cut_short_on_the_link_and_whole_on_the_route() -> 
     gems = GemsServiceV1Class(setup.gems, setup.conversations)
     whole = await gems.get_log_entry(gem_id, said["seq"])
     assert whole["text"] == long and "partial" not in whole
+    await _close(socket, linked)
+
+
+async def test_a_page_comes_with_the_settings_in_force_before_it() -> None:
+    setup = await _chat(_said("Hi."), _said("Hi again."))
+    socket, linked = await _open(setup.service())
+    for count, text in enumerate(("hello", "hello again"), start=1):
+        socket.send(setup.gem.id, text)
+        await socket.until("chat.done", count)
+    gems = GemsServiceV1Class(setup.gems, setup.conversations)
+    gem_id = str(setup.gem.id)
+
+    whole = await gems.get_log(gem_id, before=None, limit=500)
+    last = await gems.get_log(gem_id, before=None, limit=3)
+
+    # Nothing was written down before the first page: every part is unknown.
+    assert whole.settings == {"model": None, "instructions": None, "tools": None}
+    # A page that starts mid-log is told what its requests were made with.
+    (changed,) = (e for e in whole.entries if e["kind"] == "settings.changed")
+    assert last.settings == {
+        "model": changed["model"],
+        "instructions": changed["instructions"],
+        "tools": changed["tools"],
+    }
+    await _close(socket, linked)
+
+
+async def test_what_a_request_was_sent_is_worked_out_from_every_request_before_it() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), _said("It is sunny in Pune."), search=searches)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    searches.gates[_WEATHER].set()
+    await socket.until("chat.done", 2)
+    gems = GemsServiceV1Class(setup.gems, setup.conversations)
+    gem_id = str(setup.gem.id)
+    log = (await gems.get_log(gem_id, before=None, limit=500)).entries
+    requests = [entry for entry in log if entry["kind"] == "request.sent"]
+
+    sent = [await gems.get_log_sent(gem_id, request["seq"]) for request in requests]
+
+    # Each is exactly what the model was sent, whatever came and went in between.
+    assert [one["items"] for one in sent] == [r["input"] for r in setup.llm.requests]
+    assert [one["exact"] for one in sent] == [True, True, True]
+    assert [one["request"] for one in sent] == [1, 2, 3]
+    assert (
+        "".join(layer["text"] for layer in sent[2]["instructions"])
+        == (setup.llm.requests[2]["instructions"])
+    )
+    assert sent[2]["model"] == {"name": "6 Luna", "provider": "OpenAI", "via": "api"}
+    assert [tool["name"] for tool in sent[2]["tools"]] == ["web_search", "cancel_tool_call"]
+    # An entry that is not a request has nothing it was sent.
+    with pytest.raises(NotFoundError):
+        await gems.get_log_sent(gem_id, requests[0]["seq"] + 1)
     await _close(socket, linked)
 
 

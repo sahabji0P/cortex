@@ -187,7 +187,7 @@ class LogEntityClass:
         for item in items:
             if item.seq is not None:
                 self._tell(
-                    item.gem_id, as_shown(item.seq, item.at, "item", None, _item_fields(item))
+                    item.gem_id, as_shown(item.seq, item.at, "item", item.turn, _item_fields(item))
                 )
 
     async def written(self, gem_id: ObjectId | None = None) -> None:

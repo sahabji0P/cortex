@@ -64,7 +64,16 @@ from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
 from app.entities.gem_log import Recording, TurnRecord
-from app.entities.history import Added, Mode, UserTurn, added_reply, line, mode_line, told
+from app.entities.history import (
+    Added,
+    Mode,
+    UserTurn,
+    added_reply,
+    line,
+    mode_line,
+    of_turn,
+    told,
+)
 from app.entities.instructions import instruction_layers, joined
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, run_reply
@@ -380,7 +389,8 @@ class VoiceConversation:
             self._results_owed = False
         # If some of the reply got through, the turn it answers is closed.
         answered = self._turn.answered(heard.items)
-        self._add(*answered, *added_reply(heard.items, reply.calls(), datetime.now(UTC)))
+        settled = [*answered, *added_reply(heard.items, reply.calls(), datetime.now(UTC))]
+        self._add(*of_turn(settled, reply.turn.number))
         reply.turn.closed(finished=reply.finished, kept=heard.kept)
         return heard
 
