@@ -36,10 +36,15 @@ __all__ = [
     "FunctionCallOutput",
     "OpenAIAdapterClass",
     "OpenAIThinking",
+    "OpenAIVia",
     "ResponseInputItemParam",
 ]
 
 type ToolHandler = Callable[..., object | Awaitable[object]]
+
+# How OpenAI is reached: straight, with the API key, or through a proxy such as
+# CLIProxyAPI signed in with a ChatGPT account.
+type OpenAIVia = Literal["api", "proxy"]
 
 
 class _Types:
@@ -156,22 +161,45 @@ class OpenAIAdapterClass:
 
     def __init__(self) -> None:
         """Create an empty OpenAI async client holder."""
+        # One client for each way to OpenAI that is set up, and the one in use.
+        self._clients: dict[OpenAIVia, AsyncOpenAI] = {}
         self._client: AsyncOpenAI | None = None
+        self._via: OpenAIVia = "api"
 
     async def initialize(self) -> None:
-        """Initialize the AsyncOpenAI client: through the proxy when one is set, else
-        straight to OpenAI when an API key is configured."""
+        """Make a client for each way that is set up: the API key, the proxy, or both.
+
+        The proxy is used when it is set up, until `use` picks the other way.
+        """
+        if settings.openai_api_key:
+            self._clients["api"] = AsyncOpenAI(api_key=settings.openai_api_key)
         if settings.openai_proxy_url:
-            self._client = AsyncOpenAI(
+            self._clients["proxy"] = AsyncOpenAI(
                 base_url=settings.openai_proxy_url, api_key=settings.openai_proxy_key
             )
-        elif settings.openai_api_key:
-            self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        if self._clients:
+            self.use("proxy" if "proxy" in self._clients else "api")
+
+    def use(self, via: OpenAIVia) -> None:
+        """Send the next requests the given way. Requests already running are left alone."""
+        if via not in self._clients:
+            raise ValueError(f"OpenAI through {via!r} is not set up")
+        self._client = self._clients[via]
+        self._via = via
+
+    @property
+    def via(self) -> OpenAIVia:
+        """The way in use. With nothing set up, "api"."""
+        return self._via
+
+    def is_set_up(self, via: OpenAIVia) -> bool:
+        """Whether that way has a client: its key or its address is in the settings."""
+        return via in self._clients
 
     async def close(self) -> None:
-        """Close the AsyncOpenAI client if it was initialized."""
-        if self._client is not None:
-            await self._client.close()
+        """Close every client that was made."""
+        for client in self._clients.values():
+            await client.close()
 
     async def stream_response(
         self,

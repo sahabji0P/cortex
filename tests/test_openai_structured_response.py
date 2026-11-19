@@ -120,29 +120,36 @@ async def test_structured_response_requires_a_handler_for_custom_tools() -> None
 
 
 @pytest.mark.asyncio
-async def test_the_client_goes_through_the_proxy_when_one_is_set(
+async def test_each_way_set_up_gets_a_client_and_the_proxy_is_used_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = "app.adapters.openai_adp.settings"
     monkeypatch.setattr(f"{settings}.openai_api_key", "sk-openai")
-    monkeypatch.setattr(f"{settings}.openai_proxy_url", "")
+    monkeypatch.setattr(f"{settings}.openai_proxy_url", "http://127.0.0.1:8317/v1")
     monkeypatch.setattr(f"{settings}.openai_proxy_key", "proxy-key")
 
     adapter = OpenAIAdapterClass()
     await adapter.initialize()
-    assert adapter.client.api_key == "sk-openai"
+    assert (adapter.via, adapter.client.api_key) == ("proxy", "proxy-key")
+    assert str(adapter.client.base_url) == "http://127.0.0.1:8317/v1/"
+
+    adapter.use("api")
+    assert (adapter.via, adapter.client.api_key) == ("api", "sk-openai")
     assert str(adapter.client.base_url) == "https://api.openai.com/v1/"
     await adapter.close()
 
-    monkeypatch.setattr(f"{settings}.openai_proxy_url", "http://127.0.0.1:8317/v1")
-    adapter = OpenAIAdapterClass()
-    await adapter.initialize()
-    assert adapter.client.api_key == "proxy-key"
-    assert str(adapter.client.base_url) == "http://127.0.0.1:8317/v1/"
-    await adapter.close()
-
-    monkeypatch.setattr(f"{settings}.openai_api_key", "")
+    # Only the key: no proxy to switch to.
     monkeypatch.setattr(f"{settings}.openai_proxy_url", "")
     adapter = OpenAIAdapterClass()
     await adapter.initialize()
-    assert not adapter.configured
+    assert adapter.via == "api"
+    assert not adapter.is_set_up("proxy")
+    with pytest.raises(ValueError, match="not set up"):
+        adapter.use("proxy")
+    await adapter.close()
+
+    # Nothing set up.
+    monkeypatch.setattr(f"{settings}.openai_api_key", "")
+    adapter = OpenAIAdapterClass()
+    await adapter.initialize()
+    assert (adapter.via, adapter.configured) == ("api", False)

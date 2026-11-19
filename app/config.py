@@ -39,8 +39,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
 
     # OpenAI through a proxy that speaks its API, such as CLIProxyAPI signed in with a
-    # ChatGPT account. When the address is set, every OpenAI request goes there with this
-    # key, and `openai_api_key` is kept but not used. Empty = straight to OpenAI.
+    # ChatGPT account. Empty = no proxy. With both this and `openai_api_key` set, the user
+    # chooses between them (`/v1/providers/openai`); the proxy is used until they do.
     openai_proxy_url: str = ""
     openai_proxy_key: str = ""
 
