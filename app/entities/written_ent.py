@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from app.entities.gem_log import Recording, TurnRecord
 from app.entities.history import Added, Mode, UserTurn, added_reply, mode_line
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Reply, RoundInput, ToolCall, run_reply
@@ -134,6 +135,7 @@ class WrittenConversation:
         history: Sequence[Item] = (),
         last_mode: Mode = "chat",
         turn: UserTurn | None = None,
+        record: Recording | None = None,
     ) -> None:
         # `model` has to be told of exactly the tools in `tools`, and `instructions` are
         # the whole instructions, with what the model needs already in them. `late` holds
@@ -152,10 +154,13 @@ class WrittenConversation:
         # result in the history, and is held by `late` until its result is told.
         self.left_running: list[ToolCall] = []
         self._turn = UserTurn() if turn is None else turn
+        # Where what happens is written down (see `gem_log.py`). Left out, nothing is.
+        self._record = Recording() if record is None else record
         # After a call, a line says the conversation is written from here on. It is
         # stored with the first item that follows it (see `history.py`).
         for added in mode_line("chat", last_mode):
             self._add(added)
+            self._record.line(added.source, added.item["content"])
         self._writing = False
         self._cut = False
         self._out: asyncio.Queue[_Handed] | None = None
@@ -186,13 +191,16 @@ class WrittenConversation:
         if self._writing:
             raise RuntimeError("a reply is still being written")
         self._writing = True
+        # A reply with no message is written to tell a late result.
+        turn = self._record.turn("late_result" if text is None else "user")
         if text is not None:
             self._turn.add(text, at)
+            turn.said(text)
         out: asyncio.Queue[_Handed] = asyncio.Queue()
         self._out = out
         reply = Reply(_Page(out))
         # A reply cut before it began is not begun at all: the model is not asked.
-        producing = None if self._cut else asyncio.create_task(self._produce(reply, out))
+        producing = None if self._cut else asyncio.create_task(self._produce(reply, out, turn))
         try:
             while not self._cut and (handed := await out.get()) is not None:
                 event, passage, taken = handed
@@ -208,7 +216,7 @@ class WrittenConversation:
             # cancelled again while it waits then cannot leave the reply out of the
             # history, or its tool calls without a result. The next message is accepted
             # once that task is done, not before.
-            self._settling = asyncio.create_task(self._settle(reply, producing))
+            self._settling = asyncio.create_task(self._settle(reply, producing, turn))
             ended = await asyncio.shield(self._settling)
         yield ended
 
@@ -222,7 +230,7 @@ class WrittenConversation:
         if self._out is not None:
             self._out.put_nowait(None)  # wakes the reader, if it is waiting for text
 
-    async def _produce(self, reply: Reply, out: asyncio.Queue[_Handed]) -> None:
+    async def _produce(self, reply: Reply, out: asyncio.Queue[_Handed], turn: TurnRecord) -> None:
         try:
             await run_reply(
                 reply,
@@ -233,7 +241,11 @@ class WrittenConversation:
                 # The page hands each piece of text to the reader itself.
                 said=lambda text: None,
                 show=lambda text: out.put_nowait((WrittenEvent("tool.call", text), None, None)),
+                record=turn,
             )
+        except Exception as exc:
+            turn.failed(exc)
+            raise
         finally:
             out.put_nowait(None)
 
@@ -242,7 +254,9 @@ class WrittenConversation:
         # no result in the history yet. Whether writing wants more is not settled.
         return RoundInput([*self._history, *self._turn.items()], think=self._late.pending)
 
-    async def _settle(self, reply: Reply, producing: asyncio.Task[None] | None) -> WrittenEvent:
+    async def _settle(
+        self, reply: Reply, producing: asyncio.Task[None] | None, turn: TurnRecord
+    ) -> WrittenEvent:
         """Stop the reply, then move it into the history as delivered.
 
         A tool call still running is left running, with the placeholder as its result.
@@ -263,6 +277,7 @@ class WrittenConversation:
                 self._add(added)
             for added in added_reply(items, reply.calls(), datetime.now(UTC)):
                 self._add(added)
+            turn.closed(finished=reply.finished, kept=delivered.kept)
             kept = " ".join(item["content"] for item in items if "role" in item)
             if whole:
                 return WrittenEvent("done", kept)
@@ -272,6 +287,8 @@ class WrittenConversation:
             # says something was cut.
             return WrittenEvent("cut", kept or CUT_MARK)
         finally:
+            # Said once: this only speaks if settling itself was stopped part-way.
+            turn.closed(finished=False, kept=None)
             self._out = None
             self._cut = False
             self._writing = False

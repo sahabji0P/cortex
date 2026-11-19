@@ -54,7 +54,7 @@ from app.entities.conversation_ent import ConversationEntityClass, Stored, Write
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.history import UserTurn, mode_line, settled, shown, told
-from app.entities.instructions import instructions
+from app.entities.instructions import instruction_layers, joined
 from app.entities.late_results import LateResult
 from app.entities.model import LLM, ModelName, is_openai, model_for
 from app.entities.tools import gem_toolbox
@@ -284,14 +284,20 @@ class ChatEntityClass:
         model = model_for(ready.llm, ready.name, tools.specs)
         # Read for every reply, so a change to it applies from the next message.
         darbar = (await self._darbar.read()).text
+        layers = instruction_layers(darbar=darbar, gem=gem, model_needs=model.own_instructions)
+        # What happens in the reply is written down in the gem's log, and with it any
+        # change to what its requests are made with since the gem's last one.
+        record = self._conversations.recording(gem.id, "chat")
+        record.describe(
+            model=ready.name,
+            via=lambda: getattr(ready.llm, "via", "api"),
+            layers=layers,
+            tools=tools.tools,
+        )
         conversation = WrittenConversation(
             model=model,
             tools=tools,
-            instructions=instructions(
-                darbar=darbar,
-                gem=gem,
-                model_needs=model.own_instructions,
-            ),
+            instructions=joined(layers),
             # A FIRST RULE, TO BE TRIED OUT, NOT A SETTLED ONE: the whole stored
             # conversation is sent to the model every time. Nothing is trimmed or
             # summed up, and old search results are not cleared, so the context
@@ -300,6 +306,7 @@ class ChatEntityClass:
             last_mode=history.mode,
             late=late,
             turn=kept.turn,
+            record=record,
         )
         turn.begin(conversation)
         ended, failure = await _read(conversation, text, at, gem_id, deliver)
@@ -427,7 +434,10 @@ class ChatEntityClass:
         history = await self._conversations.load(gem_id, told=results)
         added = told(turn, results)
         if added:
-            added = [*mode_line("chat", history.mode), *added]
+            lines = mode_line("chat", history.mode)
+            for one in lines:
+                self._conversations.recording(gem_id, "chat").line(one.source, one.item["content"])
+            added = [*lines, *added]
         return await self._conversations.add(gem_id, history, added, "chat")
 
 
