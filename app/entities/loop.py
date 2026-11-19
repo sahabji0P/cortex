@@ -27,18 +27,20 @@ tool events go are the conversation's own. It hands them over at the start of ea
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, NamedTuple, Protocol
 
-from app.entities.model import Item, Model, RoundDone, TextDelta
+from app.entities.model import Item, Model, ModelCall, RoundDone, TextDelta, Usage
 from app.entities.tools import Tool, Toolbox
 
 __all__ = [
     "CUT_MARK",
     "Delivered",
     "Part",
+    "Record",
     "Reply",
+    "RequestRecord",
     "ResultMark",
     "RoundInput",
     "Surface",
@@ -99,6 +101,9 @@ class ToolCall:
     output: str | None = None  # None while the tool is still running
     running: asyncio.Task[str] | None = None
     mark: ResultMark | None = None
+    # Whether the tool failed, once it has run. The model is told so in the result's
+    # own words: this is for whoever writes down what happened.
+    failed: bool = False
 
     def items(self) -> list[Item]:
         return [
@@ -190,6 +195,55 @@ class Reply:
         return Delivered(items, any_text, " ".join(kept) if cut else None)
 
 
+class RequestRecord(Protocol):
+    """Where what happens to one request to the model is written down."""
+
+    def first(self) -> None:
+        """The first of the model's output has come."""
+        ...
+
+    def done(self, text: str, calls: Sequence[ModelCall], usage: Usage | None) -> None:
+        """The model finished: all the text it produced, its tool calls, and what it used."""
+        ...
+
+    def stopped(self, text: str, error: BaseException) -> None:
+        """The request ended before the model finished, with the text produced until then."""
+        ...
+
+
+class Record(Protocol):
+    """Where what a reply does is written down (see `gem_log.py`). None of it may raise."""
+
+    def sent(self, items: Sequence[Item], think: bool) -> RequestRecord:
+        """A request is about to be sent these items."""
+        ...
+
+    def tool(self, call: ToolCall) -> None:
+        """A tool call has started running."""
+        ...
+
+
+class _NoRequestRecord:
+    def first(self) -> None:
+        pass
+
+    def done(self, text: str, calls: Sequence[ModelCall], usage: Usage | None) -> None:
+        pass
+
+    def stopped(self, text: str, error: BaseException) -> None:
+        pass
+
+
+class _NoRecord:
+    """Writes nothing down."""
+
+    def sent(self, items: Sequence[Item], think: bool) -> RequestRecord:
+        return _NoRequestRecord()
+
+    def tool(self, call: ToolCall) -> None:
+        pass
+
+
 class RoundInput(NamedTuple):
     """What a conversation gives one model round, read when the round starts."""
 
@@ -206,20 +260,24 @@ async def run_reply(
     next_round: Callable[[], RoundInput],
     said: Callable[[str], None],
     show: Callable[[str], None],
+    record: Record | None = None,
 ) -> None:
     """Produce one reply: model rounds, with tool calls in between, delivered as they stream.
 
     `next_round` is asked at the start of every round, not once per reply: what it
     returns can change while tools run. `said` is given each piece of text once the
     surface has taken it, and `show` the text of each tool call's `tool.call` event.
+    `record` is where each request and tool call is written down, if anywhere: it
+    changes nothing of what the model is sent or what the reply does.
 
     The surface is finished when the reply is, and stopped if it is cut off or fails.
     A failure is raised once the surface has stopped.
     """
+    record = _NoRecord() if record is None else record
     try:
         # The model calls what it needs: there is no cap on how many rounds of tool
         # calls one reply may make. It ends with a round that makes none.
-        while await _model_round(reply, model, tools, instructions, next_round, said, show):
+        while await _model_round(reply, model, tools, instructions, next_round, said, show, record):
             pass
         await reply.surface.finish()
     except (asyncio.CancelledError, Exception):
@@ -236,24 +294,41 @@ async def _model_round(
     next_round: Callable[[], RoundInput],
     said: Callable[[str], None],
     show: Callable[[str], None],
+    record: Record,
 ) -> bool:
     """Run one model call, delivering its text. Return True if it called tools (so: again)."""
     before = next_round()
-    events = model.round(
-        [*before.items, *reply.send_back()], instructions=instructions, think=before.think
-    )
+    items = [*before.items, *reply.send_back()]
+    request = record.sent(items, before.think)
+    events = model.round(items, instructions=instructions, think=before.think)
     calls: list[ToolCall] = []
-    # Closed on the way out whatever happens, so the model call never outlives this.
-    async with contextlib.aclosing(events):
-        async for event in events:
-            if isinstance(event, TextDelta):
-                await reply.say(event.text)
-                said(event.text)
-            elif isinstance(event, RoundDone):
-                calls = [
-                    ToolCall(call.call_id, call.name, call.arguments, tool=tools.get(call.name))
-                    for call in event.calls
-                ]
+    produced: list[str] = []
+    done: RoundDone | None = None
+    try:
+        # Closed on the way out whatever happens, so the model call never outlives this.
+        async with contextlib.aclosing(events):
+            async for event in events:
+                if not isinstance(event, RoundDone):
+                    request.first()
+                if isinstance(event, TextDelta):
+                    produced.append(event.text)
+                    await reply.say(event.text)
+                    said(event.text)
+                elif isinstance(event, RoundDone):
+                    done = event
+                    calls = [
+                        ToolCall(call.call_id, call.name, call.arguments, tool=tools.get(call.name))
+                        for call in event.calls
+                    ]
+    except BaseException as stopped:
+        # It failed, or the reply was cut off while the model was still producing.
+        request.stopped("".join(produced), stopped)
+        raise
+    request.done(
+        "".join(produced),
+        [] if done is None else done.calls,
+        None if done is None else done.usage,
+    )
     if not calls:
         return False
     # Whatever was said before calling tools ("Let me check") is complete as it stands.
@@ -261,8 +336,15 @@ async def _model_round(
     # Each call runs as its own task, so that cutting the reply off does not stop it.
     for call in calls:
         reply.add_call(call)
-        call.running = asyncio.create_task(tools.run(call.name, call.arguments, show=show))
+        call.running = asyncio.create_task(_run(tools, call, show))
+        record.tool(call)
     for call in calls:
         if call.running is not None:
             call.output = await asyncio.shield(call.running)
     return True
+
+
+async def _run(tools: Toolbox, call: ToolCall, show: Callable[[str], None]) -> str:
+    """Run one tool call to its result for the model, noting on it whether the tool failed."""
+    result, call.failed = await tools.attempt(call.name, call.arguments, show=show)
+    return result
