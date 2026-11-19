@@ -1,5 +1,5 @@
 from functools import cache
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends
 
@@ -92,6 +92,16 @@ class GemsServiceV1Class:
                 for message in await self.conversations.messages(gem_id)
             ]
         )
+
+    async def get_log(
+        self, gem_id: str, *, before: int | None, limit: int
+    ) -> GemsModels.V1.Output.Log:
+        return GemsModels.V1.Output.Log(
+            entries=await self.conversations.log_page(gem_id, before=before, limit=limit)
+        )
+
+    async def get_log_entry(self, gem_id: str, seq: int) -> dict[str, Any]:
+        return await self.conversations.log_entry(gem_id, seq)
 
 
 # Cached, so every request gets the one service.

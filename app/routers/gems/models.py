@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -86,3 +86,12 @@ class GemsModels:
                 """A gem's conversation so far, a call's turns included, oldest first."""
 
                 messages: list["GemsModels.V1.Output.ChatMessage"]
+
+            class Log(BaseModel):
+                """A page of a gem's log, oldest first.
+
+                Every entry has `seq` (its number in the log), `at`, `kind` and `turn`,
+                then its own fields by kind (see `docs/chat-contract.md`).
+                """
+
+                entries: list[dict[str, Any]]

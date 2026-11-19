@@ -4,6 +4,11 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+from bson import ObjectId
+
+from app.core.errors import NotFoundError
+from app.routers.gems.service import GemsServiceV1Class
 from tests.test_chat import (
     _WEATHER,
     _Chat,
@@ -342,3 +347,61 @@ async def test_a_call_and_writing_share_one_log_and_one_count_of_turns() -> None
     assert len(_shown(log, "settings.changed")) == 1
     kinds = [entry["kind"] for entry in log]
     assert kinds.index("call.closed") < kinds.index("turn.opened", kinds.index("call.closed"))
+
+
+# ---- read back over the routes
+
+
+async def test_the_log_route_gives_the_latest_page_and_then_what_is_before_it() -> None:
+    setup = await _chat(_said("Hi."), _said("Hi again."))
+    socket, linked = await _open(setup.service())
+    for text in ("hello", "hello again"):
+        socket.send(setup.gem.id, text)
+        await socket.until("chat.done", 1 if text == "hello" else 2)
+    gems = GemsServiceV1Class(setup.gems, setup.conversations)
+    gem_id = str(setup.gem.id)
+
+    latest = (await gems.get_log(gem_id, before=None, limit=5)).entries
+    earlier = (await gems.get_log(gem_id, before=latest[0]["seq"], limit=500)).entries
+
+    whole = [*earlier, *latest]
+    assert [entry["seq"] for entry in whole] == list(range(15))
+    assert len(latest) == 5
+    assert [entry["kind"] for entry in latest] == [
+        "request.sent",
+        "request.done",
+        "turn.closed",
+        "item",
+        "item",
+    ]
+    # An entry is its own fields beside the four every entry has.
+    opened = whole[0]
+    assert opened == {
+        "seq": 0,
+        "at": opened["at"],
+        "kind": "turn.opened",
+        "turn": 1,
+        "by": "user",
+        "mode": "chat",
+    }
+    item = latest[-1]
+    assert (item["place"], item["source"], item["item"]) == (
+        3,
+        "gem",
+        {"role": "assistant", "content": "Hi again."},
+    )
+    assert await gems.get_log_entry(gem_id, 0) == opened
+    await _close(socket, linked)
+
+
+async def test_the_log_routes_say_when_there_is_no_such_gem_or_entry() -> None:
+    setup = await _chat(_said("Hi."))
+    gems = GemsServiceV1Class(setup.gems, setup.conversations)
+
+    with pytest.raises(NotFoundError):
+        await gems.get_log(str(ObjectId()), before=None, limit=10)
+    with pytest.raises(NotFoundError):
+        await gems.get_log("not an id", before=None, limit=10)
+    with pytest.raises(NotFoundError):
+        await gems.get_log_entry(str(setup.gem.id), 0)
+    assert (await gems.get_log(str(setup.gem.id), before=None, limit=10)).entries == []

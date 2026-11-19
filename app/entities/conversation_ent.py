@@ -24,7 +24,7 @@ import json
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from bson import ObjectId
 
@@ -243,6 +243,33 @@ class ConversationEntityClass:
         await self._store.add(items)
         self.log.stored(items)
         return Stored([*stored.items, *(one.item for one in added)], mode)
+
+    async def log_page(
+        self, gem_id: str, *, before: int | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """A page of a gem's log as it is shown, oldest first.
+
+        The latest page, or with `before` the entries just before that number.
+        Everything is in it, in the order it happened: what the gem remembers and what
+        happened (see `gem_log.py`). Raises `NotFoundError` if there is no such gem.
+        """
+        if not await self._gems.exists(gem_id):
+            raise NotFoundError("Gem")
+        found = ObjectId(gem_id)
+        # What has just happened is on its way to the database: it is waited for.
+        await self.log.written(found)
+        return [line.shown() for line in await self._store.page(found, before=before, limit=limit)]
+
+    async def log_entry(self, gem_id: str, seq: int) -> dict[str, Any]:
+        """One entry of a gem's log, in full. Raises `NotFoundError` if there is none."""
+        if not await self._gems.exists(gem_id):
+            raise NotFoundError("Gem")
+        found = ObjectId(gem_id)
+        await self.log.written(found)
+        line = await self._store.one(found, seq)
+        if line is None:
+            raise NotFoundError("Log entry")
+        return line.shown()
 
     def recording(self, gem_id: ObjectId, mode: Mode) -> Recording:
         """What a conversation with the gem writes down of what happens (see `gem_log.py`).
