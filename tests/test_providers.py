@@ -5,6 +5,7 @@ import asyncio
 from collections.abc import MutableMapping
 from typing import TYPE_CHECKING, Any, cast
 
+import httpx
 import pytest
 from pydantic import BaseModel
 
@@ -197,3 +198,20 @@ async def test_a_failed_sign_in_removes_nothing_and_a_silent_proxy_keeps_the_cho
     proxy.down = True
     route = await providers.openai_route()
     assert (route.via, route.manageable, route.accounts) == ("api", True, None)
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_is_not_the_management_api_is_an_error_not_a_crash() -> None:
+    adapter = CLIProxyAdapterClass()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://proxy.test/v0/management",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, text="<html>not it</html>")),
+    )
+    for ask in (
+        adapter.chatgpt_logins(),
+        adapter.sign_in_status("s"),
+        adapter.start_chatgpt_sign_in(),
+    ):
+        with pytest.raises(CLIProxyError, match="could not be read"):
+            await ask
+    await adapter.close()

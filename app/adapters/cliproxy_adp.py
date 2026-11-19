@@ -85,10 +85,21 @@ class CLIProxyAdapterClass:
             raise CLIProxyError(f"the proxy answered {response.status_code}")
         return response
 
+    @staticmethod
+    def _body(response: httpx.Response) -> dict[str, Any]:
+        """The answer's JSON object. Anything else is not the management API talking."""
+        try:
+            body = response.json()
+        except ValueError as error:
+            raise CLIProxyError("the proxy's answer could not be read") from error
+        if not isinstance(body, dict):
+            raise CLIProxyError("the proxy's answer could not be read")
+        return cast("dict[str, Any]", body)
+
     async def chatgpt_logins(self) -> list[ProxyLogin]:
         """The proxy's ChatGPT (Codex) logins."""
         response = self._answered(await self._ask("GET", "/auth-files"))
-        files = cast("list[dict[str, Any]]", response.json().get("files", []))
+        files = cast("list[dict[str, Any]]", self._body(response).get("files", []))
         return [
             ProxyLogin(
                 name=file["name"],
@@ -110,13 +121,15 @@ class CLIProxyAdapterClass:
         response = self._answered(
             await self._ask("GET", "/codex-auth-url", params={"is_webui": "true"})
         )
-        body = response.json()
+        body = self._body(response)
+        if not (body.get("url") and body.get("state")):
+            raise CLIProxyError("the proxy started no sign-in")
         return body["url"], body["state"]
 
     async def sign_in_status(self, state: str) -> tuple[SignInStatus, str | None]:
         """Whether that sign-in is still waiting, went through, or failed (with why)."""
         response = await self._ask("GET", "/get-auth-status", params={"state": state})
-        body = response.json()
+        body = self._body(response)
         status = body.get("status")
         if status in ("wait", "ok"):
             return status, None
