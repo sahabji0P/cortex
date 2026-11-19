@@ -689,7 +689,9 @@ def _world(setup: _Setup, *rounds: list[Any]) -> _World:
 
 
 async def test_a_gem_uses_a_connection_s_tool_in_writing(setup: _Setup) -> None:
-    await setup.connections.create(name="Tracker", url=_URL, gems=[str(setup.one.id)])
+    await setup.connections.create(
+        name="Tracker", url=_URL, gems=[str(setup.one.id)], deferred=False
+    )
     call = _tool_call("tracker__find_issues", {"text": "login"})
     world = _world(
         setup,
@@ -751,7 +753,9 @@ async def test_a_connection_closed_to_a_gem_applies_from_the_next_message(setup:
 async def test_a_call_offers_the_tools_the_gem_s_connections_had_when_it_opened(
     setup: _Setup,
 ) -> None:
-    made = await setup.connections.create(name="Tracker", url=_URL, gems=[str(setup.one.id)])
+    made = await setup.connections.create(
+        name="Tracker", url=_URL, gems=[str(setup.one.id)], deferred=False
+    )
     call_1 = _tool_call("tracker__close_issue", {"number": 4})
     call_2 = _tool_call("tracker__close_issue", {"number": 9}, "call_2")
     world = _world(
@@ -872,26 +876,26 @@ async def test_a_connection_is_sent_without_what_lets_us_in(setup: _Setup) -> No
     assert await service.list_connections() == []
 
 
-async def test_a_connection_is_not_deferred_until_the_user_says_so(setup: _Setup) -> None:
+async def test_a_connection_is_deferred_unless_the_user_says_not(setup: _Setup) -> None:
     service = ConnectionsServiceV1Class(setup.connections)
     made = await service.create_connection(
         ConnectionsModels.V1.Input.CreateConnection(name="Tracker", url=_URL, gems="all")
     )
-    assert made.deferred is False
-    assert not any(tool.spec.deferred for tool in await setup.connections.tools_for(setup.one.id))
-
-    changed = await service.update_connection(
-        made.id, ConnectionsModels.V1.Input.UpdateConnection(deferred=True)
-    )
-
-    assert changed.deferred is True
-    assert (await service.get_connection(made.id)).deferred is True
+    assert made.deferred is True
     tools = await setup.connections.tools_for(setup.one.id)
     assert [(tool.spec.deferred, tool.connection) for tool in tools] == [(True, "Tracker")] * 3
-    deferred = await service.create_connection(
-        ConnectionsModels.V1.Input.CreateConnection(name="Other", url=_URL, deferred=True)
+
+    changed = await service.update_connection(
+        made.id, ConnectionsModels.V1.Input.UpdateConnection(deferred=False)
     )
-    assert deferred.deferred is True
+
+    assert changed.deferred is False
+    assert (await service.get_connection(made.id)).deferred is False
+    assert not any(tool.spec.deferred for tool in await setup.connections.tools_for(setup.one.id))
+    loaded = await service.create_connection(
+        ConnectionsModels.V1.Input.CreateConnection(name="Other", url=_URL, deferred=False)
+    )
+    assert loaded.deferred is False
 
 
 def test_a_change_names_only_what_changes_and_nothing_may_be_null() -> None:

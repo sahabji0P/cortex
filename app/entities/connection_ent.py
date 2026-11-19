@@ -243,7 +243,7 @@ class Connection(BaseModel):
     enabled: bool = True
     # On, its tools are not told to the model up front: the model finds and loads them
     # with `tool_search` when it needs one. Off, they are sent in full with every request.
-    deferred: bool = False
+    deferred: bool = True
     gems: GemScope = Field(default_factory=list[str])
     tools: list[ConnectionTool] = Field(default_factory=list[ConnectionTool])
     # How many tools the server listed that were not kept (see `_kept`).
@@ -513,7 +513,7 @@ class ConnectionEntityClass:
         headers: Mapping[str, str] | None = None,
         gems: GemScope | None = None,
         enabled: bool = True,
-        deferred: bool = False,
+        deferred: bool = True,
     ) -> Connection:
         """Add a connection: its server is asked for its tools, and they are kept.
 

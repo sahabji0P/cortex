@@ -183,7 +183,7 @@ A connection is a tool server the user has added: an [MCP](https://modelcontextp
 | `oauth_client` | this backend's registration as a client of the sign-in server, with its secret if it was given one, and the address the browser was registered to come back to |
 | `oauth_tokens` | the pass: what lets us in, what renews it, and when it runs out (null when the sign-in server did not say). Null when a sign-in is needed |
 | `enabled` | off, no gem is offered its tools, and who it was open to is kept. Default on |
-| `deferred` | on, its tools are not sent with every request: a gem finds and loads them with `tool_search` when it needs one (see below). Default off |
+| `deferred` | on, its tools are not sent with every request: a gem finds and loads them with `tool_search` when it needs one (see below). Off, all of them are sent in full with every request. Default on, also for a connection stored before there was the flag |
 | `gems` | the gems it is open to: `"all"`, or a list of gem ids. **A new connection is open to none** until the user says which |
 | `tools` | a copy of the tools the server listed when it was last asked: each one's name, title, description and schema |
 | limits | for one tool, the gems it is open to. A limit only narrows: the tool is offered to a gem when the connection is open to the gem and the limit names it too. A limit that names no gem turns the tool off for everyone. A tool with no limit is open to whoever the connection is |

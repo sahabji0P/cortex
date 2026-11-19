@@ -24,7 +24,7 @@ class ConnectionsModels:
                 enabled: bool = True
                 # On, the gems find and load its tools by searching, instead of being
                 # told of them all with every request.
-                deferred: bool = False
+                deferred: bool = True
 
             class UpdateConnection(BaseModel):
                 """A partial change. A field left out keeps its value, and none may be null.
