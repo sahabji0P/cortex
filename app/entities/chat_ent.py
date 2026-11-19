@@ -24,10 +24,12 @@ written turn after a call opens with a line that says the call has ended (see
 
 A tool call outlives a reply that is cut, as in a call, and by the same code (see
 `late_results.py`). Its call is stored with the placeholder as its result, and the new
-message is answered first. When the call finishes, at the next moment no reply is being
+message is answered. When the call finishes, at the next moment no reply is being
 written to that gem, its result is added to the stored conversation as a stub call
 followed by the result, and the gem tells the user about it in a reply of its own, sent
-to the socket that sent the latest message to it. Which stub delivered which call is read
+to the socket that sent the latest message to it. If a message is waiting to be answered
+then, the result is added ahead of that message instead, and the reply to the message
+tells it, as in a call (see `history.py`). Which stub delivered which call is read
 from the stub's arguments, and which results are placeholders and which cancels stopped
 a call, from the marks stored with them.
 """
@@ -50,8 +52,9 @@ from app.core.errors import NotFoundError
 from app.entities.conversation_ent import ConversationEntityClass, Stored, Writer, gem_key
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.history import mode_line, settled, shown, stubs
+from app.entities.history import UserTurn, mode_line, settled, shown, told
 from app.entities.instructions import instructions
+from app.entities.late_results import LateResult
 from app.entities.model import LLM, ModelName, is_openai, model_for
 from app.entities.tools import gem_toolbox
 from app.entities.written_ent import WrittenConversation, WrittenEvent
@@ -63,7 +66,8 @@ class ChatEvent(BaseModel):
     """One frame about a gem's reply, for the client that sent the message.
 
     - `chat.result` a search the gem started in an earlier reply has come back, and a
-                    reply about it follows. `text` is what the search showed (its query)
+                    reply about it follows, unasked. `text` is what the search showed
+                    (its query). A result told in the reply to a message has none
     - `chat.text`   the next piece of the reply, as it is written
     - `chat.tool`   the gem is using a tool. `text` says what, such as what a search
                     looks up
@@ -214,8 +218,13 @@ class ChatEntityClass:
             # written to again.
             if not turn.was_cut:
                 self._latest[key] = (gem_id, deliver)
-            # A call lost to a restart is closed before the new message.
-            history = await self._conversations.load(ready.gem.id)
+            # A call lost to a restart is closed before the new message. Late results
+            # waiting go in ahead of it, so the reply to it tells them too. No
+            # `chat.result` goes before that reply: the client takes one as the start of
+            # a reply nobody asked for. A message cut already leaves them to the next.
+            kept = self._conversations.gem(key)
+            results = [] if turn.was_cut else kept.late.take()
+            history = await self._load(ready.gem.id, kept.turn, results)
             await self._write(turn, key, ready, history, text, at, gem_id, deliver)
         except Exception as exc:
             # Anything else, such as the store being out of reach before the reply began.
@@ -364,19 +373,11 @@ class ChatEntityClass:
             if turn.was_cut:
                 return  # a message came first: the results wait until it is answered
             # Taken at once, so that whatever happens next they are not taken again.
-            told = kept.late.take()
+            results = kept.late.take()
             if not await self._gems.exists(key):
                 return  # the gem went, and its conversation with it: they are dropped
             gem_oid = ObjectId(key)
-            history = await self._conversations.load(gem_oid, told=told)
-            # They are told in writing: after a call, a line says so first. A turn left
-            # open has been sent to the model: the results follow it.
-            added = [
-                *mode_line("chat", history.mode),
-                *kept.turn.close(),
-                *stubs(late.stub for late in told),
-            ]
-            history = await self._conversations.add(gem_oid, history, added, "chat")
+            history = await self._load(gem_oid, kept.turn, results)
             if await self._conversations.gone(gem_oid):
                 return  # deleted while they were stored
             latest = self._latest.get(key)
@@ -393,7 +394,7 @@ class ChatEntityClass:
                 # when it answers.
                 return
             try:
-                for late in told:
+                for late in results:
                     text = shown(late.call) or ""
                     await deliver(ChatEvent(type="chat.result", gem=gem_id, text=text))
             except Exception:
@@ -409,6 +410,18 @@ class ChatEntityClass:
                 await _teller(gem_id, owed)("chat.error", f"no reply could be made: {exc}")
         finally:
             self._release(turn, key)
+
+    async def _load(self, gem_id: ObjectId, turn: UserTurn, results: list[LateResult]) -> Stored:
+        """The gem's conversation as stored, with the late results taken added after it.
+
+        They are added in writing: after a call, a line says so first. A turn left open
+        has been sent to the model: it is closed, and the results follow it.
+        """
+        history = await self._conversations.load(gem_id, told=results)
+        added = told(turn, results)
+        if added:
+            added = [*mode_line("chat", history.mode), *added]
+        return await self._conversations.add(gem_id, history, added, "chat")
 
 
 def _teller(

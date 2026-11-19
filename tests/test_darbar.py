@@ -32,8 +32,8 @@ _BUILT_IN = (
     "point. The user heard or read nothing after it, so do not assume they know the rest. "
     'Never end a reply with "…" yourself.\n'
     "- A tool call that is still running when the user interrupts carries on in the "
-    "background. Do not make the same call again: say it is still coming, and answer "
-    "whatever else they asked. Only if they say they no longer want it, call "
+    "background. Do not make the same call again, and answer whatever else they asked. "
+    "Only if they say they no longer want it, call "
     "cancel_tool_call: nothing is cancelled unless you make that call. The result reaches "
     'you by itself, as a call with "deferred_result_for" in its arguments. You did not make '
     "that call: it only delivers the late result. When it arrives, tell the user what it "

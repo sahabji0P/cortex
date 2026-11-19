@@ -1436,10 +1436,9 @@ async def test_a_late_result_is_given_to_the_model_once_nothing_is_being_said() 
     await f.conversation.close()
 
 
-async def test_a_result_that_lands_while_the_user_speaks_is_brought_up_after_their_answer() -> None:
+async def test_a_result_that_lands_while_the_user_speaks_goes_in_ahead_of_their_words() -> None:
     llm, finish = _slow_search_then(
-        [_delta("Four."), _completed(_message("Four."))],
-        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+        [_delta("Four. And it is sunny."), _completed(_message("Four. And it is sunny."))],
         [_delta("Welcome."), _completed(_message("Welcome."))],
     )
     f = _conversation(llm, _Search(gate=finish))
@@ -1454,29 +1453,62 @@ async def test_a_result_that_lands_while_the_user_speaks_is_brought_up_after_the
     f.stt.turn_end("what is two plus two?")
     outputs = await _read_until(f.conversation, "assistant.done")
 
-    # First their question is answered, with the search still shown as running.
-    assert outputs[-1].text == "Four."
+    # One reply answers them and tells the result: the stub and the result come before
+    # their words, and the model is not shown the search as still running.
+    assert outputs[-1].text == "Four. And it is sunny."
     asked = _after_the_call_start(llm.requests[1])
-    assert _shape(asked) == ["user", "function_call", "function_call_output", "user"]
+    assert _shape(asked) == [
+        "user",
+        "function_call",
+        "function_call_output",
+        "function_call",
+        "function_call_output",
+        "user",
+    ]
     assert "Still running" in asked[2]["output"]
+    assert json.loads(asked[3]["arguments"]) == {"deferred_result_for": "call_1"}
+    assert asked[3]["call_id"] == asked[4]["call_id"] != "call_1"
+    assert "Norris won in Las Vegas." in asked[4]["output"]
+    assert asked[5] == {"role": "user", "content": "what is two plus two?"}
 
-    # Then, with nobody saying anything, the result is given to the model and spoken.
+    # Nothing is brought up afterwards, and their next turn is simply answered.
     f.clock.advance(60)
-    outputs = await _read_until(f.conversation, "assistant.done")
-    assert outputs[-1].text == "It is sunny."
-    assert "user.final" not in _types(outputs)
-    told = _after_the_call_start(llm.requests[2])
-    assert _shape(told)[-4:] == ["user", "assistant", "function_call", "function_call_output"]
-    assert json.loads(told[-2]["arguments"]) == {"deferred_result_for": "call_1"}
-    assert "Norris won in Las Vegas." in told[-1]["output"]
-
-    # They have now heard it. Their next turn is answered and nothing is brought up again.
-    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 2
     f.stt.say("thanks")
     await _read_until(f.conversation, "assistant.done")
     f.clock.advance(60)
     await asyncio.sleep(0.25)
-    assert len(llm.requests) == 4
+    assert len(llm.requests) == 3
+    await f.conversation.close()
+
+
+async def test_a_reply_that_answers_with_a_result_is_made_again_if_noise_cuts_it_unheard() -> None:
+    never = asyncio.Event()
+    llm, finish = _slow_search_then(
+        [_delta("Four."), never],
+        [_delta("Four. And it is sunny."), _completed(_message("Four. And it is sunny."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()
+    await asyncio.sleep(0.05)
+    f.stt.turn_end("what is two plus two?")
+    await _read_until(f.conversation, "assistant.word")
+    f.stt.say("")
+    outputs = await _read_until(f.conversation, "assistant.done")
+
+    # Nothing of it was heard: the turn is still open after the result, and the same
+    # request is made again.
+    assert outputs[-1].text == "Four. And it is sunny."
+    assert _after_the_call_start(llm.requests[2]) == _after_the_call_start(llm.requests[1])
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 3
     await f.conversation.close()
 
 
@@ -1636,11 +1668,12 @@ async def test_a_result_whose_reply_failed_is_there_when_the_user_next_speaks() 
     await f.conversation.close()
 
 
-async def test_a_result_waiting_its_turn_keeps_waiting_while_the_user_talks() -> None:
+async def test_a_result_waiting_for_a_reply_to_be_heard_goes_in_with_the_turn_that_cuts_it() -> (
+    None
+):
     llm, finish = _slow_search_then(
         [_delta("Still looking."), _completed(_message("Still looking."))],
-        [_delta("Yes."), _completed(_message("Yes."))],
-        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+        [_delta("Yes. It is sunny."), _completed(_message("Yes. It is sunny."))],
     )
     f = _conversation(llm, _Search(gate=finish))
 
@@ -1650,23 +1683,33 @@ async def test_a_result_waiting_its_turn_keeps_waiting_while_the_user_talks() ->
     await _read_until(f.conversation, "assistant.done")
 
     # The result lands while "Still looking." is playing, so it waits. The user speaks
-    # over that reply: they are answered first, and the result still waits.
+    # over that reply before a word of it is heard.
     finish.set()
     await asyncio.sleep(0.05)
     f.stt.say("are you there?")
     outputs = await _read_until(f.conversation, "assistant.done")
-    assert outputs[-1].text == "Yes."
-    assert _shape(_after_the_call_start(llm.requests[2]))[-1] == "user"
+    assert outputs[-1].text == "Yes. It is sunny."
 
-    # Once that answer has been heard, the result gets its own reply.
-    f.clock.advance(60)
-    outputs = await _read_until(f.conversation, "assistant.done")
-    assert outputs[-1].text == "It is sunny."
-    assert _shape(_after_the_call_start(llm.requests[3]))[-2:] == [
+    # The turn left open, already sent to the model, is closed; the result follows it,
+    # and what they now said is the open turn.
+    asked = _after_the_call_start(llm.requests[2])
+    assert _shape(asked) == [
+        "user",
         "function_call",
         "function_call_output",
+        "user",
+        "function_call",
+        "function_call_output",
+        "user",
     ]
-    assert len(llm.requests) == 4
+    assert asked[3]["content"] == "hello, what's happening?"
+    assert json.loads(asked[4]["arguments"]) == {"deferred_result_for": "call_1"}
+    assert asked[6]["content"] == "are you there?"
+
+    # The result is not brought up again in a reply of its own.
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 3
     await f.conversation.close()
 
 
@@ -1738,8 +1781,7 @@ async def test_a_wordless_turn_after_an_unanswered_one_is_not_blamed_on_noise() 
 async def test_a_late_result_is_brought_up_once_even_if_two_turns_end_together() -> None:
     llm, finish = _slow_search_then(
         [_delta("Still looking."), _completed(_message("Still looking."))],
-        [_delta("So."), _completed(_message("So."))],
-        [_delta("It is sunny."), _completed(_message("It is sunny."))],
+        [_delta("So. It is sunny."), _completed(_message("So. It is sunny."))],
     )
     f = _conversation(llm, _Search(gate=finish))
 
@@ -1755,22 +1797,22 @@ async def test_a_late_result_is_brought_up_once_even_if_two_turns_end_together()
     # A turn with no words, then straight away one with words and no start of its own.
     f.stt.turn_end("")
     f.stt.turn_end("so?")
-    await _read_until(f.conversation, "assistant.done")
-    f.clock.advance(60)
     outputs = await _read_until(f.conversation, "assistant.done")
     f.clock.advance(60)
     await asyncio.sleep(0.25)
 
-    # One answer to "so?", one reply bringing up the result, and nothing after that.
-    assert outputs[-1].text == "It is sunny."
-    assert len(llm.requests) == 4
+    # One reply answers "so?" with the result in front of it, and nothing after that.
+    assert outputs[-1].text == "So. It is sunny."
+    assert len(llm.requests) == 3
+    asked = _after_the_call_start(llm.requests[2])
+    assert _shape(asked)[-3:] == ["function_call", "function_call_output", "user"]
+    assert asked[-1]["content"] == "so?"
     await f.conversation.close()
 
 
 async def test_a_turn_that_ends_without_starting_cannot_set_off_two_replies() -> None:
     llm, finish = _slow_search_then(
         [_delta("Okay."), _completed(_message("Okay."))],
-        [_delta("It is sunny."), _completed(_message("It is sunny."))],
     )
     f = _conversation(llm, _Search(gate=finish))
 
@@ -1780,20 +1822,19 @@ async def test_a_turn_that_ends_without_starting_cannot_set_off_two_replies() ->
     f.stt.turn_end("never mind")
     finish.set()
     await _read_until(f.conversation, "assistant.done")
-    # Only the answer to the user is under way. The result waits for it to be heard.
-    assert len(llm.requests) == 2
+    # One reply, which has the result in front of it along with what the user said.
     assert _shape(_after_the_call_start(llm.requests[1])) == [
         "user",
+        "function_call",
+        "function_call_output",
         "function_call",
         "function_call_output",
         "user",
     ]
 
     f.clock.advance(60)
-    await _read_until(f.conversation, "assistant.done")
-    f.clock.advance(60)
     await asyncio.sleep(0.25)
-    assert len(llm.requests) == 3
+    assert len(llm.requests) == 2
     await f.conversation.close()
 
 
@@ -1830,9 +1871,8 @@ async def test_the_model_can_cancel_a_search_that_is_still_running() -> None:
     await f.conversation.close()
 
 
-async def test_a_result_that_landed_while_the_user_spoke_still_counts_as_pending() -> None:
+async def test_a_result_that_landed_while_the_user_spoke_is_no_longer_pending() -> None:
     llm, finish = _slow_search_then(
-        [_delta("Still looking."), _completed(_message("Still looking."))],
         [_delta("It is sunny."), _completed(_message("It is sunny."))],
     )
     f = _conversation(llm, _Search(gate=finish))
@@ -1846,15 +1886,12 @@ async def test_a_result_that_landed_while_the_user_spoke_still_counts_as_pending
     f.stt.turn_end("hello?")
     await _read_until(f.conversation, "assistant.done")
 
-    # The model is shown the placeholder and not yet the result, exactly as if the search
-    # were still running. So it is asked to think here too.
+    # The model is shown the result with the user's turn, so no search is left without
+    # one, and it is not asked to think.
     asked = llm.requests[1]
-    assert "Still running" in _after_the_call_start(asked)[-2]["output"]
-    assert asked["reasoning"]["effort"] == "low"
-
-    f.clock.advance(60)
-    await _read_until(f.conversation, "assistant.done")
-    assert llm.requests[2]["reasoning"]["effort"] == "none"
+    assert "Norris won in Las Vegas." in _after_the_call_start(asked)[-2]["output"]
+    assert asked["reasoning"]["effort"] == "none"
+    assert not f.conversation._late.pending
     await f.conversation.close()
 
 
@@ -1865,9 +1902,44 @@ async def test_the_model_can_cancel_a_result_that_is_waiting_to_be_delivered() -
         name="cancel_tool_call",
         arguments=json.dumps({"call_id": "call_1"}),
     )
+    held = asyncio.Event()
+    llm, finish = _slow_search_then(
+        [held, _starts(cancel), _completed(cancel)],
+        [_delta("Stopped."), _completed(_message("Stopped."))],
+    )
+    f = _conversation(llm, _Search(gate=finish))
+
+    f.stt.say("what's the weather")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.say("never mind, stop that")
+    await asyncio.sleep(0.05)
+    # The search finishes while the reply that will cancel it is being made: its result
+    # waits, with no place in the history yet.
+    finish.set()
+    await asyncio.sleep(0.05)
+    assert f.conversation._late.ready
+    held.set()
+    await _read_until(f.conversation, "assistant.done")
+
+    assert _after_the_call_start(llm.requests[2])[-1]["output"] == "Cancelled."
+    # The result the user called off is never brought up.
+    f.clock.advance(60)
+    await asyncio.sleep(0.25)
+    assert len(llm.requests) == 3
+    assert not f.conversation._late.pending
+    await f.conversation.close()
+
+
+async def test_cancelling_a_result_already_in_the_history_finds_nothing_running() -> None:
+    cancel = _Item(
+        type="function_call",
+        call_id="call_2",
+        name="cancel_tool_call",
+        arguments=json.dumps({"call_id": "call_1"}),
+    )
     llm, finish = _slow_search_then(
         [_starts(cancel), _completed(cancel)],
-        [_delta("Stopped."), _completed(_message("Stopped."))],
+        [_delta("It had already come."), _completed(_message("It had already come."))],
     )
     f = _conversation(llm, _Search(gate=finish))
 
@@ -1880,12 +1952,13 @@ async def test_the_model_can_cancel_a_result_that_is_waiting_to_be_delivered() -
     f.stt.turn_end("never mind, stop that")
     await _read_until(f.conversation, "assistant.done")
 
-    assert _after_the_call_start(llm.requests[2])[-1]["output"] == "Cancelled."
-    # The result the user called off is never brought up.
+    # The result went in with the user's turn, so there is nothing left to stop.
+    asked = _after_the_call_start(llm.requests[2])
+    assert json.loads(asked[3]["arguments"]) == {"deferred_result_for": "call_1"}
+    assert asked[-1]["output"] == "Nothing is running under that call_id."
     f.clock.advance(60)
     await asyncio.sleep(0.25)
     assert len(llm.requests) == 3
-    assert not f.conversation._late.pending
     await f.conversation.close()
 
 

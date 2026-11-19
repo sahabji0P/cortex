@@ -36,12 +36,13 @@ sentence in two, and the second half is not a new request. The rule is the same 
 writing, and in one place (`history.py`).
 
 A tool call is not stopped by an interruption. If the user speaks while one is running,
-it carries on, as it does in writing (see `late_results.py`). What the user said is
-answered first. The real result is then added at the next quiet moment, even if it came
-in long before, and the model tells the user about it in a reply of its own, without
-waiting to be asked. The same goes for a tool call left running by a written reply
-before the call: the gem has one set of calls that outlive their replies. A call still
-running when the call ends carries on too, and its result is told in writing.
+it carries on, as it does in writing (see `late_results.py`). When its real result comes
+in, it is added at the next quiet moment, and the model tells the user about it in a
+reply of its own, without waiting to be asked. If the user's turn ends while a result is
+waiting, the result is added ahead of what they said, and one reply answers them and
+tells the result. The same goes for a tool call left running by a written reply before
+the call: the gem has one set of calls that outlive their replies. A call still running
+when the call ends carries on too, and its result is told in writing.
 """
 
 import asyncio
@@ -62,7 +63,7 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
-from app.entities.history import Added, Mode, UserTurn, added_reply, line, mode_line, stubs
+from app.entities.history import Added, Mode, UserTurn, added_reply, line, mode_line, told
 from app.entities.instructions import instructions
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, run_reply
@@ -201,7 +202,8 @@ class VoiceConversation:
         self._user_scripts: set[str] = set()
         self._out: asyncio.Queue[VoiceEvent | bytes | None] = asyncio.Queue()
         # Tool calls that outlived their replies, until their results are told. A result
-        # that comes in is told at the next quiet moment.
+        # that comes in is told at the next quiet moment, or with the user's turn if it
+        # ends first.
         self._owns_late = late is None
         self._late = LateResults(self.results_came) if late is None else late
         # `llm` has to be the adapter of the provider that `model` belongs to. The gem is
@@ -257,7 +259,7 @@ class VoiceConversation:
             yield item
 
     def results_came(self) -> None:
-        """A late result has come in. It is told at the next quiet moment."""
+        """A late result has come in: told at the next quiet moment, or with the user's turn."""
         self._announce_when_quiet()
 
     async def close(self) -> None:
@@ -361,8 +363,8 @@ class VoiceConversation:
 
         Nothing is being said once the reply in progress has been produced and played to
         the end. Only then is that reply final, so only then may another request be made.
-        If the user speaks first, this is cancelled, and it starts again after they have
-        been answered.
+        If the user speaks first, this is cancelled: when their turn ends, results still
+        waiting go in ahead of what they said.
 
         If a noise cuts that reply off before any of it is heard, the history is as it
         was, so the same request is simply made again. If the user speaks first, what
@@ -383,18 +385,13 @@ class VoiceConversation:
             return  # the user has been told in the meantime
         self._producing = asyncio.create_task(self._respond(brings_results=True))
 
-    def _close_turn(self) -> None:
-        """Move the user's unanswered turn into the history, where it becomes final.
-
-        Whatever is added next follows it, and what the user says next is a new turn.
-        """
-        self._add(*self._turn.close())
-
     def _add_late_results(self) -> None:
-        """Add each waiting result to the history, as a stub call followed by the result."""
-        # An unanswered turn has already been sent to the model: the results follow it.
-        self._close_turn()
-        self._add(*stubs(late.stub for late in self._late.take()))
+        """Add each waiting result to the history, as a stub call followed by the result.
+
+        An unanswered turn has already been sent to the model: it is closed, and the
+        results follow it.
+        """
+        self._add(*told(self._turn, self._late.take()))
 
     async def _start_reply(self, transcript: str) -> None:
         """A turn ended: answer it, or put back what it interrupted if nothing was said."""
@@ -421,6 +418,10 @@ class VoiceConversation:
         if said:
             # The result is in front of the model along with what the user now says.
             self._results_owed = False
+            # Results waiting go in ahead of their words, so the one reply that answers
+            # them tells the results too.
+            if self._late.ready:
+                self._add_late_results()
             self._turn.add(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
@@ -431,9 +432,8 @@ class VoiceConversation:
             # as it was, and is simply made again.)
             self._add(line(_NO_WORDS_NOTE))
         self._producing = asyncio.create_task(self._respond())
-        # A result that came in while the user was speaking is not slipped in with their
-        # turn: the model would answer what they said and never mention it. It waits
-        # until this reply has been heard, and is then answered in a reply of its own.
+        # A result that comes in from here on, or one left waiting by a turn with no
+        # words, waits until this reply has been heard, and is told in a reply of its own.
         self._announce_when_quiet()
 
     async def _respond(self, *, brings_results: bool = False) -> None:
