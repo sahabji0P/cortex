@@ -26,6 +26,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
     yield
 
+    # What happened last is still on its way to the database: it is waited for.
+    await EntitiesRegistry.Log.written()
     await EntitiesRegistry.Providers.close()
     await adapter.close()
 

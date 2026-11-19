@@ -193,4 +193,5 @@ class ConversationStoreClass:
         return await self._docdb.get(LogLine, filters={"gem_id": gem_id, "seq": seq})
 
     async def forget(self, gem_id: ObjectId) -> None:
+        """Delete everything of a gem's log: what it remembers and what happened."""
         await self._docdb.delete_many(ConversationItem, {"gem_id": gem_id})

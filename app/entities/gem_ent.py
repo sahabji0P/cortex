@@ -279,6 +279,12 @@ class GemEntityClass:
         self._docdb = docdb
         # A gem's conversation is deleted with it.
         self._conversations = ConversationStoreClass(docdb)
+        # Told the id of each gem as it is deleted, before its conversation goes.
+        self._deleting: list[Callable[[ObjectId], None]] = []
+
+    def when_deleted(self, told: Callable[[ObjectId], None]) -> None:
+        """Tell `told` each gem that is deleted, so nothing is kept of it in memory."""
+        self._deleting.append(told)
 
     async def create(
         self,
@@ -377,4 +383,6 @@ class GemEntityClass:
         found = _gem_id(gem_id)
         if await self._docdb.delete(GemConfig, {"id": found}) == 0:
             raise NotFoundError("Gem")
+        for told in self._deleting:
+            told(found)
         await self._conversations.forget(found)

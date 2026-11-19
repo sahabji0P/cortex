@@ -2196,6 +2196,9 @@ class _FlakyGems:
     async def get(self, gem_id: str) -> GemConfig:
         return await self._gems.get(gem_id)
 
+    def when_deleted(self, told: Any) -> None:
+        self._gems.when_deleted(told)
+
     async def exists(self, gem_id: str) -> bool:
         if self.fails:
             self.fails -= 1

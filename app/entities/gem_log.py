@@ -134,7 +134,7 @@ class LogEntityClass:
             _Gem(
                 seq=0 if last is None else last.seq + 1,
                 turn=0 if turn is None or turn.turn is None else turn.turn,
-                request=0 if request is None else int(request.shown().get("request", 0)),
+                request=0 if request is None else int(request.shown().get("request") or 0),
                 settings=settings,
             ),
         )

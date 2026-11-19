@@ -135,6 +135,8 @@ class ConversationEntityClass:
         # Hands out the numbers of each gem's log. Left out, the conversations keep
         # their own.
         self.log = LogEntityClass(store) if log is None else log
+        # A gem that is deleted takes its log with it: nothing more is written of it.
+        gems.when_deleted(self.log.drop)
         # What is kept of each gem's conversation, by `gem_key`.
         self._kept: dict[str, GemConversation] = {}
         self._quiet: Callable[[str], None] = _nobody

@@ -450,6 +450,23 @@ async def test_nothing_is_written_of_a_gem_that_is_gone() -> None:
     assert _log(docdb) == []
 
 
+async def test_deleting_a_gem_ends_its_log_for_whatever_was_still_running() -> None:
+    docdb, _, conversations = await _conversations()
+    gems = conversations._gems
+    gem = await gems.create(name="Gem One")
+    await conversations.load(gem.id)
+    recording = conversations.recording(gem.id, "chat")
+    turn = recording.turn("user")
+    await conversations.log.written()
+
+    await gems.delete(str(gem.id))
+    # A tool call that outlived the gem ends now.
+    turn.said("too late")
+    await conversations.log.written()
+
+    assert _log(docdb) == []
+
+
 async def test_a_conversation_made_with_no_log_writes_nothing_down() -> None:
     recording = Recording()
 
