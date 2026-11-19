@@ -22,6 +22,9 @@ class ConnectionsModels:
                 # The gems it is open to: "all", or a list of ids. Left out, none.
                 gems: GemScope = Field(default_factory=list[str])
                 enabled: bool = True
+                # On, the gems find and load its tools by searching, instead of being
+                # told of them all with every request.
+                deferred: bool = False
 
             class UpdateConnection(BaseModel):
                 """A partial change. A field left out keeps its value, and none may be null.
@@ -37,6 +40,7 @@ class ConnectionsModels:
                 headers: ConnectionHeaders | None = None
                 gems: GemScope | None = None
                 enabled: bool | None = None
+                deferred: bool | None = None
                 tool_gems: dict[str, list[str] | None] | None = None
 
                 @model_validator(mode="after")
@@ -92,6 +96,8 @@ class ConnectionsModels:
                 # The names of the headers kept. Their values are never sent.
                 headers: list[str]
                 enabled: bool
+                # Whether its tools are found and loaded by searching (`tool_search`).
+                deferred: bool
                 gems: Literal["all"] | list[str]
                 # The server's tools as they were when it was last asked, at `checked_at`.
                 tools: list["ConnectionsModels.V1.Output.Tool"]

@@ -37,6 +37,7 @@ class ConnectionsServiceV1Class:
             # The names only: what lets us in to the server is never sent back.
             headers=[header.name for header in connection.headers],
             enabled=connection.enabled,
+            deferred=connection.deferred,
             gems=connection.gems,
             tools=[
                 ConnectionsModels.V1.Output.Tool(
@@ -72,6 +73,7 @@ class ConnectionsServiceV1Class:
             headers=payload.headers,
             gems=payload.gems,
             enabled=payload.enabled,
+            deferred=payload.deferred,
         )
         return self._connection_out(connection)
 

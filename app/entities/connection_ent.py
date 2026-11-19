@@ -241,6 +241,9 @@ class Connection(BaseModel):
     headers: list[ConnectionHeader] = Field(default_factory=list[ConnectionHeader])
     # Off, no gem is offered its tools, and who it was open to is kept.
     enabled: bool = True
+    # On, its tools are not told to the model up front: the model finds and loads them
+    # with `tool_search` when it needs one. Off, they are sent in full with every request.
+    deferred: bool = False
     gems: GemScope = Field(default_factory=list[str])
     tools: list[ConnectionTool] = Field(default_factory=list[ConnectionTool])
     # How many tools the server listed that were not kept (see `_kept`).
@@ -313,7 +316,7 @@ class Connection(BaseModel):
 
 
 # The fields a client may change. `tool_gems` changes the limits, one tool at a time.
-_EDITABLE = frozenset({"name", "url", "headers", "enabled", "gems", "tool_gems"})
+_EDITABLE = frozenset({"name", "url", "headers", "enabled", "deferred", "gems", "tool_gems"})
 
 # Told the id of a connection whose sign-in has changed: it needs one now, or one was
 # just made. It may raise: that is not passed on.
@@ -510,6 +513,7 @@ class ConnectionEntityClass:
         headers: Mapping[str, str] | None = None,
         gems: GemScope | None = None,
         enabled: bool = True,
+        deferred: bool = False,
     ) -> Connection:
         """Add a connection: its server is asked for its tools, and they are kept.
 
@@ -527,6 +531,7 @@ class ConnectionEntityClass:
             url=url,
             headers=_headers(headers or {}),
             enabled=enabled,
+            deferred=deferred,
             gems=await self._scope([] if gems is None else gems),
             checked_at=now,
             created_at=now,
@@ -564,7 +569,9 @@ class ConnectionEntityClass:
             raise ValueError(f"These fields of a connection cannot be changed: {sorted(unknown)}")
         before = await self.get(connection_id)
         fields: dict[str, Any] = {
-            field: changes[field] for field in ("name", "url", "enabled") if field in changes
+            field: changes[field]
+            for field in ("name", "url", "enabled", "deferred")
+            if field in changes
         }
         if "headers" in changes:
             fields["headers"] = _headers(changes["headers"])
@@ -808,6 +815,7 @@ class ConnectionEntityClass:
             parameters=cast("dict[str, object]", json.loads(tool.input_schema)),
             # The schema is the server's: it need not keep to what a strict one must.
             strict=False,
+            deferred=connection.deferred,
         )
         label = f"{connection.name}: {tool.title or tool.name}"
 
@@ -837,7 +845,7 @@ class ConnectionEntityClass:
                 return f"The tool failed: {text}" if text else "The tool failed."
             return text
 
-        return Tool(spec, run, shown=lambda arguments: label)
+        return Tool(spec, run, shown=lambda arguments: label, connection=connection.name)
 
     async def _ask(self, connection: Connection) -> list[McpTool] | McpAuthServer:
         """The tools the connection's server lists now, or how to sign in to it.
