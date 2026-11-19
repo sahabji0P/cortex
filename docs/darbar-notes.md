@@ -46,7 +46,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Nothing is cleared from the history, in a call or in chat. Keep it simple.
 - A stored result says what it is by a mark, never by its wording.
 - In a call the app shows a reply's words as they are heard: each word is sent with where it starts in the audio. The model's text is not sent early. Chat is unchanged.
-- OpenAI can go through a proxy (CLIProxyAPI on a ChatGPT login) by its own two settings. The API key stays, used again when the proxy's address is cleared.
+- OpenAI can go through a proxy (CLIProxyAPI on a ChatGPT login) by its own two settings. The API key stays. With both set up, the user switches between them in the app; the choice is kept.
 
 ## Base (next, order not fixed, no rush)
 
