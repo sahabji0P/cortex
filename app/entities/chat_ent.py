@@ -50,8 +50,9 @@ from app.core.errors import NotFoundError
 from app.entities.conversation_ent import ConversationEntityClass, Stored, Writer, gem_key
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.history import mode_line, settled, shown, stubs
+from app.entities.history import UserTurn, mode_line, settled, shown, told
 from app.entities.instructions import instructions
+from app.entities.late_results import LateResult
 from app.entities.model import LLM, ModelName, is_openai, model_for
 from app.entities.tools import gem_toolbox
 from app.entities.written_ent import WrittenConversation, WrittenEvent
@@ -364,19 +365,11 @@ class ChatEntityClass:
             if turn.was_cut:
                 return  # a message came first: the results wait until it is answered
             # Taken at once, so that whatever happens next they are not taken again.
-            told = kept.late.take()
+            results = kept.late.take()
             if not await self._gems.exists(key):
                 return  # the gem went, and its conversation with it: they are dropped
             gem_oid = ObjectId(key)
-            history = await self._conversations.load(gem_oid, told=told)
-            # They are told in writing: after a call, a line says so first. A turn left
-            # open has been sent to the model: the results follow it.
-            added = [
-                *mode_line("chat", history.mode),
-                *kept.turn.close(),
-                *stubs(late.stub for late in told),
-            ]
-            history = await self._conversations.add(gem_oid, history, added, "chat")
+            history = await self._load(gem_oid, kept.turn, results)
             if await self._conversations.gone(gem_oid):
                 return  # deleted while they were stored
             latest = self._latest.get(key)
@@ -393,7 +386,7 @@ class ChatEntityClass:
                 # when it answers.
                 return
             try:
-                for late in told:
+                for late in results:
                     text = shown(late.call) or ""
                     await deliver(ChatEvent(type="chat.result", gem=gem_id, text=text))
             except Exception:
@@ -409,6 +402,18 @@ class ChatEntityClass:
                 await _teller(gem_id, owed)("chat.error", f"no reply could be made: {exc}")
         finally:
             self._release(turn, key)
+
+    async def _load(self, gem_id: ObjectId, turn: UserTurn, results: list[LateResult]) -> Stored:
+        """The gem's conversation as stored, with the late results taken added after it.
+
+        They are added in writing: after a call, a line says so first. A turn left open
+        has been sent to the model: it is closed, and the results follow it.
+        """
+        history = await self._conversations.load(gem_id, told=results)
+        added = told(turn, results)
+        if added:
+            added = [*mode_line("chat", history.mode), *added]
+        return await self._conversations.add(gem_id, history, added, "chat")
 
 
 def _teller(

@@ -62,7 +62,7 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
-from app.entities.history import Added, Mode, UserTurn, added_reply, line, mode_line, stubs
+from app.entities.history import Added, Mode, UserTurn, added_reply, line, mode_line, told
 from app.entities.instructions import instructions
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, run_reply
@@ -383,18 +383,13 @@ class VoiceConversation:
             return  # the user has been told in the meantime
         self._producing = asyncio.create_task(self._respond(brings_results=True))
 
-    def _close_turn(self) -> None:
-        """Move the user's unanswered turn into the history, where it becomes final.
-
-        Whatever is added next follows it, and what the user says next is a new turn.
-        """
-        self._add(*self._turn.close())
-
     def _add_late_results(self) -> None:
-        """Add each waiting result to the history, as a stub call followed by the result."""
-        # An unanswered turn has already been sent to the model: the results follow it.
-        self._close_turn()
-        self._add(*stubs(late.stub for late in self._late.take()))
+        """Add each waiting result to the history, as a stub call followed by the result.
+
+        An unanswered turn has already been sent to the model: it is closed, and the
+        results follow it.
+        """
+        self._add(*told(self._turn, self._late.take()))
 
     async def _start_reply(self, transcript: str) -> None:
         """A turn ended: answer it, or put back what it interrupted if nothing was said."""
