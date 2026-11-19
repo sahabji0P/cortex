@@ -616,6 +616,37 @@ async def test_an_openai_round_ends_with_what_the_provider_says_it_used() -> Non
     )
 
 
+@pytest.mark.parametrize(
+    "used",
+    [
+        SimpleNamespace(total_tokens=3),
+        SimpleNamespace(input_tokens=None, output_tokens=4),
+        SimpleNamespace(input_tokens=12, output_tokens="4"),
+    ],
+)
+async def test_a_reply_is_not_failed_for_a_usage_that_cannot_be_read(used: object) -> None:
+    # As an answer by way of a proxy may have it. The count is only written down.
+    final = _final()
+    final.usage = used
+    claude = model_for(
+        cast("AnthropicAdapterClass", _Claude([_text("Hi."), final])), "Haiku 5.5", []
+    )
+
+    class _OpenAI:
+        async def stream_response(self, **request: object):
+            async def stream():
+                yield SimpleNamespace(
+                    type="response.completed", response=SimpleNamespace(output=[], usage=used)
+                )
+
+            return stream()
+
+    openai = model_for(cast("OpenAIAdapterClass", _OpenAI()), "6 Luna", [])
+
+    assert (await _one_round(claude))[-1] == RoundDone([], None)
+    assert (await _one_round(openai))[-1] == RoundDone([], None)
+
+
 async def test_a_round_whose_provider_reports_no_use_ends_with_none() -> None:
     llm = _Claude([_text("Hi."), _final()])
     model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [])
