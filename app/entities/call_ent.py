@@ -39,6 +39,7 @@ from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass, Stored
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
+from app.entities.gem_log import Recording
 from app.entities.history import mode_line, settled
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass, VoiceEvent, VoiceLine
@@ -88,11 +89,18 @@ class OpenCall:
         # the database may already have taken is never cut off half-way.
         self._writing: asyncio.Future[None] | None = None
         self._let_go = False
+        self._record: Recording | None = None
 
-    def begin(self, conversation: VoiceConversation, stored: Stored) -> None:
-        """The call's conversation is open, on the gem's conversation as `stored`."""
+    def begin(
+        self, conversation: VoiceConversation, stored: Stored, record: Recording | None = None
+    ) -> None:
+        """The call's conversation is open, on the gem's conversation as `stored`.
+
+        `record` is where the call's end is written down, if anywhere.
+        """
         self._conversation = conversation
         self._stored = stored
+        self._record = record
 
     def results_came(self) -> None:
         """A late result of the gem's has come in: it is told in the call."""
@@ -131,7 +139,13 @@ class OpenCall:
                 try:
                     await self._conversation.close()
                 finally:
-                    await self._store_last()
+                    try:
+                        await self._store_last()
+                    finally:
+                        # Last, after what the call settled: the call is over.
+                        if self._record is not None:
+                            self._record.call_closed()
+                            self._record = None
         finally:
             self.let_go()
 
@@ -278,7 +292,12 @@ class CallEntityClass:
                 raise CallFault("the conversation could not be read", exc) from exc
             if kept.turn.open:
                 # A written turn left open has been sent to the model: the call follows it.
-                added = [*mode_line("chat", stored.mode), *kept.turn.added()]
+                lines = mode_line("chat", stored.mode)
+                for one in lines:
+                    self._conversations.recording(gem_id, "chat").line(
+                        one.source, one.item["content"]
+                    )
+                added = [*lines, *kept.turn.added()]
                 try:
                     stored = await self._conversations.add(gem_id, stored, added, "chat")
                 except Exception as exc:
@@ -286,6 +305,9 @@ class CallEntityClass:
                 # Closed only now that it is stored. Until then it is still open: if the
                 # call does not open after all, the next message joins it.
                 kept.turn.close()
+            # What happens in the call is written down in the gem's log.
+            record = self._conversations.recording(gem_id, "call")
+            record.call_opened()
             # Nothing is awaited after this, so a caller that cancels the opening either
             # gets the call back, to close, or none was made.
             conversation = line.open(
@@ -294,9 +316,10 @@ class CallEntityClass:
                 last_mode=stored.mode,
                 late=kept.late,
                 connected=connected,
+                record=record,
             )
         except BaseException:
             call.let_go()
             raise
-        call.begin(conversation, stored)
+        call.begin(conversation, stored, record)
         return call

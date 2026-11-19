@@ -30,7 +30,10 @@ What happened, by `kind`. Each belongs to a turn unless it says otherwise:
 Times: an entry's `at` is when it was written down, which is when it happened, with one
 exception. A reply is settled when the next thing happens (in a call: when the user next
 speaks, a late result is told, or the call ends), so `turn.closed` says when the reply
-was settled, not when it stopped. When the model stopped is `request.done`.
+was settled, not when it stopped. When the model stopped is `request.done`. A reply
+the user cuts into is settled at that instant, and its request is stopped after: so a
+`turn.closed` can come before the `request.done` of the request it cut. Entries of one
+turn are told apart by `turn`, not by where they fall.
 
 Tokens: a request cut while the model was still producing is never told what it used.
 Its usage and cost are None, which means unknown, not nothing.

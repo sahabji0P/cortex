@@ -20,6 +20,7 @@ from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
+from app.entities.gem_log import Recording
 from app.entities.history import Mode
 from app.entities.late_results import LateResults
 from app.entities.model import Item
@@ -105,6 +106,7 @@ class _Line:
         last_mode: Mode = "chat",
         late: LateResults | None = None,
         connected: Sequence[Tool] = (),
+        record: Recording | None = None,
     ) -> VoiceConversation:
         voice = self._voice
         stt, tts = _STT(), _TTS()
@@ -120,6 +122,7 @@ class _Line:
             last_mode=last_mode,
             late=late,
             connected=connected,
+            record=record,
             clock=voice.clock,
         )
         voice.calls.append(

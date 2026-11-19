@@ -63,8 +63,9 @@ from app.adapters.openai_adp import OpenAIAdapterClass
 from app.adapters.parallel_adp import ParallelAdapterClass
 from app.config import settings
 from app.entities.gem_ent import GemConfig
+from app.entities.gem_log import Recording, TurnRecord
 from app.entities.history import Added, Mode, UserTurn, added_reply, line, mode_line, told
-from app.entities.instructions import instructions
+from app.entities.instructions import instruction_layers, joined
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Delivered, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import (
@@ -141,9 +142,11 @@ class VoiceEvent(BaseModel):
 class _Reply(Reply):
     """One reply of the call's, delivered as speech."""
 
-    def __init__(self, speech: Speech, *, brings_results: bool = False) -> None:
+    def __init__(self, speech: Speech, turn: TurnRecord, *, brings_results: bool = False) -> None:
         super().__init__(speech)
         self.speech = speech
+        # Where what the reply does is written down.
+        self.turn = turn
         # Whether this reply is the one that tells the user of a late search result.
         self.brings_results = brings_results
 
@@ -167,7 +170,11 @@ class VoiceConversation:
         late: LateResults | None = None,
         connected: Sequence[Tool] = (),
         clock: Clock = time.monotonic,
+        record: Recording | None = None,
     ) -> None:
+        # `record` is where what happens in the call is written down (see `gem_log.py`).
+        # Left out, nothing is.
+        self._record = Recording(mode="call") if record is None else record
         # `history` is the gem's conversation as it is stored, and `last_mode` the mode
         # of its last item ("chat" if it is empty). `late` holds the gem's tool calls
         # that outlive their replies, those of written replies included; whoever holds
@@ -219,10 +226,19 @@ class VoiceConversation:
         # stays the same. How they are put together is in `instructions.py`.
         # The Darbar text is the one read when the call opened: a change to the setting
         # reaches the next call, never this one.
-        self._instructions = instructions(
+        layers = instruction_layers(
             darbar=darbar,
             gem=gem,
             model_needs=self._model.own_instructions,
+        )
+        self._instructions = joined(layers)
+        # Said once, to tell when any of it differs from the gem's last request. Only
+        # the way to the provider can change while the call is open.
+        self._record.describe(
+            model=model,
+            via=lambda: getattr(llm, "via", "api"),
+            layers=layers,
+            tools=self._tools.tools,
         )
         # The task producing a reply, while one is being produced.
         self._producing: asyncio.Task[None] | None = None
@@ -240,12 +256,16 @@ class VoiceConversation:
         self._standby.ready()
         # The instructions say a line in the conversation marks when a call starts. Every
         # call opens with it, whatever the conversation held before.
-        self._add(*mode_line("call", last_mode))
+        for opening in mode_line("call", last_mode):
+            self._add(opening)
+            self._record.line(opening.source, opening.item["content"])
         self._listening = asyncio.create_task(self._listen())
         if speaks_first:
             # Otherwise nothing is said until the user has spoken.
+            turn = self._record.turn("gem")
             self._add(line(_GREETING_NOTE, "greeting"))
-            self._producing = asyncio.create_task(self._respond())
+            turn.line("greeting", _GREETING_NOTE)
+            self._producing = asyncio.create_task(self._respond(turn=turn))
         # A result that came in before the call opened is told in it.
         self._announce_when_quiet()
 
@@ -353,6 +373,7 @@ class VoiceConversation:
         # If some of the reply got through, the turn it answers is closed.
         answered = self._turn.answered(heard.items)
         self._add(*answered, *added_reply(heard.items, reply.calls(), datetime.now(UTC)))
+        reply.turn.closed(finished=reply.finished, kept=heard.kept)
         return heard
 
     def _announce_when_quiet(self) -> None:
@@ -419,6 +440,8 @@ class VoiceConversation:
             # Nothing was said and nothing heard was stopped: late results may be waiting.
             self._announce_when_quiet()
             return
+        # A reply follows from here on, whatever it answers.
+        turn = self._record.turn("user")
         if said:
             # The result is in front of the model along with what the user now says.
             self._results_owed = False
@@ -427,6 +450,7 @@ class VoiceConversation:
             if self._late.ready:
                 self._add_late_results()
             self._turn.add(transcript)
+            turn.said(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
             self._emit("user.final", transcript)
@@ -435,13 +459,22 @@ class VoiceConversation:
             # ends the history. (A reply cut before any of it was heard left the history
             # as it was, and is simply made again.)
             self._add(line(_NO_WORDS_NOTE, "no-words"))
-        self._producing = asyncio.create_task(self._respond())
+            turn.line("no-words", _NO_WORDS_NOTE)
+        self._producing = asyncio.create_task(self._respond(turn=turn))
         # A result that comes in from here on, or one left waiting by a turn with no
         # words, waits until this reply has been heard, and is told in a reply of its own.
         self._announce_when_quiet()
 
-    async def _respond(self, *, brings_results: bool = False) -> None:
-        """Produce one reply: model rounds (with searches in between), spoken as they stream."""
+    async def _respond(
+        self, *, brings_results: bool = False, turn: TurnRecord | None = None
+    ) -> None:
+        """Produce one reply: model rounds (with searches in between), spoken as they stream.
+
+        `turn` is the reply's turn in the gem's log, if whoever asked for the reply
+        opened it. A reply that tells a late result opens its own.
+        """
+        if turn is None:
+            turn = self._record.turn("late_result" if brings_results else "user")
         speech = Speech(
             self._tts,
             self._out.put_nowait,
@@ -449,7 +482,7 @@ class VoiceConversation:
             self._standby.take(),
             word=self._show_word,
         )
-        reply = _Reply(speech, brings_results=brings_results)
+        reply = _Reply(speech, turn, brings_results=brings_results)
         self._reply = reply
         try:
             await run_reply(
@@ -462,8 +495,10 @@ class VoiceConversation:
                 # the audio. It is sent each word as it is spoken (see `_show_word`).
                 said=lambda text: None,
                 show=self._show_call,
+                record=turn,
             )
         except Exception as exc:
+            turn.failed(exc)
             self._emit("error", f"reply failed: {exc}")
         else:
             self._emit("assistant.done", reply.speech.text.strip())
@@ -581,12 +616,13 @@ class VoiceLine:
         last_mode: Mode = "chat",
         late: LateResults | None = None,
         connected: Sequence[Tool] = (),
+        record: Recording | None = None,
     ) -> VoiceConversation:
         """Start listening. The conversation owns the line from here, and the caller owns it.
 
         `darbar` is the Darbar text the gem is told first, or None for the built-in one;
-        it is kept for the whole conversation. `history`, `last_mode`, `late` and
-        `connected` are as `VoiceConversation` takes them.
+        it is kept for the whole conversation. `history`, `last_mode`, `late`,
+        `connected` and `record` are as `VoiceConversation` takes them.
         """
         self._opened = True
         return VoiceConversation(
@@ -602,6 +638,7 @@ class VoiceLine:
             last_mode=last_mode,
             late=late,
             connected=connected,
+            record=record,
         )
 
     async def close(self) -> None:

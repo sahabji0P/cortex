@@ -1,5 +1,6 @@
 """A gem's log, as whole conversations leave it: written here, and spoken further down."""
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,6 +16,19 @@ from tests.test_chat import (
     _open,
     _said,
     _Searches,
+)
+from tests.test_one_conversation import (
+    _CALLED,
+    _DELAY,
+    _gem_said,
+    _hang_up,
+    _let_audio_out,
+    _read_until,
+    _said_and_heard,
+    _spoken,
+    _user,
+    _World,
+    _world,
 )
 
 
@@ -193,3 +207,138 @@ async def test_a_search_left_running_at_a_cut_ends_later_and_its_result_is_told(
     assert [len(sent["added"]) for sent in (first, second, third)] == [1, 4, 3]
     assert third["count"] == len(setup.llm.requests[2]["input"]) == 8
     await _close(socket, linked)
+
+
+# ---- in a call
+
+
+async def _call_log(world: _World) -> list[dict[str, Any]]:
+    """The gem's log as a client is shown it, in order, once everything is written."""
+    await world.conversations.log.written()
+    page = await world.store.page(world.gem.id, before=None, limit=1000)
+    return [line.shown() for line in page]
+
+
+def _shown(log: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+    return [entry for entry in log if entry["kind"] == kind]
+
+
+async def test_a_call_is_written_down_from_its_opening_to_its_close() -> None:
+    world = await _world(_spoken("Hello."), _spoken("Not much."), speaks_first=True)
+
+    call, f, keeping = await world.call()
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await _said_and_heard(f, "what's new?")
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    assert [entry["kind"] for entry in log] == [
+        "call.opened",
+        "note.written",
+        # The gem speaks first: a line of ours asks it to.
+        "turn.opened",
+        "note.written",
+        "settings.changed",
+        "request.sent",
+        "request.done",
+        # The greeting is settled when the user next speaks, and their turn opens.
+        "turn.closed",
+        "turn.opened",
+        "user.said",
+        "request.sent",
+        "request.done",
+        "item",
+        "item",
+        "item",
+        # The last reply is settled when the call ends.
+        "turn.closed",
+        "item",
+        "item",
+        "call.closed",
+    ]
+    assert [note["reason"] for note in _shown(log, "note.written")] == ["call-line", "greeting"]
+    # The line that opens the call belongs to no turn. The greeting's line does.
+    assert [note["turn"] for note in _shown(log, "note.written")] == [None, 1]
+    opened = _shown(log, "turn.opened")
+    assert [(turn["by"], turn["mode"]) for turn in opened] == [("gem", "call"), ("user", "call")]
+    assert [said["text"] for said in _shown(log, "user.said")] == ["what's new?"]
+    assert {closed["outcome"] for closed in _shown(log, "turn.closed")} == {"finished"}
+    assert [(item["source"], item["mode"]) for item in _shown(log, "item")] == [
+        ("call-line", "call"),
+        ("greeting", "call"),
+        ("gem", "call"),
+        ("user", "call"),
+        ("gem", "call"),
+    ]
+    first, second = _shown(log, "request.sent")
+    assert (first["kept"], first["count"]) == (0, 2)
+    assert (second["kept"], second["count"]) == (2, 4)
+    assert second["added"] == world.llm.requests[1]["input"][2:]
+
+
+async def test_a_reply_cut_in_a_call_keeps_what_was_heard_beside_all_that_was_produced() -> None:
+    never = asyncio.Event()
+    world = await _world([_delta("Once upon a time there was a dragon."), never], _spoken("Sure."))
+
+    call, f, keeping = await world.call()
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.word")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 3.5)  # three and a half words in
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    f.stt.turn_end("never mind")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    cut, answered = _shown(log, "turn.closed")
+    assert (cut["turn"], cut["outcome"], cut["kept"]) == (1, "cut", "Once upon a…")
+    assert answered["outcome"] == "finished"
+    stopped, done = _shown(log, "request.done")
+    # The model was still producing when it was cut: all it produced is kept here, and
+    # what it used was never told.
+    assert (stopped["turn"], stopped["outcome"]) == (1, "cut")
+    assert stopped["text"] == "Once upon a time there was a dragon."
+    assert (stopped["usage"], stopped["cost_usd"]) == (None, None)
+    assert (done["outcome"], done["text"]) == ("done", "Sure.")
+    # A turn is settled the instant the user cuts in, before its request has stopped.
+    kinds = [entry["kind"] for entry in log]
+    assert kinds.index("turn.closed") < kinds.index("request.done")
+    # What is remembered is what was heard.
+    assert [item["item"]["content"] for item in _shown(log, "item")] == [
+        _CALLED["content"],
+        "tell me a story",
+        "Once upon a…",
+        "never mind",
+        "Sure.",
+    ]
+    # The second request keeps the line and the user's words, and adds what was heard.
+    _, second = _shown(log, "request.sent")
+    assert (second["kept"], second["added"]) == (
+        2,
+        [_gem_said("Once upon a…"), _user("never mind")],
+    )
+
+
+async def test_a_call_and_writing_share_one_log_and_one_count_of_turns() -> None:
+    world = await _world(_spoken("Hi there."), _said("Sunny."))
+
+    call, f, keeping = await world.call()
+    await _said_and_heard(f, "hello")
+    await _hang_up(call, keeping)
+    await world.write("weather?")
+    log = await _call_log(world)
+
+    assert [entry["seq"] for entry in log] == list(range(len(log)))
+    opened = _shown(log, "turn.opened")
+    assert [(turn["turn"], turn["mode"]) for turn in opened] == [(1, "call"), (2, "chat")]
+    assert [sent["request"] for sent in _shown(log, "request.sent")] == [1, 2]
+    assert [note["reason"] for note in _shown(log, "note.written")] == ["call-line", "chat-line"]
+    # One change at the first request. The second is made with the same model,
+    # instructions and tools, so nothing is said to have changed.
+    assert len(_shown(log, "settings.changed")) == 1
+    kinds = [entry["kind"] for entry in log]
+    assert kinds.index("call.closed") < kinds.index("turn.opened", kinds.index("call.closed"))
