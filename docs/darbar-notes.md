@@ -46,6 +46,9 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Nothing is cleared from the history, in a call or in chat. Keep it simple.
 - A stored result says what it is by a mark, never by its wording.
 - In a call the app shows a reply's words as they are heard: each word is sent with where it starts in the audio. The model's text is not sent early. Chat is unchanged.
+- OpenAI can go through a proxy (CLIProxyAPI on a ChatGPT login) by its own two settings. The API key stays. With both set up, the user switches between them in the app; the choice is kept.
+- Measured 2026-11-19: with a real-sized request (about 3,400 tokens) a reply through the proxy on a free plan starts about 5.4 s in, against 1.6 s with the API key. Why is not known. So the API key is the default.
+- The proxy's ChatGPT account is changed from the app: a sign-in in the browser, and the new account replaces the old logins on the proxy.
 
 ## Base (next, order not fixed, no rush)
 

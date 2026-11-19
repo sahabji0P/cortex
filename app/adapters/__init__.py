@@ -3,6 +3,7 @@ import asyncio
 from app.adapters.anthropic_adp import AnthropicAdapterClass
 from app.adapters.cartesia_stt_adp import CartesiaSTTAdapterClass
 from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
+from app.adapters.cliproxy_adp import CLIProxyAdapterClass
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.adapters.http_adp import HttpAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
@@ -20,6 +21,7 @@ class AdapterRegistry:
         self.CartesiaSTT = CartesiaSTTAdapterClass()
         self.CartesiaTTS = CartesiaTTSAdapterClass()
         self.Parallel = ParallelAdapterClass()
+        self.CLIProxy = CLIProxyAdapterClass()
         await asyncio.gather(
             self.DocDB.initialize(),
             self.Cache.initialize(),
@@ -29,6 +31,7 @@ class AdapterRegistry:
             self.CartesiaSTT.initialize(),
             self.CartesiaTTS.initialize(),
             self.Parallel.initialize(),
+            self.CLIProxy.initialize(),
         )
 
     async def close(self) -> None:
@@ -41,6 +44,7 @@ class AdapterRegistry:
             self.CartesiaSTT.close(),
             self.CartesiaTTS.close(),
             self.Parallel.close(),
+            self.CLIProxy.close(),
         )
 
 

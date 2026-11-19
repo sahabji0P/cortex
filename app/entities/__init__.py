@@ -5,6 +5,7 @@ from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
+from app.entities.providers_ent import ProviderEntityClass
 from app.entities.user_ent import User, UserEntityClass
 from app.entities.voice_ent import VoiceEntityClass
 
@@ -26,6 +27,10 @@ class EntitiesRegistry:
         )
         cls.Gems = GemEntityClass(docdb=adapter.DocDB)
         cls.Darbar = DarbarEntityClass(docdb=adapter.DocDB)
+        cls.Providers = ProviderEntityClass(
+            docdb=adapter.DocDB, openai=adapter.OpenAI, proxy=adapter.CLIProxy
+        )
+        await cls.Providers.restore()
         cls.ConversationStore = ConversationStoreClass(docdb=adapter.DocDB)
         cls.Conversations = ConversationEntityClass(gems=cls.Gems, store=cls.ConversationStore)
         cls.Chat = ChatEntityClass(

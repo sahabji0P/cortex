@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = ""
 
+    # OpenAI through a proxy that speaks its API, such as CLIProxyAPI signed in with a
+    # ChatGPT account. Empty = no proxy. With both this and `openai_api_key` set, the user
+    # chooses between them (`/v1/providers/openai`); the API key is used until they do.
+    openai_proxy_url: str = ""
+    openai_proxy_key: str = ""
+    # CLIProxyAPI's management key (`remote-management.secret-key` in its config). With it
+    # the app can see the proxy's ChatGPT logins and sign in with another account.
+    # Empty = the logins are neither shown nor changed from here.
+    openai_proxy_management_key: str = ""
+
     # Anthropic: a key for the Claude API itself (platform.claude.com), not a cloud
     # provider's.
     anthropic_api_key: str = ""
