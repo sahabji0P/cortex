@@ -66,6 +66,7 @@ from app.entities.conversation_store import (
     ConversationStoreClass,
     LogEntry,
     as_shown,
+    stamp,
 )
 from app.entities.history import Added, Mode, Source
 from app.entities.instructions import Layer
@@ -122,11 +123,15 @@ class LogEntityClass:
         """Read where the gem's log stands, if this is the first use of it."""
         if gem_id in self._gems:
             return
-        last = await self._store.last(gem_id)
-        turn = await self._store.last(gem_id, "turn.opened")
-        request = await self._store.last(gem_id, "request.sent")
+        # Asked together: this is waited for before a call opens.
+        last, turn, request, changes = await asyncio.gather(
+            self._store.last(gem_id),
+            self._store.last(gem_id, "turn.opened"),
+            self._store.last(gem_id, "request.sent"),
+            self._store.of_kind(gem_id, "settings.changed"),
+        )
         settings: dict[str, Any] = {}
-        for changed in await self._store.of_kind(gem_id, "settings.changed"):
+        for changed in changes:
             settings.update(_data(changed.shown()))
         # Another task may have read it, and counted on, while this one waited.
         self._gems.setdefault(
@@ -278,7 +283,7 @@ def _item_fields(item: ConversationItem) -> dict[str, Any]:
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return stamp(datetime.now(UTC))
 
 
 class Recording:
@@ -510,8 +515,11 @@ class RequestRecord:
         if self._ended:
             return
         self._ended = True
+        priced = None
+        # A cost that cannot be worked out is unknown. The request's end is still written.
         with contextlib.suppress(Exception):
             priced = None if self._model is None else cost(self._model, usage)
+        with contextlib.suppress(Exception):
             self._recording.note(
                 "request.done",
                 self._turn,

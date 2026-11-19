@@ -33,7 +33,14 @@ from app.entities.history import Mode, Source
 from app.entities.loop import ResultMark
 from app.entities.model import Item
 
-__all__ = ["ConversationItem", "ConversationStoreClass", "LogEntry", "LogLine", "as_shown"]
+__all__ = [
+    "ConversationItem",
+    "ConversationStoreClass",
+    "LogEntry",
+    "LogLine",
+    "as_shown",
+    "stamp",
+]
 
 _COLLECTION = "GemLog"
 
@@ -115,13 +122,16 @@ def as_shown(
     seq: int, at: datetime, kind: str, turn: int | None, fields: dict[str, Any]
 ) -> dict[str, Any]:
     """An entry as a client is sent it: what every entry has, then its own fields."""
-    return {
-        "seq": seq,
-        "at": in_utc(at).isoformat().replace("+00:00", "Z"),
-        "kind": kind,
-        "turn": turn,
-        **fields,
-    }
+    return {"seq": seq, "at": stamp(at), "kind": kind, "turn": turn, **fields}
+
+
+def stamp(at: datetime) -> str:
+    """A time as the log shows it: in UTC, to the millisecond, which is what the database keeps.
+
+    So an entry shows the same time when it is told as it happens and when it is read
+    back.
+    """
+    return in_utc(at).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class ConversationStoreClass:

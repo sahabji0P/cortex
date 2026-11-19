@@ -367,6 +367,62 @@ async def test_a_tool_call_is_written_down_when_it_starts_and_when_it_ends() -> 
     assert done["c2"] == {"call_id": "c2", "outcome": "cancelled", "result": None, "late": False}
 
 
+async def test_a_tool_that_failed_ends_as_failed_with_what_the_model_was_told() -> None:
+    docdb, conversations, _, recording = await _recording()
+    turn = recording.turn("user")
+
+    async def run() -> str:
+        return "web_search failed: no network"
+
+    call = ToolCall("c1", "web_search", "{}")
+    call.running = asyncio.create_task(run())
+    turn.tool(call)
+    # The loop notes on the call that its tool failed, beside the text.
+    call.failed = True
+    await call.running
+    await asyncio.sleep(0)
+    await conversations.log.written()
+
+    (done,) = (d["data"] for d in _log(docdb) if d["kind"] == "tool.done")
+    assert done == {
+        "call_id": "c1",
+        "outcome": "failed",
+        "result": "web_search failed: no network",
+        "late": False,
+    }
+
+
+async def test_a_request_whose_cost_cannot_be_worked_out_is_still_written_down() -> None:
+    docdb, conversations, _, recording = await _recording()
+    turn = _described(recording).turn("user")
+
+    # A count that is no number: the cost is unknown, and the request's end is kept.
+    odd = Usage(input=cast("Any", "many"), cache_read=0, cache_write=0, output=3)
+    turn.sent([], False).done("Hi.", [], odd)
+    await conversations.log.written()
+
+    (done,) = (d["data"] for d in _log(docdb) if d["kind"] == "request.done")
+    assert (done["outcome"], done["text"], done["cost_usd"]) == ("done", "Hi.", None)
+
+
+async def test_a_time_is_shown_the_same_when_it_is_told_and_when_it_is_read_back() -> None:
+    _, conversations, gem_id, recording = await _recording()
+    heard: list[dict[str, Any]] = []
+
+    async def listener(gem: str, entry: dict[str, Any]) -> None:
+        heard.append(entry)
+
+    conversations.log.listen(listener)
+    recording.turn("user")
+    await conversations.add(gem_id, Stored([]), [_user("hello")], "chat")
+    await asyncio.sleep(0)
+
+    read = [line.shown() for line in await conversations._store.page(gem_id, before=None, limit=9)]
+    assert [entry["at"] for entry in heard] == [entry["at"] for entry in read]
+    # To the millisecond, in UTC.
+    assert all(len(entry["at"]) == len("2026-11-19T12:00:00.000Z") for entry in read)
+
+
 async def test_a_turn_closes_as_finished_cut_or_failed() -> None:
     docdb, conversations, _, recording = await _recording("call")
 

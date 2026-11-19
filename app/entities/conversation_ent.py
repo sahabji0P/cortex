@@ -20,6 +20,7 @@ before the next reply is made.
 """
 
 import asyncio
+import contextlib
 import json
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -243,7 +244,9 @@ class ConversationEntityClass:
         # What happened before them is written first, so the log is in order on disk.
         await self.log.written(gem_id)
         await self._store.add(items)
-        self.log.stored(items)
+        # Telling whoever watches is no part of storing: it cannot fail what is stored.
+        with contextlib.suppress(Exception):
+            self.log.stored(items)
         return Stored([*stored.items, *(one.item for one in added)], mode)
 
     async def log_page(
