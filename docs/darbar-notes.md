@@ -40,6 +40,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - One rule for the user's turn, in a call and in writing: what comes before a reply gets through joins it.
 - One writer for a gem at a time, a call or a written reply. Chat to a gem in a call gets an error.
 - One set of late results per gem: told in the call if one is open, in writing otherwise.
+- A late result waiting when the user's turn ends goes in ahead of their words: one reply answers and tells it. Live, it was told in 14 of 20 runs on 6 Luna, 9 of 20 on Haiku 5.5; else never.
 - Product questions are settled by trying them out with proper evals, not blindly.
 - Tools are the same in a call and in chat: the same tools, run the same way, by one copy of the code.
 - A tool call still running at a cut carries on in both. cancel_tool_call stops one, for any tool.
