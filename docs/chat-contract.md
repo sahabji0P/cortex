@@ -353,7 +353,7 @@ ended, not as running.
 | `tool.started` | `request`, `call_id`, `name`, `arguments`, `connection` | A tool call started running. `request` is the request that made it. `arguments` is JSON text. `connection` is the connection's name, or null for a built-in tool |
 | `tool.done` | `call_id`, `outcome`, `result`, `late` | The tool call ended. `outcome` is `done`, `failed` or `cancelled`. `result` is what the model is told, in full, or null if it was cancelled. `late` is true if its reply was over before it was |
 | `turn.closed` | `outcome`, `kept`, `error` | The reply was settled into what the gem remembers. `outcome` is `finished`, `cut` or `failed`. `kept` is null unless text of the reply was cut off. Then it is the text that is kept: what was delivered, ending in "…", or "" if none of it was. A reply cut while a tool ran, with its text before the call whole, is `cut` with `kept` null. `error` is why it failed, or null |
-| `item` | `place`, `item`, `source`, `mode`, and maybe `mark`, `shown` | One thing the gem now remembers, exactly as the model is sent it from then on. No turn (see below) |
+| `item` | `place`, `item`, `source`, `mode`, and maybe `mark`, `shown` | One thing the gem now remembers, exactly as the model is sent it from then on. Its `turn` is the turn it was settled with, or null (see below) |
 
 **What a request was sent.** `kept` and `added` say it by difference: the request was
 sent the first `kept` items of this gem's request before it, then the items in `added`.
@@ -361,7 +361,7 @@ sent the first `kept` items of this gem's request before it, then the items in `
 show all that request N was sent, fold the `request.sent` entries up to N. When `kept` is
 lower than the count of the request before, something sent before was replaced: a reply
 that was cut is sent as what was heard, or the user's message gained a line. The first
-request after the backend starts has `kept` 0 and every item in `added`. An item is one
+request after the backend starts has `kept` 0 and every item in `added`. `kept` is always against the `request.sent` just before it for this gem, whatever its `attempt`. An item is one
 of `{"role": "user" | "assistant" | "developer", "content": text}`,
 `{"type": "function_call", "call_id", "name", "arguments"}` and
 `{"type": "function_call_output", "call_id", "output"}`. Besides its items, a request
@@ -371,7 +371,7 @@ is sent the instructions and the tools of the latest `settings.changed` before i
 reply was cut off while the model was still producing. `text` is all the model produced,
 whatever was delivered of it. `calls` are its tool calls, each `call_id`, `name` and
 `arguments`. `first_token_at` is when the first of its output came, or null.
-`usage` is the tokens the provider charged for: `input` (read in full), `cache_read`,
+`usage` is the tokens the provider charged for: `input` (read in full: neither read from a cache nor written to one), `cache_read`,
 `cache_write`, `output`, and `thinking` (part of `output`, or null where the provider
 does not say). The three kinds of input do not overlap: what was sent is their sum.
 `cost_usd` is what that cost in US dollars, worked out by the backend from its own price
@@ -393,6 +393,8 @@ stopped after, so its `turn.closed` can come before its `request.done`.
 
 **What changed.** `model` is `{"name", "provider", "via"}`: `name` as `GET
 /v1/voice/models` gives it, `provider` `OpenAI` or `Anthropic`, `via` `api` or `proxy`.
+The way in is read again for every request, so switching between the API key and the
+proxy writes a `settings.changed` with `model` before the next request, in a call too.
 `instructions` is the four layers in order, each `{"name", "text"}`: `darbar`, `gem`,
 `model`, `date`. Joined, they are the instructions as sent. `tools` is every tool the
 model is told of, each `{"name", "description", "parameters", "connection", "deferred"}`,
@@ -408,18 +410,49 @@ a call lost to a restart), or one of the four line reasons above. `mode` is `cal
 `chat`. `mark`, on a tool's result only, is `placeholder` or `cancelled` (the answer of
 a call that stopped another). `shown`, on a tool call only, is what its `chat.tool` or
 `call.tool.call` frame said. Items are written when a reply is settled, after its
-`turn.closed`.
+`turn.closed`. An item's `turn` is the turn whose reply it was settled with: the user's
+words that reply answered, its text and its tool calls. A line of ours and the stub of
+a late result have none.
+
+**Which row is the gem's reply.** The reply of a request is its `request.done`: `text`
+is what the model produced. What is remembered of it is the `gem` items of the same
+turn, which hold what was delivered. The two differ when a reply was cut.
 
 ### `GET /v1/gems/{gem_id}/log`
 
-A page of the log, oldest first: `{"entries": [...]}`. With no query, the latest 200
-entries. `limit` is how many (1 to 500). `before` is a `seq`: the page is then the
-entries just before it. To read back from the end, ask again with `before` set to the
-`seq` of the first entry of the page you have. A gem that is not there is a 404.
+A page of the log, oldest first: `{"entries": [...], "settings": {...}}`. With no query,
+the latest 200 entries. `limit` is how many (1 to 500). `before` is a `seq`: the page is
+then the entries just before it. To read back from the end, ask again with `before` set
+to the `seq` of the first entry of the page you have. A gem that is not there is a 404.
+
+`settings` is the `model`, `instructions` and `tools` in force just before the page's
+first entry, each as a `settings.changed` has it, or null if none was written before.
+So a page that starts in the middle of the log still says what its requests were made
+with, and a change inside it can be shown against what it changed.
 
 ### `GET /v1/gems/{gem_id}/log/{seq}`
 
 One entry, in full. A 404 if the gem or the entry is not there.
+
+### `GET /v1/gems/{gem_id}/log/{seq}/sent`
+
+Everything the request written down as entry `seq` (a `request.sent`) was sent, worked
+out by the backend, so a client need not hold every request before it:
+
+```json
+{
+  "request": 31,
+  "items": [{"role": "user", "content": "find flights to Goa"}],
+  "exact": true,
+  "model": {"name": "6 Luna", "provider": "OpenAI", "via": "api"},
+  "instructions": [{"name": "darbar", "text": "…"}, {"name": "gem", "text": "…"}],
+  "tools": [{"name": "web_search", "description": "…", "parameters": "{…}", "connection": null, "deferred": false}]
+}
+```
+
+`items` are in the order sent. `exact` is false if they do not come to the `count` the
+request wrote down, which means an entry before it was lost. A 404 if the gem is not
+there, or `seq` is not a request of it.
 
 ### Watching a log on the standing socket
 
