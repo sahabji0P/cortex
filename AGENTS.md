@@ -20,6 +20,7 @@ a change here needs a matching change there:
 | `VoiceEvent` in `app/entities/voice_ent.py` | `src/protocol.rs` | A call's events, sent on the link with `call.` put before their type |
 | `/v1/gems` (`app/routers/gems`, `GemConfig` in `app/entities/gem_ent.py`) | `src/gem_routes.rs` | The gems and their configs |
 | `GET /v1/gems/{id}/chat` | `src/chat.rs` | A gem's conversation so far, a call's turns included |
+| `GET /v1/gems/{id}/log`, `GET /v1/gems/{id}/log/{seq}`, and the frames `log.watch`, `log.unwatch` and `log.entry` on the link (the entries are written down in `app/entities/gem_log.py`) | being built: the trajectory | A gem's log: every turn, every request to the model with its tokens and cost, every tool call, every change of model, instructions or tools, and what the gem remembers, in the order it happened |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
 | `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | not built yet | The tool servers gems can use, their tools, which gem may use which, whether a gem finds its tools by searching (`deferred`), and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
 | `/v1/providers/openai` | being built | How OpenAI is reached, with the API key or through a proxy on a ChatGPT login: the way in use, which ways are set up, and the user's switch. Also the proxy's ChatGPT accounts (email, plan, whether usable), and a sign-in that replaces them: a route that gives the address to open in the browser, and one the app asks until it says `ok` or `error` |
@@ -68,9 +69,20 @@ What that means in practice:
   a call", and a `call.start` cuts a reply being written to it. A call whose turns cannot
   be stored ends in `call.failed`. A message whose reply never got through joins the next
   one, and they are stored as one user message.
-- **The app expects more than this backend sends.** It has screens for cost (it looks
-  for a `usage` event that does not exist yet) and a library of files per gem. Those
-  are marked "coming soon" or show sample data in the app. When one is built here, tell
+- **A gem has a log, and it is the base for anything that looks at what a gem did.**
+  Everything that happens with a gem is written down in one list, in order, beside the
+  items it remembers: `docs/chat-contract.md` says every kind of entry and its fields.
+  A new thing a gem does (a new step of the loop, a new paid service) is a new kind of
+  entry there, written through `gem_log.py`, and never a store of its own. Adding a
+  kind, or a field of one, is a change to the contract. Writing an entry never holds a
+  reply up and never fails one, and nothing in the log but the items is ever sent to a
+  model.
+- **Cost comes from the log.** No provider reports a cost, so the backend works it out
+  from the tokens and its own price table (`app/entities/prices.py`), which is kept by
+  hand. A cost is null when it is not known, never zero. The `usage` event the app
+  once waited for is never sent: the app's cost screen is to be rebuilt on the log.
+- **The app expects more than this backend sends.** It has a library of files per gem,
+  marked "coming soon" or showing sample data in the app. When it is built here, tell
   the app.
 
 ## Where the project is going
