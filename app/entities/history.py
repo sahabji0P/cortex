@@ -13,6 +13,9 @@ A turn joins the history as one user item, and is final from then on. Until then
 the last thing a request is sent, and the one thing in a request that can change
 afterwards: it can gain a line. So it is never stored while it is open.
 
+Late results (see `late_results.py`) close the open turn and follow it (`told`). So a
+turn that ends while results wait is answered with them in front of it.
+
 Everything else is added to the history once it is final, and is added with what is
 kept beside it (`Added`): when it was added, what a tool call showed, and what a call's
 result stands for.
@@ -31,6 +34,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from app.entities.late_results import LateResult
 from app.entities.loop import ResultMark, ToolCall
 from app.entities.model import Item
 
@@ -44,6 +48,7 @@ __all__ = [
     "settled",
     "shown",
     "stubs",
+    "told",
 ]
 
 # How the conversation is held: spoken in a call, or written.
@@ -149,6 +154,18 @@ def stubs(calls: Iterable[ToolCall]) -> list[Added]:
     """Stub calls and their results, as they are added. A stub shows nothing."""
     now = datetime.now(UTC)
     return [Added(item, now) for call in calls for item in call.items()]
+
+
+def told(turn: UserTurn, results: Sequence[LateResult]) -> list[Added]:
+    """Late results as they join the history, after the user's open turn, which is closed.
+
+    The open turn has already been sent to the model, so the results follow it. What the
+    user says next is a new turn after them: a turn that ends while results wait is
+    answered with the results in front of it, in one reply. Nothing if there are none.
+    """
+    if not results:
+        return []
+    return [*turn.close(), *stubs(late.stub for late in results)]
 
 
 def added_reply(items: Sequence[Item], calls: Sequence[ToolCall], at: datetime) -> list[Added]:

@@ -59,6 +59,11 @@ search that finishes while a reply is being written waits until that reply is st
 and several that are waiting are told in one reply. Show it as a reply of the gem's,
 under a line saying a search came back.
 
+A message answered while a search's result waits is answered with it: the reply to that
+message tells the result, and no reply of its own follows. This happens when the message
+cuts the reply during which the search came back. That reply has no `chat.result`: it
+is the reply to the message, with its usual frames.
+
 That reply goes to the socket that sent the latest message to that gem, and nowhere
 else. If that socket has closed, nothing is sent and no reply is written: the result is
 only stored, and the gem brings it up when it next answers. A new message cuts that

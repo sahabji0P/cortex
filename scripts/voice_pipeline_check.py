@@ -4,6 +4,7 @@ Run from the repository root (needs PARALLEL_API_KEY and the model's own key in 
 
     uv run python -m scripts.voice_pipeline_check              # the default model, 6 Luna
     uv run python -m scripts.voice_pipeline_check "Haiku 5.5"  # or any other model's name
+    uv run python -m scripts.voice_pipeline_check "6 Luna" 17 10  # scenario 17 alone, 10 times
 
 The model and the web search are real. Speech is faked with the test suite's stand-ins:
 every word takes exactly one second to say and the clock is moved by hand, so each
@@ -33,6 +34,9 @@ from tests import test_voice_conversation as T
 
 DELAY = T._DELAY
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "6 Luna"
+# Run only the scenario of this number, this many times.
+ONLY = int(sys.argv[2]) if len(sys.argv) > 2 else None
+TIMES = int(sys.argv[3]) if len(sys.argv) > 3 else 1
 RESULTS = []  # (scenario, verdict, detail)
 # A gem as a new one is made: the style checks below are of its default instructions.
 GEM = T._GEM.model_copy(update={"instructions": DEFAULT_GEM_INSTRUCTIONS})
@@ -482,6 +486,51 @@ async def scenario_9(llm, par, replies):
     await t.close()
 
 
+async def scenario_17(llm, par, replies):
+    """a search's result lands while the user asks something else: one reply does both"""
+    t = Talk(llm, par)
+    t.search.gate = asyncio.Event()
+    t.stt.say("Who won the most recent Formula One race?")
+    await t.until("tool.call")
+    t.stt.turn_start()
+    await t.until("interrupt")
+    # The real search is let go, and the user is still speaking when its result lands.
+    landed, came = asyncio.Event(), t.c._late._ready
+    t.c._late._ready = lambda: (landed.set(), came())
+    t.search.gate.set()
+    await asyncio.wait_for(landed.wait(), 60)
+    t.stt.turn_end("By the way, what is two plus two?")
+    a = await t.until("assistant.done")
+    replies.append(a)
+    t.clock.advance(600)
+    await asyncio.sleep(1.5)
+    asked = next(
+        r["input"]
+        for r in t.llm.requests
+        if r["input"][-1].get("role") == "user" and "two plus two" in r["input"][-1]["content"]
+    )
+    in_front = shape(asked)[-3:] == ["function_call", "function_call_output", "user"] and (
+        json.loads(asked[-3]["arguments"]).get("deferred_result_for") is not None
+    )
+    note(
+        "result with the turn: the question is answered",
+        re.search(r"\bfour\b|\b4\b", a.lower()) is not None and in_front and not t.errors(),
+        f"{a!r}",
+    )
+    note(
+        "result with the turn: the result is told in the same reply",
+        re.search(r"grand prix|\bwon\b|\bwin|winner|victory|took (the )?(win|victory)", a.lower())
+        is not None,
+        "judge by the reply above",
+    )
+    note(
+        "result with the turn: no second search, and no reply of its own after",
+        t.search.count == 1 and len(t.llm.requests) == 2,
+        f"searches started {t.search.count}; model calls {len(t.llm.requests)}",
+    )
+    await t.close()
+
+
 async def scenario_10(llm, par, replies):
     """many searches: the conversation stays coherent, and the provider reuses the request's
     unchanged start"""
@@ -646,6 +695,7 @@ SCENARIOS = [
     scenario_14,
     scenario_15,
     scenario_16,
+    scenario_17,
 ]
 
 
@@ -654,7 +704,8 @@ async def main():
     par = ParallelAdapterClass()
     await asyncio.gather(llm.initialize(), par.initialize())
     replies = []  # every reply the model produced, for the style checks
-    for scenario in SCENARIOS:
+    chosen = [s for s in SCENARIOS if ONLY is None or s.__name__ == f"scenario_{ONLY}"]
+    for scenario in chosen * TIMES:
         try:
             await scenario(llm, par, replies)
         except Exception as exc:

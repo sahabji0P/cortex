@@ -1515,6 +1515,109 @@ async def test_a_message_that_comes_while_the_result_is_stored_is_answered_with_
     await _close(socket, linked)
 
 
+async def test_a_message_that_cuts_a_reply_while_a_result_waits_is_answered_with_it() -> None:
+    searches = _Searches(_WEATHER)
+    held = asyncio.Event()
+    setup = await _chat(
+        _looks(),
+        [_delta("Once upon "), held, _delta("a time."), _completed()],
+        _said("Sure. And it is sunny in Pune."),
+        _said("You are welcome."),
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+    socket.send(setup.gem.id, "a story while we wait")
+    await socket.until("chat.text", 2)
+    # The search finishes while the story is written, so its result waits. Then a new
+    # message cuts the story.
+    searches.gates[_WEATHER].set()
+    await _settle()
+    socket.send(setup.gem.id, "stop, the weather?")
+    await socket.until("chat.done")
+    await _settle()
+
+    # One reply, to the message, tells the result: no `chat.result`, no reply unasked.
+    assert socket.chat()[-3:] == [
+        ("chat.cut", "Once upon…"),
+        ("chat.text", "Sure. And it is sunny in Pune."),
+        ("chat.done", "Sure. And it is sunny in Pune."),
+    ]
+    assert ("chat.result", _WEATHER) not in socket.chat()
+    assert len(setup.llm.requests) == 3
+    # The stub and the result are stored ahead of the message, and the model was sent
+    # them so, with nothing left without a result: no thinking.
+    stored = await grows.check()
+    assert _kinds(stored[4:]) == [
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+        "user",
+        "assistant",
+    ]
+    assert stored[5] == {"role": "assistant", "content": "Once upon…"}
+    assert _stub_of(stored[6]) == "call_1"
+    assert stored[7]["output"] == searches.found(_WEATHER)
+    assert stored[8] == {"role": "user", "content": "stop, the weather?"}
+    assert setup.llm.requests[2]["input"] == stored[:9]
+    assert _thinks(setup) == [False, True, False]
+    _a_valid_chain(stored)
+
+    # The result was taken, not lost: the next message closes nothing first.
+    socket.send(setup.gem.id, "thanks")
+    await socket.until("chat.done", 2)
+    assert setup.llm.requests[3]["input"] == [*stored, {"role": "user", "content": "thanks"}]
+    await grows.check()
+    await _close(socket, linked)
+
+
+async def test_a_message_left_open_is_closed_ahead_of_a_result_told_with_the_next() -> None:
+    searches = _Searches(_WEATHER)
+    never = asyncio.Event()
+    setup = await _chat(
+        _looks(),
+        [never, _completed()],
+        _said("Hi. It is sunny in Pune."),
+        search=searches,
+    )
+    grows = _Grows(setup)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+    socket.send(setup.gem.id, "hello")
+    await _eventually_asked(setup, 2)
+    # The result comes in while "hello" is being answered, and a new message cuts that
+    # reply before any of it was sent: "hello" is still open, and was sent to the model.
+    searches.gates[_WEATHER].set()
+    await _settle()
+    socket.send(setup.gem.id, "anyone there?")
+    await socket.until("chat.done")
+    await _settle()
+
+    stored = await grows.check()
+    assert _kinds(stored) == [
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+        "user",
+        "function_call",
+        "function_call_output",
+        "user",
+        "assistant",
+    ]
+    assert stored[4] == {"role": "user", "content": "hello"}
+    assert _stub_of(stored[5]) == "call_1"
+    assert stored[7] == {"role": "user", "content": "anyone there?"}
+    assert setup.llm.requests[2]["input"] == stored[:8]
+    assert len(setup.llm.requests) == 3
+    _a_valid_chain(stored)
+    await _close(socket, linked)
+
+
 async def test_cancel_tool_call_stops_a_search_still_running() -> None:
     searches = _Searches(_WEATHER)
     setup = await _chat(
@@ -1959,6 +2062,39 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
     told = claude.requests[2]["messages"][-1]
     assert told["role"] == "user"
     assert [block["type"] for block in told["content"]] == ["tool_result"]
+    await _close(socket, linked)
+
+
+async def test_a_result_told_with_a_message_makes_a_valid_anthropic_history() -> None:
+    searches = _Searches(_WEATHER)
+    held = asyncio.Event()
+    claude = _KeyedClaude(
+        [_text("Let me look."), _call_starts(), _final(("toolu_1", _WEATHER))],
+        [_text("Once upon "), held, _text("a time."), _final()],
+        [_text("Sure. It is sunny."), _final()],
+    )
+    setup = await _chat(model="Haiku 5.5", search=searches)
+    setup = setup.again(openai=_NoKey(), anthropic=claude, search=searches)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "weather?")
+    await socket.until("chat.tool")
+    socket.send(setup.gem.id, "a story while we wait")
+    await socket.until("chat.text", 2)
+    searches.gates[_WEATHER].set()
+    await _settle()
+    socket.send(setup.gem.id, "stop, the weather?")
+    await socket.until("chat.done")
+
+    stored = await setup.stored()
+    assert _kinds(stored[-4:]) == ["function_call", "function_call_output", "user", "assistant"]
+    _a_valid_chain(stored)
+    for request in claude.requests:
+        _a_valid_anthropic_request(request["messages"])
+    # The result and the message are on the user's side together, the result first.
+    asked = claude.requests[2]["messages"][-1]
+    assert asked["role"] == "user"
+    assert [block["type"] for block in asked["content"]] == ["tool_result", "text"]
+    assert asked["content"][1]["text"] == "stop, the weather?"
     await _close(socket, linked)
 
 
