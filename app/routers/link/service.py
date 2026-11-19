@@ -3,7 +3,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from functools import cache
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, WebSocket
 from pydantic import BaseModel, ValidationError
@@ -12,6 +12,8 @@ from app.entities import EntitiesRegistry
 from app.entities.call_ent import CallEntityClass, CallFault, CallRefused, OpenCall
 from app.entities.chat_ent import ChatEntityClass, ChatTurn
 from app.entities.connection_ent import ConnectionEntityClass
+from app.entities.conversation_ent import gem_key
+from app.entities.gem_log import LogEntityClass
 from app.entities.voice_ent import VoiceEvent
 from app.routers.link.models import LinkModels
 
@@ -28,6 +30,9 @@ _CALL_ALREADY_OPEN = "a call is already open"
 # piles up, and a call that far behind is of no use: it is failed.
 _MIC_FRAMES_WAITING = 300
 
+# The longest text a log entry carries on the link. A longer one is cut to this.
+_LOG_TEXT_MAX = 4000
+
 _log = logging.getLogger(__name__)
 
 type _Send = Callable[[BaseModel], Awaitable[None]]
@@ -40,6 +45,7 @@ class LinkServiceV1Class:
         chat: ChatEntityClass | None = None,
         call: CallEntityClass | None = None,
         connections: ConnectionEntityClass | None = None,
+        log: LogEntityClass | None = None,
     ) -> None:
         # Tests hand in their own. The app uses the ones the registry made at startup.
         self.chat = EntitiesRegistry.Chat if chat is None else chat
@@ -48,6 +54,8 @@ class LinkServiceV1Class:
         self.connections = (
             EntitiesRegistry.Connections if chat is None and connections is None else connections
         )
+        # The same for the gems' logs: with none, no socket can watch one.
+        self.log = EntitiesRegistry.Log if chat is None and log is None else log
 
     async def link(self, websocket: WebSocket) -> None:
         """Serve one standing socket until the client drops it.
@@ -109,10 +117,19 @@ class LinkServiceV1Class:
         async def connection_changed(connection_id: str) -> None:
             await send(LinkModels.V1.Output.ConnectionChanged(id=connection_id))
 
+        # The gems whose logs this socket watches, by `gem_key`. None is every gem.
+        watched: set[str | None] = set()
+
+        async def log_entry(gem: str, entry: dict[str, Any]) -> None:
+            if None in watched or gem in watched:
+                await send(LinkModels.V1.Output.LogEntry(gem=gem, entry=_trimmed(entry)))
+
         try:
             await send(LinkModels.V1.Output.Ready())
             if self.connections is not None:
                 self.connections.listen(connection_changed)
+            if self.log is not None:
+                self.log.listen(log_entry)
             while True:
                 message = await websocket.receive()
                 if gone or message["type"] == "websocket.disconnect":
@@ -166,11 +183,24 @@ class LinkServiceV1Class:
                     # With no call, there is nothing to end.
                     if call is not None:
                         call.hang_up()
+                elif kind in ("log.watch", "log.unwatch"):
+                    try:
+                        watch = LinkModels.V1.Input.LogWatch.model_validate_json(text)
+                    except ValidationError as exc:
+                        await send(LinkModels.V1.Output.Error(text=_reason(exc)))
+                        continue
+                    which = None if watch.gem is None else gem_key(watch.gem)
+                    if watch.type == "log.watch":
+                        watched.add(which)
+                    else:
+                        watched.discard(which)
                 else:
                     await send(LinkModels.V1.Output.Error(text=f"unknown frame type: {kind}"))
         finally:
             if self.connections is not None:
                 self.connections.ignore(connection_changed)
+            if self.log is not None:
+                self.log.ignore(log_entry)
             for turn in turns:
                 turn.cut()
             # A reply nobody asked for, about a late search result, is in no list of
@@ -405,6 +435,30 @@ def _frame(output: VoiceEvent | bytes) -> BaseModel | bytes:
     return LinkModels.V1.Output.CallEvent.model_validate(
         {"type": f"call.{output.type}", "text": output.text}
     )
+
+
+def _trimmed(entry: dict[str, Any]) -> dict[str, Any]:
+    """A log entry as the link carries it: a long text in it cut short, and said to be.
+
+    The link carries a call's audio too, and a client slow to take one frame counts as
+    gone. So a tool's long result, or a request's long list of items, is not sent whole:
+    the entry says `partial`, and the whole of it is read over its route.
+    """
+    cut = False
+
+    def short(value: Any) -> Any:
+        nonlocal cut
+        if isinstance(value, str) and len(value) > _LOG_TEXT_MAX:
+            cut = True
+            return value[:_LOG_TEXT_MAX]
+        if isinstance(value, dict):
+            return {key: short(inner) for key, inner in value.items()}
+        if isinstance(value, list):
+            return [short(inner) for inner in value]
+        return value
+
+    trimmed = short(entry)
+    return {**trimmed, "partial": True} if cut else trimmed
 
 
 def _reason(exc: ValidationError) -> str:

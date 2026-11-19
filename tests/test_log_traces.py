@@ -1,6 +1,7 @@
 """A gem's log, as whole conversations leave it: written here, and spoken further down."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -391,6 +392,91 @@ async def test_the_log_route_gives_the_latest_page_and_then_what_is_before_it() 
         {"role": "assistant", "content": "Hi again."},
     )
     assert await gems.get_log_entry(gem_id, 0) == opened
+    await _close(socket, linked)
+
+
+# ---- watched over the standing socket
+
+
+def _watching(setup: _Chat) -> Any:
+    service = setup.service()
+    service.log = setup.conversations.log
+    return service
+
+
+def _entries(socket: Any) -> list[dict[str, Any]]:
+    return [frame["entry"] for frame in socket.frames if frame["type"] == "log.entry"]
+
+
+async def test_a_socket_that_watches_a_gem_is_sent_its_log_as_it_is_written() -> None:
+    setup = await _chat(_said("Hi."))
+    socket, linked = await _open(_watching(setup))
+    gem_id = str(setup.gem.id)
+
+    socket.raw(json.dumps({"type": "log.watch", "gem": gem_id}))
+    socket.send(gem_id, "hello")
+    await socket.until("chat.done")
+    await socket.until("log.entry", 8)
+
+    # The same entries as the route gives, in the same order, each named with its gem.
+    gems = GemsServiceV1Class(setup.gems, setup.conversations)
+    assert _entries(socket) == (await gems.get_log(gem_id, before=None, limit=100)).entries
+    assert {f["gem"] for f in socket.frames if f["type"] == "log.entry"} == {gem_id}
+    await _close(socket, linked)
+
+
+async def test_a_socket_is_sent_no_log_it_did_not_ask_for() -> None:
+    setup = await _chat(_said("Hi."), _said("Hi again."), _said("And again."))
+    other = await setup.gems.create(name="Gem Two", model="6 Luna")
+    socket, linked = await _open(_watching(setup))
+
+    # Not watching yet, then watching another gem, then no longer watching this one.
+    socket.send(setup.gem.id, "one")
+    await socket.until("chat.done")
+    socket.raw(json.dumps({"type": "log.watch", "gem": str(other.id)}))
+    socket.send(setup.gem.id, "two")
+    await socket.until("chat.done", 2)
+    socket.raw(json.dumps({"type": "log.watch", "gem": str(setup.gem.id)}))
+    socket.raw(json.dumps({"type": "log.unwatch", "gem": str(setup.gem.id)}))
+    socket.send(setup.gem.id, "three")
+    await socket.until("chat.done", 3)
+    await setup.conversations.log.written()
+    await asyncio.sleep(0)
+
+    assert _entries(socket) == []
+    await _close(socket, linked)
+
+
+async def test_a_socket_that_names_no_gem_watches_every_gem() -> None:
+    setup = await _chat(_said("Hi."))
+    socket, linked = await _open(_watching(setup))
+
+    socket.raw(json.dumps({"type": "log.watch"}))
+    socket.send(setup.gem.id, "hello")
+    await socket.until("log.entry", 8)
+
+    assert [entry["kind"] for entry in _entries(socket)][:2] == ["turn.opened", "user.said"]
+    await _close(socket, linked)
+
+
+async def test_a_long_text_is_cut_short_on_the_link_and_whole_on_the_route() -> None:
+    long = "word " * 2000
+    setup = await _chat(_said("Hi."))
+    socket, linked = await _open(_watching(setup))
+    gem_id = str(setup.gem.id)
+
+    socket.raw(json.dumps({"type": "log.watch", "gem": gem_id}))
+    socket.send(gem_id, long)
+    await socket.until("chat.done")
+    await socket.until("log.entry", 8)
+
+    said = next(entry for entry in _entries(socket) if entry["kind"] == "user.said")
+    assert (len(said["text"]), said["partial"]) == (4000, True)
+    # An entry that was not cut says nothing of it.
+    assert "partial" not in _entries(socket)[0]
+    gems = GemsServiceV1Class(setup.gems, setup.conversations)
+    whole = await gems.get_log_entry(gem_id, said["seq"])
+    assert whole["text"] == long and "partial" not in whole
     await _close(socket, linked)
 
 
