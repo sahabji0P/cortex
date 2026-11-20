@@ -453,11 +453,12 @@ async def scenario_8(llm, par, replies):
     t.stt.say("the capital of France.")
     a = await t.until("assistant.done")
     replies.append(a)
-    last_user = [i for i in t.llm.requests[-1]["input"] if i.get("role") == "user"][-1]["content"]
+    # Each half is an item of its own, in a row: the model reads them together.
+    halves = [i["content"] for i in t.llm.requests[-1]["input"] if i.get("role") == "user"][-2:]
     note(
-        "merged turn: answered as one sentence",
-        "Paris" in a and last_user == "Tell me the name of\nthe capital of France.",
-        f"model saw {last_user!r}; said {a!r}",
+        "split sentence: answered as one sentence",
+        "Paris" in a and halves == ["Tell me the name of", "the capital of France."],
+        f"model saw {halves!r}; said {a!r}",
     )
     await t.close()
 
