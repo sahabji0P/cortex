@@ -38,9 +38,9 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A new gem's instructions come filled in with the call and writing style rules. The user may change or remove them.
 - A line says when a call starts and when it ends: before the first turn of every call, and before the first written turn after a call. Written when the next turn needs it.
 - Every stored item says its mode, call or chat. Old items have none and are read as chat.
-- One rule for the user's turn, in a call and in writing: what comes before a reply gets through joins it.
+- One rule for what the user says, in a call and in writing: it is stored the moment it is said, as a message of its own. Two messages are never joined.
 - One writer for a gem at a time, a call or a written reply. Chat to a gem in a call gets an error.
-- One set of late results per gem: told in the call if one is open, in writing otherwise.
+- One set of background calls per gem: their results told in the call if one is open, in writing otherwise.
 - A late result waiting when the user's turn ends goes in ahead of their words: one reply answers and tells it. Live, it was told in 14 of 20 runs on 6 Luna, 9 of 20 on Haiku 5.5; else not in that reply.
 - Product questions are settled by trying them out with proper evals, not blindly.
 - Tools are the same in a call and in chat: the same tools, run the same way, by one copy of the code.
@@ -67,14 +67,17 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A gem has one log. Everything that happens with it is written there, in order, beside what it remembers. Built.
 - The log is the base. A new thing a gem does is a new kind of entry in it, never a store of its own.
 - Nothing is hidden in it: every request, what it was sent, its tokens, its cost, every tool call, every change of model, instructions or tools.
-- What happened is written when it happens. What is remembered is written when a reply is settled. Two kinds of entry, one order.
+- One log, one shape of entry: seq, at, kind, turn, and its own fields. Each thing is written once, as the kind it is, at the moment it is final.
+- What the gem remembers is five kinds of entry: user.said, note.written, gem.said, tool.called, tool.result. Its conversation is those, in order.
+- A request holds a count only: it was sent every remembered entry before it.
+- What a reply produced before a tool call joins the history when it is sent back to the model, before the request that carries it.
 - A cut reply shows what was heard. Its tokens and cost are the whole of what the provider charged. Cut while the model was still producing, no count is read yet: shown as unknown.
 - Cost is worked out by us from a price table kept by hand. No provider reports one. Unknown is shown as unknown, never as nothing.
 - Prices: all six models, read from OpenAI's and Anthropic's price pages on 2026-11-20. A long request pays the higher prices where the page says so.
 - Through the ChatGPT proxy the cost shown is what the API key would have paid.
 - A gem is never told which model it runs on. A model change is in the log only.
-- A late tool result is the tool's own row, ending late. Not a context row.
-- Writing the log never holds a reply up and never fails one.
+- A tool call still running when its reply is over goes to the background. It is read start to end by its call_id: started, backgrounded, done, then delivered, cancelled or lost.
+- Writing what happened never holds a reply up and never fails one. What is remembered must be stored: a reply or a call that cannot store it fails, and it is dropped, never stored later.
 - No plugin system. The log is the one place to listen: the next thing that looks at a gem reads it.
 
 ## Base (next, order not fixed, no rush)
@@ -90,6 +93,9 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A tool registry, then skills.
 - Chat.
 - A sound before the greeting's first word leaves the call silent. Small fix.
+- A reply that begins with "..." can be judged unheard and dropped from memory: the speech service gives its first word without the dots. To be fixed.
+- The code's own names still say late results (`late_results.py`, `LateResults`). The log says background.
+- A log written before the one shape (entries of kind `item`) is not read. It is cleared, not carried over.
 
 ## Deferred
 
@@ -123,7 +129,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Cost: of model requests, in the log. Not yet of speech or search.
 - Old text code (Project, Session, SessionTurn, the Agent SDK pipeline): keep or remove.
 - Which mode each message was in, in the history route's answer: on hold.
-- A user's turn that never gets a reply is lost: it is kept in memory only, never stored.
+- A reply that plays to its end is stored only when the user next speaks or the call ends.
 - A long conversation is sent whole at the start of every call. Trimming comes with Gyan Kosh.
 
 ## Learned from Docker Agent (read 2026-11-16, config version 16)
