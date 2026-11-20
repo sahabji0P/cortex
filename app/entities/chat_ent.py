@@ -285,8 +285,8 @@ class ChatEntityClass:
         # Read for every reply, so a change to it applies from the next message.
         darbar = (await self._darbar.read()).text
         layers = instruction_layers(darbar=darbar, gem=gem, model_needs=model.own_instructions)
-        # What happens in the reply is written down in the gem's log, and with it any
-        # change to what its requests are made with since the gem's last one.
+        # What happens in the reply is written down in the gem's log. Any change to what
+        # its requests are made with is written first, before the reply's turn opens.
         record = self._conversations.recording(gem.id, "chat")
         record.describe(
             model=ready.name,

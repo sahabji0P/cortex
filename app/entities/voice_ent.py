@@ -241,7 +241,8 @@ class VoiceConversation:
             model_needs=self._model.own_instructions,
         )
         self._instructions = joined(layers)
-        # Said once, to tell when any of it differs from the gem's last request. Only
+        # Said once, before the call's opening line is added: what differs from what was
+        # last written down is written now, ahead of anything the call remembers. Only
         # the way to the provider can change while the call is open.
         self._record.describe(
             model=model,

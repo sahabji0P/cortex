@@ -610,17 +610,19 @@ async def test_a_writer_that_is_stopped_mid_write_loses_nothing_that_is_remember
 
 async def test_a_change_that_could_not_be_written_down_is_said_again_in_full() -> None:
     docdb, conversations, gem_id, recording = await _recording()
-    _described(recording)
 
+    # The change written when the conversation is described is lost.
     docdb.breaks_after = 0
-    recording.request(None, [], False)
+    _described(recording)
     await conversations.log.written(gem_id)
     docdb.breaks_after = None
     recording.request(None, [], False)
     await conversations.log.written(gem_id)
 
-    (changed,) = (d["data"] for d in _log(docdb) if d["kind"] == "settings.changed")
-    assert set(changed) == {"model", "instructions", "tools"}
+    (changed,) = (d for d in _log(docdb) if d["kind"] == "settings.changed")
+    assert set(changed["data"]) == {"model", "instructions", "tools"}
+    # Said again just before the request, which is the next thing written.
+    assert [d["kind"] for d in _log(docdb)] == ["settings.changed", "request.sent"]
 
 
 async def test_a_turn_whose_opening_was_lost_does_not_give_its_number_away_after_a_restart() -> (

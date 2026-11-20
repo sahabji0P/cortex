@@ -18,8 +18,12 @@ unless it says otherwise:
 - `turn.opened`      a reply was asked for. `by` says by what: the `user`, the `gem`
                      speaking first, or a `background_result` that is to be told.
                      `mode` is `call` or `chat`.
-- `settings.changed` the model, the instructions or the tools differ from the gem's
-                     last request. Only the parts that changed, each in full.
+- `settings.changed` the model, the instructions or the tools differ from what was
+                     last written down. Only the parts that changed, each in full.
+                     Written when a conversation says what its requests are made
+                     with, before its turn and anything it remembers, in no turn. A
+                     change found later (the way to the provider) is written just
+                     before the request it applies to, in that request's turn.
 - `request.sent`     a request went to the model. It was sent everything the gem
                      remembered by then: every remembered entry before this one, and
                      nothing else. `count` is how many that is.
@@ -401,10 +405,10 @@ class Recording:
         layers: Sequence[Layer],
         tools: Sequence[Tool],
     ) -> None:
-        """Say what the conversation's requests are made with, to tell when it changes.
+        """Say what the conversation's requests are made with, and write down what changed.
 
-        `via` is asked at every request: the way to a provider can change while a call
-        is open. The rest is fixed for the conversation.
+        `via` is asked again at every request: the way to a provider can change while a
+        call is open. The rest is fixed for the conversation.
         """
         self._model = model
         provider = next(info.provider for info in MODELS if info.name == model)
@@ -430,6 +434,18 @@ class Recording:
             }
 
         self._settings = settings
+        # The instructions and the tools are the first thing a model is sent, so a change
+        # of them is written down first too: before the turn, and before anything of the
+        # conversation is remembered. It belongs to no turn, and holds from here on.
+        self._changes(None)
+
+    def _changes(self, turn: int | None) -> None:
+        """Write down what the requests are made with now, if it differs from the last."""
+        with contextlib.suppress(Exception):
+            if self._log is not None and self._gem_id is not None and self._settings is not None:
+                changed = self._log.settings_changed(self._gem_id, self._settings())
+                if changed:
+                    self.note("settings.changed", turn, changed)
 
     def call_opened(self) -> None:
         self.note("call.opened", None, {})
@@ -458,16 +474,17 @@ class Recording:
     def request(self, turn: int | None, items: Sequence[Item], think: bool) -> "RequestRecord":
         """A request is about to be sent: write down what changed, and that it is sent.
 
+        Most changes are written when the conversation is described. What is written
+        here, with the request's turn, is what changed since: the way to the provider,
+        or all of it again when the last change could not be written down.
+
         It is sent `items`, which are what the gem remembers by now: every one of them
         is in the log already, before this entry.
         """
         number = None
+        self._changes(turn)
         with contextlib.suppress(Exception):
             if self._log is not None and self._gem_id is not None:
-                if self._settings is not None:
-                    changed = self._log.settings_changed(self._gem_id, self._settings())
-                    if changed:
-                        self.note("settings.changed", turn, changed)
                 number = self._log.request_number(self._gem_id)
                 self.note(
                     "request.sent",

@@ -3,7 +3,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from bson import ObjectId
@@ -94,21 +94,23 @@ async def test_a_written_reply_leaves_its_turn_its_request_and_what_is_remembere
     await socket.until("chat.done")
     log = await _log(setup)
 
-    # Each thing once, as the kind it is, in the order it happened: the message is
-    # remembered when it is sent, before the request that carries it, and the reply
-    # when it is settled.
+    # Each thing once, as the kind it is, in the order it happened: what the requests
+    # are made with first, as a model is sent it first, then the message, remembered
+    # when it is sent, before the request that carries it, and the reply when it is
+    # settled.
     assert _kinds(log) == [
+        "settings.changed",
         "turn.opened",
         "user.said",
-        "settings.changed",
         "request.sent",
         "request.done",
         "gem.said",
         "turn.closed",
     ]
     assert [entry["seq"] for entry in log] == list(range(7))
-    # Everything of the turn names it, what is remembered of it included.
-    assert [entry.get("turn") for entry in log] == [1] * 7
+    # The change belongs to no turn: it holds from there on. Everything of the turn
+    # names it, what is remembered of it included.
+    assert [entry.get("turn") for entry in log] == [None] + [1] * 6
     assert _of(log, "turn.opened") == [{"by": "user", "mode": "chat"}]
     assert _of(log, "user.said") == [
         {"item": {"role": "user", "content": "hello"}, "mode": "chat", "source": "user"}
@@ -152,9 +154,9 @@ async def test_a_message_whose_reply_left_nothing_is_sent_again_with_the_next_af
     log = await _log(setup)
 
     assert _kinds(log) == [
+        "settings.changed",
         "turn.opened",
         "user.said",
-        "settings.changed",
         "request.sent",
         "request.done",
         "turn.closed",
@@ -186,6 +188,49 @@ async def test_a_message_whose_reply_left_nothing_is_sent_again_with_the_next_af
     await _close(socket, linked)
 
 
+async def test_a_second_reply_made_with_the_same_settings_says_nothing_of_them() -> None:
+    setup = await _chat(_said("Hi."), _said("Hi again."))
+    socket, linked = await _open(setup.service())
+
+    for count, text in enumerate(("hello", "hello again"), start=1):
+        socket.send(setup.gem.id, text)
+        await socket.until("chat.done", count)
+    log = await _log(setup)
+
+    assert _kinds(log)[7:] == [
+        "turn.opened",
+        "user.said",
+        "request.sent",
+        "request.done",
+        "gem.said",
+        "turn.closed",
+    ]
+    assert len(_of(log, "settings.changed")) == 1
+    await _close(socket, linked)
+
+
+async def test_an_edited_gem_says_its_new_instructions_before_the_next_turn_opens() -> None:
+    setup = await _chat(_said("Hi."), _said("Hi again."))
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done")
+
+    await setup.gems.update(str(setup.gem.id), {"instructions": "You are terse."})
+    socket.send(setup.gem.id, "hello again")
+    await socket.until("chat.done", 2)
+    log = await _log(setup)
+
+    first, edited = (e for e in log if e["kind"] == "settings.changed")
+    _, second_turn = (e for e in log if e["kind"] == "turn.opened")
+    # Only the instructions changed, and they are said before the turn they are used in.
+    assert set(edited["data"]) == {"instructions"}
+    assert edited["turn"] is None
+    assert edited["seq"] + 1 == second_turn["seq"]
+    assert edited["data"]["instructions"] != first["data"]["instructions"]
+    assert "You are terse." in "".join(layer["text"] for layer in edited["data"]["instructions"])
+    await _close(socket, linked)
+
+
 async def test_a_search_left_running_at_a_cut_ends_later_and_its_result_is_told() -> None:
     searches = _Searches(_WEATHER)
     setup = await _chat(_looks(), _said("Noon."), _said("It is sunny in Pune."), search=searches)
@@ -198,9 +243,9 @@ async def test_a_search_left_running_at_a_cut_ends_later_and_its_result_is_told(
 
     assert _kinds(log) == [
         # The reply that searched, cut by the next message while the search ran.
+        "settings.changed",
         "turn.opened",
         "user.said",
-        "settings.changed",
         "request.sent",
         "request.done",
         "tool.started",
@@ -299,11 +344,12 @@ async def test_a_call_is_written_down_from_its_opening_to_its_close() -> None:
 
     assert [entry["kind"] for entry in log] == [
         "call.opened",
+        # What the call's requests are made with, before anything the call remembers.
+        "settings.changed",
         "note.written",
         # The gem speaks first: a line of ours asks it to.
         "turn.opened",
         "note.written",
-        "settings.changed",
         "request.sent",
         "request.done",
         # The greeting is settled when the user next speaks, and their turn opens.
@@ -410,6 +456,51 @@ async def test_a_call_and_writing_share_one_log_and_one_count_of_turns() -> None
     assert kinds.index("call.closed") < kinds.index("turn.opened", kinds.index("call.closed"))
 
 
+async def test_a_call_in_which_nothing_is_said_leaves_its_settings_and_its_opening_line() -> None:
+    world = await _world()
+
+    call, _, keeping = await world.call()
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    # What its requests would be made with is written, though none was made. It is no
+    # part of what the gem remembers, which is the call's opening line alone.
+    assert [entry["kind"] for entry in log] == [
+        "call.opened",
+        "settings.changed",
+        "note.written",
+        "call.closed",
+    ]
+    assert [e["source"] for e in log if e["kind"] in REMEMBERED] == ["call-line"]
+    assert world.llm.requests == []
+
+
+async def test_a_change_of_the_way_to_the_provider_in_a_call_is_written_before_its_request() -> (
+    None
+):
+    world = await _world(_spoken("Hi."), _spoken("Sure."))
+
+    call, f, keeping = await world.call()
+    await _said_and_heard(f, "hello")
+    f.clock.advance(60)
+    # The way to the provider changes while the call is open.
+    cast("Any", world.llm).via = "proxy"
+    await _said_and_heard(f, "and now?")
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    first, second = _shown(log, "settings.changed")
+    assert first["turn"] is None
+    # Only what changed, just before the request it first applies to, in its turn.
+    assert {key: value for key, value in second.items() if key not in ("seq", "at")} == {
+        "kind": "settings.changed",
+        "turn": 2,
+        "model": {"name": "6 Luna", "provider": "OpenAI", "via": "proxy"},
+    }
+    after = log[log.index(second) + 1]
+    assert (after["kind"], after["turn"], after["request"]) == ("request.sent", 2, 2)
+
+
 async def test_a_reply_that_fails_in_a_call_closes_its_turn_as_failed() -> None:
     failed = SimpleNamespace(
         type="response.failed",
@@ -447,6 +538,7 @@ async def test_a_call_closed_as_it_opens_leaves_no_turn_open_in_the_log() -> Non
 
     assert [entry["kind"] for entry in log] == [
         "call.opened",
+        "settings.changed",
         "note.written",
         "turn.opened",
         "note.written",
@@ -690,9 +782,9 @@ async def test_the_log_route_gives_the_latest_page_and_then_what_is_before_it() 
         "turn.closed",
     ]
     # An entry is its own fields beside the four every entry has.
-    opened = whole[0]
+    opened = whole[1]
     assert opened == {
-        "seq": 0,
+        "seq": 1,
         "at": opened["at"],
         "kind": "turn.opened",
         "turn": 1,
@@ -710,7 +802,7 @@ async def test_the_log_route_gives_the_latest_page_and_then_what_is_before_it() 
         "mode": "chat",
         "source": "gem",
     }
-    assert await gems.get_log_entry(gem_id, 0) == opened
+    assert await gems.get_log_entry(gem_id, 1) == opened
     await _close(socket, linked)
 
 
@@ -801,7 +893,11 @@ async def test_a_socket_that_names_no_gem_watches_every_gem() -> None:
     socket.send(setup.gem.id, "hello")
     await socket.until("log.entry", 7)
 
-    assert [entry["kind"] for entry in _entries(socket)][:2] == ["turn.opened", "user.said"]
+    assert [entry["kind"] for entry in _entries(socket)][:3] == [
+        "settings.changed",
+        "turn.opened",
+        "user.said",
+    ]
     await _close(socket, linked)
 
 
