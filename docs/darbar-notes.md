@@ -85,6 +85,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The log: a provider library's own retries, each written as a request of its own. Today up to two are made unseen.
 - The log: listening and speaking as entries, with their times and cost (speech-to-text is charged by the second of audio sent, speech by the character).
 - The log: totals by gem, by day and by service, for the app's home.
+- The date in the instructions: it changes them once a day by itself, which misses the cache, and it is in UTC. To decide: send it as a line of ours in the conversation instead. The app's settings panel can drop its date part when it is.
 - The log: the tokens of a reply cut while the model was still producing. Anthropic says what it read at the start of a reply. Whether OpenAI says anything before the end is to be checked.
 - Our lines sent the same way on every model: a user message in a tag, the developer role kept for instructions. The line that explains the tag in the instructions for every model. A change to what the model is sent, so on its own.
 
