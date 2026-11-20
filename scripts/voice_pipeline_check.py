@@ -247,8 +247,10 @@ class Talk:
         self.c._model = self.llm.wrap(self.c._model)
         if speaks_first:
             # Started here, not by the conversation, so that the greeting is recorded too.
+            turn = self.c._record.turn("gem")
             self.c._history.append({"role": "developer", "content": voice_ent._GREETING_NOTE})
-            self.c._producing = asyncio.create_task(self.c._respond())
+            self.c._unstarted = turn
+            self.c._producing = asyncio.create_task(self.c._respond(turn))
         self.events = []
         OPEN.append(self)
 
@@ -273,7 +275,9 @@ class Talk:
         return [t for k, t in self.events if k == "error"]
 
     def history(self):
-        return [*self.c._history, *self.c._turn.items()]
+        # Everything the model has been sent is in the history: what the user said joins
+        # it when it is said.
+        return list(self.c._history)
 
     async def close(self):
         if self in OPEN:
