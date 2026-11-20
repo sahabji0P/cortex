@@ -134,7 +134,7 @@ async def test_a_written_reply_leaves_its_turn_its_request_and_what_is_remembere
     assert _sent_before(log, 1) == setup.llm.requests[0]["input"]
     (done,) = _of(log, "request.done")
     assert (done["outcome"], done["text"], done["calls"]) == ("done", "Hi there.", [])
-    assert _of(log, "turn.closed") == [{"outcome": "finished", "kept": None, "error": None}]
+    assert _of(log, "turn.closed") == [{"outcome": "finished", "error": None}]
     assert _of(log, "gem.said") == [
         {"item": {"role": "assistant", "content": "Hi there."}, "mode": "chat", "source": "gem"}
     ]
@@ -170,7 +170,7 @@ async def test_a_message_whose_reply_left_nothing_is_sent_again_with_the_next_af
     assert [said["item"]["content"] for said in _of(log, "user.said")] == ["one", "two"]
     failed, answered = _of(log, "request.done")
     assert (failed["outcome"], failed["error"]) == ("failed", "boom")
-    assert _of(log, "turn.closed")[0] == {"outcome": "failed", "kept": None, "error": "boom"}
+    assert _of(log, "turn.closed")[0] == {"outcome": "failed", "error": "boom"}
     # The second request was sent the whole of the first, and the second message.
     assert [sent["count"] for sent in _of(log, "request.sent")] == [1, 2]
     assert _sent_before(log, 1) == [{"role": "user", "content": "one"}]
@@ -253,7 +253,7 @@ async def test_a_search_left_running_at_a_cut_ends_later_and_its_result_is_told(
     assert [e["turn"] for e in log if e["kind"] in lifecycle] == [1, 1, 1]
     cut, _, _ = _of(log, "turn.closed")
     # Cut while the tool ran: the text before the call is whole, so nothing was cut off.
-    assert cut == {"outcome": "cut", "kept": None, "error": None}
+    assert cut == {"outcome": "cut", "error": None}
     assert [item["source"] for item in _remembered(log)] == [
         "user",
         "gem",
@@ -354,7 +354,11 @@ async def test_a_reply_cut_in_a_call_keeps_what_was_heard_beside_all_that_was_pr
     log = await _call_log(world)
 
     cut, answered = _shown(log, "turn.closed")
-    assert (cut["turn"], cut["outcome"], cut["kept"]) == (1, "cut", "Once upon a…")
+    assert (cut["turn"], cut["outcome"]) == (1, "cut")
+    # What was kept of it is what the gem remembers of that turn, and nowhere else.
+    assert [e["item"]["content"] for e in log if e["kind"] == "gem.said" and e["turn"] == 1] == [
+        "Once upon a…"
+    ]
     assert answered["outcome"] == "finished"
     stopped, done = _shown(log, "request.done")
     # The model was still producing when it was cut: all it produced is kept here, and
@@ -450,7 +454,7 @@ async def test_a_call_closed_as_it_opens_leaves_no_turn_open_in_the_log() -> Non
         "call.closed",
     ]
     (closed,) = _shown(log, "turn.closed")
-    assert (closed["turn"], closed["outcome"], closed["kept"]) == (1, "cut", None)
+    assert (closed["turn"], closed["outcome"]) == (1, "cut")
     # Nothing was said. What is remembered is our two lines: the call, and the greeting
     # that was asked for.
     assert [e["source"] for e in log if e["kind"] in REMEMBERED] == ["call-line", "greeting"]
@@ -472,8 +476,9 @@ async def test_a_greeting_cut_before_a_word_of_it_is_heard_keeps_nothing() -> No
     log = await _call_log(world)
 
     greeting, _ = _shown(log, "turn.closed")
-    # Cut, with nothing delivered: the text kept is empty, not missing.
-    assert (greeting["outcome"], greeting["kept"]) == ("cut", "")
+    # Cut, with nothing delivered: the model produced it, and the gem remembers none of it.
+    assert greeting["outcome"] == "cut"
+    assert [e for e in log if e["kind"] == "gem.said" and e["turn"] == greeting["turn"]] == []
     cut, _ = _shown(log, "request.done")
     assert (cut["outcome"], cut["text"]) == ("cut", "Hello there.")
 

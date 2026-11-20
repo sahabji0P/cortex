@@ -476,10 +476,11 @@ async def test_a_turn_closes_as_finished_cut_or_failed() -> None:
     assert [d["by"] for d in opened] == ["user", "gem", "user", "background_result"]
     assert {d["mode"] for d in opened} == {"call"}
     assert [d["data"] for d in _log(docdb) if d["kind"] == "turn.closed"] == [
-        {"outcome": "finished", "kept": None, "error": None},
-        {"outcome": "cut", "kept": "Once upon…", "error": None},
-        {"outcome": "cut", "kept": None, "error": None},
-        {"outcome": "failed", "kept": None, "error": "the model call failed"},
+        {"outcome": "finished", "error": None},
+        # What was kept of a cut reply is in the entries that remember it, not here.
+        {"outcome": "cut", "error": None},
+        {"outcome": "cut", "error": None},
+        {"outcome": "failed", "error": "the model call failed"},
     ]
 
 
@@ -643,7 +644,6 @@ async def test_the_log_is_read_back_in_pages_newest_first() -> None:
         "kind": "turn.closed",
         "turn": 3,
         "outcome": "finished",
-        "kept": None,
         "error": None,
     }
     one = await store.one(gem_id, 4)

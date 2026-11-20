@@ -44,7 +44,9 @@ order of time: started, backgrounded, done, and then delivered, or cancelled, or
 as lost after a restart (a stub whose `source` is `lost-call`).
 
 - `turn.closed`      the reply was settled into what the gem remembers: `finished`,
-                     `cut` or `failed`, and for a cut reply the text that is kept.
+                     `cut` or `failed`. What is kept of it is not written here: it is
+                     the turn's `gem.said` entries, and a cut reply with none of them
+                     left nothing.
 
 What the model produced and what the gem remembers of it are two things, and both are
 written: `request.done` holds all of a reply's text, which is what was charged for, and
@@ -485,7 +487,11 @@ class TurnRecord:
         self._error = str(error) or type(error).__name__
 
     def closed(self, *, finished: bool, kept: str | None) -> None:
-        """The reply is settled. `kept` is the text kept of a cut reply, None if it was not cut."""
+        """The reply is settled. `kept` is the text kept of a cut reply, None if it was not cut.
+
+        It says how the turn closed, and is not written down itself: the entries that
+        remember the reply hold it.
+        """
         if self._closed:
             return
         self._closed = True
@@ -495,9 +501,7 @@ class TurnRecord:
             outcome = "finished"
         else:
             outcome = "cut"
-        self._recording.note(
-            "turn.closed", self.number, {"outcome": outcome, "kept": kept, "error": self._error}
-        )
+        self._recording.note("turn.closed", self.number, {"outcome": outcome, "error": self._error})
 
     def _tool_done(self, call: ToolCall, began: float, ran: asyncio.Task[str]) -> None:
         with contextlib.suppress(Exception):
