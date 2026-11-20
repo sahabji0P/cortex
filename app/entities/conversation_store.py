@@ -16,7 +16,9 @@ database the truth.
 - `note.written`  a line of ours: a call started or ended, the gem is to greet
 - `gem.said`      the gem's own text, as it was delivered
 - `tool.called`   a tool call: the gem's own, or a stub of ours that carries a result
-- `tool.result`   a call's result, as the gem was given it
+- `tool.result`   a call's result, as the gem was given it: the result itself, the
+                  placeholder of a call that went on in the background, or what a stub
+                  carries (`delivers` says for which call)
 
 Every other kind is something that happened: a turn opened, a request was sent, a tool
 finished. Those are never sent to a model. They are there to be looked at (see
@@ -93,6 +95,9 @@ class Kept(BaseModel):
     # left running, or the answer of a `cancel_tool_call` that stopped one. What is
     # stored is read by this, never by the result's wording.
     mark: ResultMark | None = None
+    # For a stub call of ours and its result: the id of the call whose result they
+    # carry, which went on in the background or was lost.
+    delivers: str | None = None
 
 
 class LogEntry(BaseModel):
@@ -137,7 +142,14 @@ class Remembered(BaseModel):
 
 def remembered(gem_id: ObjectId, seq: int, added: Added, mode: Mode) -> LogEntry:
     """The entry that remembers one item added to a gem's history, in `mode`."""
-    kept = Kept(item=added.item, mode=mode, source=added.source, shown=added.shown, mark=added.mark)
+    kept = Kept(
+        item=added.item,
+        mode=mode,
+        source=added.source,
+        shown=added.shown,
+        mark=added.mark,
+        delivers=added.delivers,
+    )
     return LogEntry(
         gem_id=gem_id,
         kind=kind_of(added.item),

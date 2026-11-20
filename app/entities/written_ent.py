@@ -187,7 +187,7 @@ class WrittenConversation:
             raise RuntimeError("a reply is still being written")
         self._writing = True
         # A reply with no message is written to tell a late result.
-        turn = self._record.turn("late_result" if text is None else "user")
+        turn = self._record.turn("background_result" if text is None else "user")
         if text is not None:
             # Final as it stands, so it joins the history now, whatever the reply does.
             self._add(said(text, at, turn.number))
@@ -270,6 +270,7 @@ class WrittenConversation:
             for call in reply.calls():
                 if self._late.settle(call):
                     self.left_running.append(call)
+                    turn.backgrounded(call)
             delivered = reply.delivered(0.0)
             whole = reply.finished and delivered.kept is None
             self._keep(reply, delivered.items, turn)

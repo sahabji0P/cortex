@@ -274,7 +274,7 @@ class VoiceConversation:
             turn = self._record.turn("gem")
             self._add(*of_turn([line(_GREETING_NOTE, "greeting")], turn.number))
             self._unstarted = turn
-            self._producing = asyncio.create_task(self._respond(turn=turn))
+            self._producing = asyncio.create_task(self._respond(turn))
         # A result that came in before the call opened is told in it.
         self._announce_when_quiet()
 
@@ -378,6 +378,7 @@ class VoiceConversation:
         for call in reply.calls():
             if self._late.settle(call):
                 self.left_running.append(call)
+                reply.turn.backgrounded(call)
         heard = reply.delivered(self._playback.hearing())
         if reply.brings_results and (heard.any_text or (reply.finished and heard.kept is None)):
             # Heard at least in part, or produced in full and played to its end: the
@@ -424,20 +425,25 @@ class VoiceConversation:
             else:
                 break
         self._settle()
-        if self._late.ready:
-            self._add_late_results()
-            self._results_owed = True
-        elif not self._results_owed:
+        if not self._late.ready and not self._results_owed:
             return  # the user has been told in the meantime
-        self._producing = asyncio.create_task(self._respond(brings_results=True))
+        # The turn of the reply that tells them. Nothing is awaited from here on, so
+        # the reply is either begun or, if it is stopped first, its turn is closed.
+        turn = self._record.turn("background_result")
+        if self._late.ready:
+            self._add_late_results(turn)
+            self._results_owed = True
+        self._unstarted = turn
+        self._producing = asyncio.create_task(self._respond(turn, brings_results=True))
 
-    def _add_late_results(self) -> None:
+    def _add_late_results(self, turn: TurnRecord) -> None:
         """Add each waiting result to the history, as a stub call followed by the result.
 
         What the user said before them has already been sent to the model: the results
-        follow it, and what the user says next is a new turn after them.
+        follow it, and what the user says next is a new turn after them. `turn` is the
+        turn of the reply that tells them.
         """
-        results = told(self._late.take())
+        results = of_turn(told(self._late.take()), turn.number)
         if results:
             self._unanswered = False
         self._add(*results)
@@ -472,7 +478,7 @@ class VoiceConversation:
             # Results waiting go in ahead of their words, so the one reply that answers
             # them tells the results too.
             if self._late.ready:
-                self._add_late_results()
+                self._add_late_results(turn)
             # Their words are final as they stand, so they join the history now.
             self._unanswered = True
             self._add(said(transcript, turn=turn.number))
@@ -485,21 +491,17 @@ class VoiceConversation:
             # as it was, and is simply made again.)
             self._add(*of_turn([line(_NO_WORDS_NOTE, "no-words")], turn.number))
         self._unstarted = turn
-        self._producing = asyncio.create_task(self._respond(turn=turn))
+        self._producing = asyncio.create_task(self._respond(turn))
         # A result that comes in from here on, or one left waiting by a turn with no
         # words, waits until this reply has been heard, and is told in a reply of its own.
         self._announce_when_quiet()
 
-    async def _respond(
-        self, *, brings_results: bool = False, turn: TurnRecord | None = None
-    ) -> None:
+    async def _respond(self, turn: TurnRecord, *, brings_results: bool = False) -> None:
         """Produce one reply: model rounds (with searches in between), spoken as they stream.
 
-        `turn` is the reply's turn in the gem's log, if whoever asked for the reply
-        opened it. A reply that tells a late result opens its own.
+        `turn` is the reply's turn in the gem's log, opened by whoever asked for the
+        reply.
         """
-        if turn is None:
-            turn = self._record.turn("late_result" if brings_results else "user")
         # It has begun: from here on its turn is closed when the reply is settled.
         if self._unstarted is turn:
             self._unstarted = None

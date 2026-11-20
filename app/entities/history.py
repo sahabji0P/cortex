@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal
 
-from app.entities.late_results import LateResult
+from app.entities.late_results import LateResult, delivers
 from app.entities.loop import ResultMark, ToolCall
 from app.entities.model import Item
 
@@ -58,7 +58,8 @@ type Mode = Literal["call", "chat"]
 # - `gem`          the gem's own text, or a tool call it made
 # - `tool`         a tool's result
 # - `placeholder`  the result we gave a call left running when its reply was cut
-# - `late-result`  the stub call we wrote to carry a late result, and that result
+# - `background-result`  the stub call we wrote to carry the result of a call that
+#                  went on in the background after its reply was over, and that result
 # - `lost-call`    the stub that closes a call lost to a restart, and its result
 # - `call-line`, `chat-line`  our line that says a call started, or ended
 # - `greeting`     our line that asks the gem to speak first in a call
@@ -68,7 +69,7 @@ type Source = Literal[
     "gem",
     "tool",
     "placeholder",
-    "late-result",
+    "background-result",
     "lost-call",
     "call-line",
     "chat-line",
@@ -102,6 +103,9 @@ class Added:
     # The number of the turn whose reply it was settled with, in the gem's log, if it
     # was settled with one (see `gem_log.py`). Never sent to a model.
     turn: int | None = None
+    # For a stub call of ours and its result: the id of the call whose result they
+    # carry. Kept beside them, so nobody has to read it out of the stub's arguments.
+    delivers: str | None = None
 
 
 def said(text: str, at: datetime | None = None, turn: int | None = None) -> Added:
@@ -139,13 +143,18 @@ def of_turn(added: Iterable[Added], turn: int | None) -> list[Added]:
     return [replace(one, turn=turn) for one in added]
 
 
-def stubs(calls: Iterable[ToolCall], source: Source = "late-result") -> list[Added]:
+def stubs(calls: Iterable[ToolCall], source: Source = "background-result") -> list[Added]:
     """Stub calls and their results, as they are added. A stub shows nothing.
 
-    `source` says what they carry: a late result, or the close of a call that was lost.
+    `source` says what they carry: the result of a call that went on in the background,
+    or the close of a call that was lost. Each says which call that was.
     """
     now = datetime.now(UTC)
-    return [Added(item, now, source=source) for call in calls for item in call.items()]
+    return [
+        Added(item, now, source=source, delivers=delivers(call.items()[0]))
+        for call in calls
+        for item in call.items()
+    ]
 
 
 def told(results: Sequence[LateResult]) -> list[Added]:

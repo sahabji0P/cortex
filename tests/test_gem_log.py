@@ -102,8 +102,16 @@ async def test_what_is_remembered_is_stored_as_the_kind_it_is_with_who_wrote_it(
         ("note.written", "call-line"),
         ("user.said", "user"),
         ("gem.said", "gem"),
-        ("tool.called", "late-result"),
-        ("tool.result", "late-result"),
+        ("tool.called", "background-result"),
+        ("tool.result", "background-result"),
+    ]
+    # A stub and its result say which call's result they carry, beside the item.
+    assert [d["data"].get("delivers") for d in _stored_items(docdb)] == [
+        None,
+        None,
+        None,
+        "c1",
+        "c1",
     ]
     # Every entry has one shape: the item is in what is known of it, as the model is
     # sent it, and a field with nothing to say is left out.
@@ -359,8 +367,9 @@ async def test_a_tool_call_is_written_down_when_it_starts_and_when_it_ends() -> 
     stopped.running = asyncio.create_task(run())
     turn.tool(slow)
     turn.tool(stopped)
-    # Its reply was cut, and it was left running.
+    # Its reply was cut while it ran: it carries on in the background.
     slow.mark = "placeholder"
+    turn.backgrounded(slow)
     stopped.running.cancel()
     release.set()
     await asyncio.gather(slow.running, stopped.running, return_exceptions=True)
@@ -368,19 +377,32 @@ async def test_a_tool_call_is_written_down_when_it_starts_and_when_it_ends() -> 
     await conversations.log.written()
 
     started = [d["data"] for d in _log(docdb) if d["kind"] == "tool.started"]
+    # Its arguments are not written again: they are in the request that made the call.
     assert started[0] == {
         "request": 1,
         "call_id": "c1",
         "name": "web_search",
-        "arguments": '{"query": "x"}',
         "connection": "tracker",
     }
+    assert [d["data"] for d in _log(docdb) if d["kind"] == "tool.backgrounded"] == [
+        {"call_id": "c1"}
+    ]
     done = {d["data"]["call_id"]: d["data"] for d in _log(docdb) if d["kind"] == "tool.done"}
-    assert done["c1"] == {"call_id": "c1", "outcome": "done", "result": "Sunny.", "late": True}
-    assert done["c2"] == {"call_id": "c2", "outcome": "cancelled", "result": None, "late": False}
+    seconds = {call_id: data.pop("seconds") for call_id, data in done.items()}
+    assert all(isinstance(took, float) and took >= 0 for took in seconds.values())
+    # It ended in the background, where nothing remembers its result yet: it is here.
+    assert done["c1"] == {
+        "call_id": "c1",
+        "outcome": "done",
+        "background": True,
+        "result": "Sunny.",
+    }
+    assert done["c2"] == {"call_id": "c2", "outcome": "cancelled", "background": False}
+    # Each entry of a call names the turn that made it.
+    assert {d["turn"] for d in _log(docdb) if d["kind"].startswith("tool.")} == {1}
 
 
-async def test_a_tool_that_failed_ends_as_failed_with_what_the_model_was_told() -> None:
+async def test_a_tool_that_failed_within_its_reply_ends_as_failed() -> None:
     docdb, conversations, _, recording = await _recording()
     turn = recording.turn("user")
 
@@ -397,11 +419,12 @@ async def test_a_tool_that_failed_ends_as_failed_with_what_the_model_was_told() 
     await conversations.log.written()
 
     (done,) = (d["data"] for d in _log(docdb) if d["kind"] == "tool.done")
-    assert done == {
+    # It ended within its reply: what the model was told is in the entry that remembers
+    # the result, and is not written here a second time.
+    assert {key: value for key, value in done.items() if key != "seconds"} == {
         "call_id": "c1",
         "outcome": "failed",
-        "result": "web_search failed: no network",
-        "late": False,
+        "background": False,
     }
 
 
@@ -443,14 +466,14 @@ async def test_a_turn_closes_as_finished_cut_or_failed() -> None:
     recording.turn("gem").closed(finished=False, kept="Once upon…")
     # Cut before any of it got through: nothing is kept, and it was still cut.
     recording.turn("user").closed(finished=False, kept=None)
-    failed = recording.turn("late_result")
+    failed = recording.turn("background_result")
     failed.failed(RuntimeError("the model call failed"))
     failed.closed(finished=False, kept=None)
     failed.closed(finished=True, kept=None)  # said once
     await conversations.log.written()
 
     opened = [d["data"] for d in _log(docdb) if d["kind"] == "turn.opened"]
-    assert [d["by"] for d in opened] == ["user", "gem", "user", "late_result"]
+    assert [d["by"] for d in opened] == ["user", "gem", "user", "background_result"]
     assert {d["mode"] for d in opened} == {"call"}
     assert [d["data"] for d in _log(docdb) if d["kind"] == "turn.closed"] == [
         {"outcome": "finished", "kept": None, "error": None},

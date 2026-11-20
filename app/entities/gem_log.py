@@ -16,7 +16,8 @@ unless it says otherwise:
 
 - `call.opened`, `call.closed`   a call began, or ended. No turn. Writing has neither.
 - `turn.opened`      a reply was asked for. `by` says by what: the `user`, the `gem`
-                     speaking first, or a `late_result`. `mode` is `call` or `chat`.
+                     speaking first, or a `background_result` that is to be told.
+                     `mode` is `call` or `chat`.
 - `settings.changed` the model, the instructions or the tools differ from the gem's
                      last request. Only the parts that changed, each in full.
 - `request.sent`     a request went to the model. It was sent everything the gem
@@ -26,8 +27,22 @@ unless it says otherwise:
                      was still producing. Everything the model produced, in full: its
                      text and its tool calls. When the first of it came, the tokens
                      charged for and their cost.
-- `tool.started`, `tool.done`    a tool call ran. A call that outlives its reply ends
-                     later, in order of time, and still names the turn that made it.
+- `tool.started`     a tool call began to run. Its arguments are in the `request.done`
+                     of the request that made it.
+- `tool.backgrounded`  its reply was over while it still ran: it carries on in the
+                     background, and the gem was given a placeholder as its result.
+- `tool.done`        it ended: `done`, `failed` or `cancelled`, and how many `seconds`
+                     it ran. `background` says whether it ended in the background, and
+                     only then is its `result` here: nothing remembers it yet. It
+                     reaches the gem later, as a stub call and a result that name it
+                     (`delivers`). The result of a call that ended within its reply is
+                     in the `tool.result` that remembers it, and nowhere else.
+
+Every entry of a tool call names the turn that made the call, whenever it is written,
+and the call by its `call_id`. So a call that went on in the background reads, in the
+order of time: started, backgrounded, done, and then delivered, or cancelled, or closed
+as lost after a restart (a stub whose `source` is `lost-call`).
+
 - `turn.closed`      the reply was settled into what the gem remembers: `finished`,
                      `cut` or `failed`, and for a cut reply the text that is kept.
 
@@ -37,7 +52,7 @@ a `gem.said` holds what was delivered of it, which may be less.
 
 Times: an entry's `at` is when it was written down, which is when it happened, with one
 exception. A reply is settled when the next thing happens (in a call: when the user next
-speaks, a late result is told, or the call ends), so `turn.closed` says when the reply
+speaks, a background result is told, or the call ends), so `turn.closed` says when the reply
 was settled, not when it stopped. When the model stopped is `request.done`. A reply
 the user cuts into is settled at that instant, and its request is stopped after: so a
 `turn.closed` can come before the `request.done` of the request it cut. Entries of one
@@ -71,6 +86,7 @@ import contextlib
 import functools
 import json
 import logging
+import time
 from collections.abc import Callable, Coroutine, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -100,7 +116,7 @@ logger = logging.getLogger(__name__)
 type Listener = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
 # What opened a turn.
-type OpenedBy = Literal["user", "gem", "late_result"]
+type OpenedBy = Literal["user", "gem", "background_result"]
 
 
 class _Gem:
@@ -452,12 +468,17 @@ class TurnRecord:
                     "request": self._request,
                     "call_id": call.call_id,
                     "name": call.name,
-                    "arguments": call.arguments,
                     "connection": None if call.tool is None else call.tool.connection,
                 },
             )
             if call.running is not None:
-                call.running.add_done_callback(functools.partial(self._tool_done, call))
+                began = time.monotonic()
+                call.running.add_done_callback(functools.partial(self._tool_done, call, began))
+
+    def backgrounded(self, call: ToolCall) -> None:
+        """The reply is over and the call still runs: it carries on in the background."""
+        with contextlib.suppress(Exception):
+            self._recording.note("tool.backgrounded", self.number, {"call_id": call.call_id})
 
     def failed(self, error: BaseException) -> None:
         """The reply failed. Said when its turn is closed."""
@@ -478,7 +499,7 @@ class TurnRecord:
             "turn.closed", self.number, {"outcome": outcome, "kept": kept, "error": self._error}
         )
 
-    def _tool_done(self, call: ToolCall, ran: asyncio.Task[str]) -> None:
+    def _tool_done(self, call: ToolCall, began: float, ran: asyncio.Task[str]) -> None:
         with contextlib.suppress(Exception):
             if ran.cancelled():
                 outcome, result = "cancelled", None
@@ -486,17 +507,20 @@ class TurnRecord:
                 outcome, result = "failed", str(ran.exception())
             else:
                 outcome, result = ("failed" if call.failed else "done"), ran.result()
-            self._recording.note(
-                "tool.done",
-                self.number,
-                {
-                    "call_id": call.call_id,
-                    "outcome": outcome,
-                    "result": result,
-                    # Whether its reply was over before it was: it was left running.
-                    "late": call.mark == "placeholder",
-                },
-            )
+            # Whether its reply was over before it was: it went on in the background.
+            background = call.mark == "placeholder"
+            data: dict[str, Any] = {
+                "call_id": call.call_id,
+                "outcome": outcome,
+                "seconds": round(time.monotonic() - began, 3),
+                "background": background,
+            }
+            if background and result is not None:
+                # Nothing remembers it yet: it waits to be told, and until it is, this
+                # is the one place it is written. A result that came within its reply
+                # is in the entry that remembers it.
+                data["result"] = result
+            self._recording.note("tool.done", self.number, data)
 
 
 class RequestRecord:

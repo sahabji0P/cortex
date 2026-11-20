@@ -38,6 +38,7 @@ from tests.test_one_conversation import (
     _World,
     _world,
 )
+from tests.test_voice_conversation import _Search, _search_call, _starts
 
 
 async def _log(setup: _Chat) -> list[dict[str, Any]]:
@@ -203,7 +204,9 @@ async def test_a_search_left_running_at_a_cut_ends_later_and_its_result_is_told(
         "request.sent",
         "request.done",
         "tool.started",
-        # Settled at the cut: what it said, its call, and the placeholder as its result.
+        # Settled at the cut. The search still runs, so it carries on in the background,
+        # and what is remembered is what the gem said, its call, and the placeholder.
+        "tool.backgrounded",
         "gem.said",
         "tool.called",
         "tool.result",
@@ -226,13 +229,28 @@ async def test_a_search_left_running_at_a_cut_ends_later_and_its_result_is_told(
         "gem.said",
         "turn.closed",
     ]
-    assert [opened["by"] for opened in _of(log, "turn.opened")] == ["user", "user", "late_result"]
+    assert [opened["by"] for opened in _of(log, "turn.opened")] == [
+        "user",
+        "user",
+        "background_result",
+    ]
+    # The whole of the search can be read from the log by its call_id: it started, went
+    # to the background, ended, and was delivered.
     (started,) = _of(log, "tool.started")
     assert (started["name"], started["request"]) == ("web_search", 1)
+    call_id = started["call_id"]
+    assert _of(log, "tool.backgrounded") == [{"call_id": call_id}]
     (ended,) = _of(log, "tool.done")
-    assert (ended["outcome"], ended["late"], ended["call_id"]) == ("done", True, started["call_id"])
+    assert (ended["outcome"], ended["background"], ended["call_id"]) == ("done", True, call_id)
+    assert ended["seconds"] >= 0
+    delivered = [e for e in _remembered(log) if e.get("delivers")]
+    assert [e["delivers"] for e in delivered] == [call_id, call_id]
+    # It ended in the background, so its result is written where it ended, and again
+    # where the gem was given it: the one thing the log holds twice.
+    assert delivered[1]["item"]["output"] == ended["result"]
     # The search belongs to the turn that made it, though it ended two turns later.
-    assert [e["turn"] for e in log if e["kind"] in ("tool.started", "tool.done")] == [1, 1]
+    lifecycle = ("tool.started", "tool.backgrounded", "tool.done")
+    assert [e["turn"] for e in log if e["kind"] in lifecycle] == [1, 1, 1]
     cut, _, _ = _of(log, "turn.closed")
     # Cut while the tool ran: the text before the call is whole, so nothing was cut off.
     assert cut == {"outcome": "cut", "kept": None, "error": None}
@@ -243,8 +261,8 @@ async def test_a_search_left_running_at_a_cut_ends_later_and_its_result_is_told(
         "placeholder",
         "user",
         "gem",
-        "late-result",
-        "late-result",
+        "background-result",
+        "background-result",
         "gem",
     ]
     # Each request was sent what was remembered before it, and nothing is written twice:
@@ -477,6 +495,146 @@ async def test_a_call_that_ends_mid_reply_closes_the_turn_then_the_request_then_
     # Every turn and every request that opened has closed.
     assert kinds.count("turn.opened") == kinds.count("turn.closed") == 1
     assert kinds.count("request.sent") == kinds.count("request.done") == 1
+
+
+def _searching() -> tuple[asyncio.Event, list[Any]]:
+    """A round that says a word and searches, and the gate its search waits for."""
+    search_call = _search_call("weather in Pune")
+    return asyncio.Event(), [_delta("Let me look."), _starts(search_call), _completed(search_call)]
+
+
+async def _result_waits(world: _World) -> None:
+    """Wait until the gem's search has ended in the background and its result waits."""
+    late = world.conversations._kept[str(world.gem.id)].late
+    async with asyncio.timeout(2):
+        while True:
+            if late.ready:
+                return
+            await asyncio.sleep(0)
+
+
+_LIFE = ("tool.started", "tool.backgrounded", "tool.done")
+
+
+async def test_a_search_that_goes_to_the_background_in_a_call_is_told_with_the_next_turn() -> None:
+    finish, searching = _searching()
+    world = await _world(searching, _spoken("It is sunny in Pune."), search=_Search(gate=finish))
+
+    call, f, keeping = await world.call()
+    f.stt.say("weather in Pune?")
+    await _read_until(f.conversation, "tool.call")
+    # The user speaks while the search runs. The reply is settled, and the search
+    # carries on in the background, where it ends before they have finished speaking.
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    finish.set()
+    await _result_waits(world)
+    f.stt.turn_end("are you there?")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    # The whole of the search, in the order of time, each entry naming the turn that
+    # made the call.
+    assert [(e["kind"], e["turn"]) for e in log if e["kind"] in _LIFE] == [
+        ("tool.started", 1),
+        ("tool.backgrounded", 1),
+        ("tool.done", 1),
+    ]
+    (ended,) = _shown(log, "tool.done")
+    assert (ended["outcome"], ended["background"]) == ("done", True)
+    # It is delivered in the turn that tells it: a stub call and its result, ahead of
+    # what the user said in that turn, each naming the call whose result they carry.
+    delivered = [e for e in log if e.get("delivers")]
+    assert [(e["kind"], e["turn"], e["source"], e["delivers"]) for e in delivered] == [
+        ("tool.called", 2, "background-result", "call_1"),
+        ("tool.result", 2, "background-result", "call_1"),
+    ]
+    assert delivered[1]["item"]["output"] == ended["result"]
+    second = [e["kind"] for e in log if e["turn"] == 2]
+    assert second[:4] == ["turn.opened", "tool.called", "tool.result", "user.said"]
+    await _sent_is_what_the_model_was_given(world.conversations, world.gem.id, world.llm.requests)
+
+
+async def test_a_result_that_comes_when_nothing_is_said_is_told_in_a_turn_of_its_own() -> None:
+    finish, searching = _searching()
+    world = await _world(
+        searching,
+        _spoken("Hello."),
+        _spoken("It is sunny in Pune."),
+        search=_Search(gate=finish),
+    )
+
+    call, f, keeping = await world.call()
+    f.stt.say("weather in Pune?")
+    await _read_until(f.conversation, "tool.call")
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    f.stt.turn_end("hello?")
+    await _read_until(f.conversation, "assistant.done")
+    # That reply has been heard to its end when the search comes back.
+    f.clock.advance(60)
+    finish.set()
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    opened = _shown(log, "turn.opened")
+    assert [(turn["turn"], turn["by"]) for turn in opened] == [
+        (1, "user"),
+        (2, "user"),
+        (3, "background_result"),
+    ]
+    assert [(e["kind"], e["turn"]) for e in log if e["kind"] in _LIFE] == [
+        ("tool.started", 1),
+        ("tool.backgrounded", 1),
+        ("tool.done", 1),
+    ]
+    # The turn that tells it opens, then the stub and its result, then the request.
+    third = [e["kind"] for e in log if e["turn"] == 3 and e["kind"] not in _LIFE]
+    assert third == [
+        "turn.opened",
+        "tool.called",
+        "tool.result",
+        "request.sent",
+        "request.done",
+        "gem.said",
+        "turn.closed",
+    ]
+    assert {e["delivers"] for e in log if e.get("delivers")} == {"call_1"}
+    await _sent_is_what_the_model_was_given(world.conversations, world.gem.id, world.llm.requests)
+
+
+async def test_a_sound_with_no_words_is_remembered_as_the_line_that_says_so() -> None:
+    world = await _world(
+        _spoken("Once upon a time there was a dragon."), _spoken("As I was saying.")
+    )
+
+    call, f, keeping = await world.call()
+    f.stt.say("tell me a story")
+    await _read_until(f.conversation, "assistant.word")
+    await _let_audio_out()
+    f.clock.advance(_DELAY + 2.5)
+    # The recognizer hears something while the reply plays, and makes no words of it.
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    f.stt.turn_end("")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await _hang_up(call, keeping)
+    log = await _call_log(world)
+
+    notes = _shown(log, "note.written")
+    assert [(note["source"], note["turn"]) for note in notes] == [
+        ("call-line", None),
+        ("no-words", 2),
+    ]
+    # The line is remembered before the request it is the last thing of.
+    kinds = [e["kind"] for e in log if e["turn"] == 2]
+    assert kinds[:3] == ["turn.opened", "note.written", "request.sent"]
+    await _sent_is_what_the_model_was_given(world.conversations, world.gem.id, world.llm.requests)
 
 
 async def test_a_message_cut_before_the_model_is_asked_leaves_a_turn_with_no_request() -> None:
