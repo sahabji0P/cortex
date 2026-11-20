@@ -234,7 +234,7 @@ class WrittenConversation:
                 self._model,
                 self._tools,
                 instructions=self._instructions,
-                next_round=self._next_round,
+                next_round=lambda: self._next_round(reply, turn),
                 # The page hands each piece of text to the reader itself.
                 said=lambda text: None,
                 show=lambda text: out.put_nowait((WrittenEvent("tool.call", text), None, None)),
@@ -246,7 +246,13 @@ class WrittenConversation:
         finally:
             out.put_nowait(None)
 
-    def _next_round(self) -> RoundInput:
+    def _next_round(self, reply: Reply, turn: TurnRecord) -> RoundInput:
+        # What the reply has produced so far is final now: the model is about to be
+        # sent it. So it joins the history here, before the request that carries it.
+        # Each of its calls has its result by now: settling one says what that stands for.
+        for call in reply.calls():
+            self._late.settle(call)
+        self._keep(reply, reply.send_back(), turn)
         # As in a call: the least thinking the model allows, except while a tool call has
         # no result in the history yet. Whether writing wants more is not settled.
         return RoundInput(list(self._history), think=self._late.pending)
@@ -267,13 +273,10 @@ class WrittenConversation:
                 if self._late.settle(call):
                     self.left_running.append(call)
             delivered = reply.delivered(0.0)
-            items = delivered.items
             whole = reply.finished and delivered.kept is None
-            settled = added_reply(items, reply.calls(), datetime.now(UTC))
-            for added in of_turn(settled, turn.number):
-                self._add(added)
+            self._keep(reply, delivered.items, turn)
             turn.closed(finished=reply.finished, kept=delivered.kept)
-            kept = " ".join(item["content"] for item in items if "role" in item)
+            kept = " ".join(delivered.texts)
             if whole:
                 return WrittenEvent("done", kept)
             # The history keeps only what was written, as a call keeps only what was
@@ -287,6 +290,11 @@ class WrittenConversation:
             self._out = None
             self._cut = False
             self._writing = False
+
+    def _keep(self, reply: Reply, items: list[Item], turn: TurnRecord) -> None:
+        """Add what a reply leaves in the history: these items, final as they stand."""
+        for added in of_turn(added_reply(items, reply.calls(), datetime.now(UTC)), turn.number):
+            self._add(added)
 
     def _add(self, added: Added) -> None:
         self._history.append(added.item)

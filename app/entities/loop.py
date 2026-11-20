@@ -3,9 +3,11 @@ The loop a gem runs to make one reply, whatever the reply is delivered on.
 
     model round ──▶ tool calls ──▶ their results ──▶ next model round ──▶ …
 
-A reply is one or more model rounds. Each round is sent the history and whatever the
-reply has produced so far. A round that calls tools is followed by another once their
-results are in; the reply ends with a round that only says something.
+A reply is one or more model rounds. Each round is sent the history. A round that calls
+tools is followed by another once their results are in; the reply ends with a round
+that only says something. What a round produced is final once the next round is sent
+it: the conversation adds it to its history then (`Reply.send_back`), so the history
+is always everything the model has been sent, in the order it was sent.
 
 What the model says goes to a `Surface`: the place a reply is delivered, such as speech
 in a call or text in writing. The loop knows a surface only by the small protocol below.
@@ -21,8 +23,8 @@ moment. That is what the history keeps, by the same rules everywhere:
   with a placeholder as its result, the same in a call and in writing (see
   `late_results.py`).
 
-Which history a round is sent, whether the model thinks first, and where the text and
-tool events go are the conversation's own. It hands them over at the start of each round.
+The history, whether the model thinks first, and where the text and tool events go are
+the conversation's own. It hands them over at the start of each round.
 """
 
 import asyncio
@@ -121,9 +123,14 @@ class ToolCall:
 class Delivered:
     """A reply as it was delivered."""
 
-    items: list[Item]  # what joins the history
+    # What joins the history now: what was delivered of the parts that have not joined
+    # it already, when they were sent back to the model.
+    items: list[Item]
     any_text: bool  # whether any of the reply's text was delivered
     kept: str | None  # the text kept of a reply that was cut short; None if delivered in full
+    # Every stretch of the reply's text that the history keeps, in order: those that
+    # joined it earlier as well.
+    texts: list[str]
 
 
 class Reply:
@@ -135,7 +142,8 @@ class Reply:
         self.finished = False
         self._parts: list[Part | ToolCall] = []
         # How many of the parts have been sent back to the model, in a later call of
-        # this same reply. Those are final: the model has seen them as they are.
+        # this same reply. Those are final: the model has seen them as they are, and
+        # they are in the history.
         self._sent_back = 0
 
     async def say(self, text: str) -> None:
@@ -150,14 +158,18 @@ class Reply:
         return [part for part in self._parts if isinstance(part, ToolCall)]
 
     def send_back(self) -> list[Item]:
-        """Everything produced so far, for this reply's own next model call."""
-        self._sent_back = len(self._parts)
+        """What the reply has produced since this was last asked, which is final from here.
+
+        The reply's own next model call is about to be sent it, so it joins the history
+        as it stands: the text in full, and each call with its result.
+        """
         items: list[Item] = []
-        for part in self._parts:
+        for part in self._parts[self._sent_back :]:
             if isinstance(part, ToolCall):
                 items.extend(part.items())
             elif text := part.text.strip():
                 items.append({"role": "assistant", "content": text})
+        self._sent_back = len(self._parts)
         return items
 
     def delivered(self, at: float) -> Delivered:
@@ -167,32 +179,35 @@ class Reply:
 
         - Tool calls: they happened, and the history has to stay a valid chain of calls
           and results.
-        - Text already sent back to the model, which is what it said before calling a
-          tool. Shortening it now would change something the model has been shown, and
-          with it everything a prompt cache holds from there on.
+        - What was already sent back to the model: the text it said before calling a
+          tool, and the calls. That is in the history as it stands. Shortening the text
+          now would change something the model has been shown, and with it everything
+          a prompt cache holds from there on.
         """
         items: list[Item] = []
-        kept: list[str] = []
+        texts: list[str] = []
         cut = False
         any_text = False
         for index, part in enumerate(self._parts):
+            final = index < self._sent_back  # in the history already
             if isinstance(part, ToolCall):
-                items.extend(part.items())
+                if not final:
+                    items.extend(part.items())
                 continue
-            said = part.text.strip()
-            if cut and index >= self._sent_back:
+            if cut and not final:
                 continue  # produced after delivery stopped
             text, whole = part.delivered(at)
             any_text = any_text or bool(text)
-            if index < self._sent_back:
-                text = said
+            if final:
+                text = part.text.strip()
             elif not whole:
                 text = f"{text}{CUT_MARK}" if text else ""
             cut = cut or not whole
             if text:
-                kept.append(text)
-                items.append({"role": "assistant", "content": text})
-        return Delivered(items, any_text, " ".join(kept) if cut else None)
+                texts.append(text)
+                if not final:
+                    items.append({"role": "assistant", "content": text})
+        return Delivered(items, any_text, " ".join(texts) if cut else None, texts)
 
 
 class RequestRecord(Protocol):
@@ -247,7 +262,9 @@ class _NoRecord:
 class RoundInput(NamedTuple):
     """What a conversation gives one model round, read when the round starts."""
 
-    items: list[Item]  # everything before this reply, as it stands now
+    # The history as it stands now, with what this reply has produced so far: the
+    # conversation adds that first (see `Reply.send_back`).
+    items: list[Item]
     think: bool  # whether the model is asked to think a little first
 
 
@@ -265,7 +282,8 @@ async def run_reply(
     """Produce one reply: model rounds, with tool calls in between, delivered as they stream.
 
     `next_round` is asked at the start of every round, not once per reply: what it
-    returns can change while tools run. `said` is given each piece of text once the
+    returns can change while tools run, and it is where the conversation adds what the
+    reply has produced so far to its history. `said` is given each piece of text once the
     surface has taken it, and `show` the text of each tool call's `tool.call` event.
     `record` is where each request and tool call is written down, if anywhere: it
     changes nothing of what the model is sent or what the reply does.
@@ -298,7 +316,7 @@ async def _model_round(
 ) -> bool:
     """Run one model call, delivering its text. Return True if it called tools (so: again)."""
     before = next_round()
-    items = [*before.items, *reply.send_back()]
+    items = before.items
     request = record.sent(items, before.think)
     events = model.round(items, instructions=instructions, think=before.think)
     calls: list[ToolCall] = []

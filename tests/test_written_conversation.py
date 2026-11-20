@@ -292,6 +292,25 @@ async def test_a_tool_that_finished_before_the_cut_is_not_handed_back() -> None:
     }
 
 
+async def test_what_a_round_produced_joins_the_history_before_the_round_that_is_sent_it() -> None:
+    call = _call("Pune weather")
+    llm = _LLM([_delta("Let me look."), _starts(call), _completed(call)], [asyncio.Event()])
+    conversation = _conversation(llm)
+
+    async with asyncio.timeout(2), contextlib.aclosing(conversation.send("weather?")) as stream:
+        assert [(await anext(stream)).type for _ in range(2)] == ["text", "tool.call"]
+        await asyncio.sleep(0.02)
+        assert len(llm.requests) == 2
+        # The second round is still being made, and what it was sent is in the history
+        # already: the history is everything the model has been sent, in that order.
+        assert [entry.item for entry in conversation.added] == llm.requests[1]["input"]
+        conversation.cut()
+        assert [event.type async for event in stream] == ["cut"]
+
+    # Settling the reply adds none of it a second time.
+    assert [entry.item for entry in conversation.added] == llm.requests[1]["input"]
+
+
 async def test_a_second_message_while_a_reply_is_written_is_refused() -> None:
     gate = asyncio.Event()
     llm = _LLM([_delta("Thinking "), gate, _delta("done."), _completed()], _said("Yes."))

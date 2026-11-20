@@ -117,12 +117,20 @@ _HISTORY: list[Item] = [{"role": "user", "content": "weather?"}]
 
 async def _reply(model: _Model, tools: Toolbox, record: _Record | None) -> Reply:
     reply = Reply(_Surface())
+    history = list(_HISTORY)
+
+    def next_round() -> RoundInput:
+        # As a conversation does: what the reply has produced so far joins the history
+        # before the round that is sent it.
+        history.extend(reply.send_back())
+        return RoundInput(list(history), think=False)
+
     await run_reply(
         reply,
         model,
         tools,
         instructions="Be brief.\n",
-        next_round=lambda: RoundInput(_HISTORY, think=False),
+        next_round=next_round,
         said=lambda text: None,
         show=lambda text: None,
         record=record,

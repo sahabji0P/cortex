@@ -386,13 +386,18 @@ class VoiceConversation:
             # user has been told. (One that was cut off or failed before it said
             # anything also has nothing "cut", but has told them nothing.)
             self._results_owed = False
-        if heard.items:
-            # Some of the reply got through: what the user said has been answered.
-            self._unanswered = False
-        settled = added_reply(heard.items, reply.calls(), datetime.now(UTC))
-        self._add(*of_turn(settled, reply.turn.number))
+        self._keep(reply, heard.items)
         reply.turn.closed(finished=reply.finished, kept=heard.kept)
         return heard
+
+    def _keep(self, reply: _Reply, items: list[Item]) -> None:
+        """Add what a reply leaves in the history: these items, final as they stand."""
+        if not items:
+            return
+        # Something of the reply got through: what the user said has been answered.
+        self._unanswered = False
+        kept = added_reply(items, reply.calls(), datetime.now(UTC))
+        self._add(*of_turn(kept, reply.turn.number))
 
     def _announce_when_quiet(self) -> None:
         """Make sure something is waiting to give the model its late results."""
@@ -517,7 +522,7 @@ class VoiceConversation:
                 self._model,
                 self._tools,
                 instructions=self._instructions,
-                next_round=self._next_round,
+                next_round=lambda: self._next_round(reply),
                 # The client is not shown the model's text, which runs well ahead of
                 # the audio. It is sent each word as it is spoken (see `_show_word`).
                 said=lambda text: None,
@@ -530,8 +535,14 @@ class VoiceConversation:
         else:
             self._emit("assistant.done", reply.speech.text.strip())
 
-    def _next_round(self) -> RoundInput:
-        """What the reply's next model call is sent ahead of the reply's own items."""
+    def _next_round(self, reply: _Reply) -> RoundInput:
+        """What the reply's next model call is sent: the history, with the reply so far."""
+        # What the reply has produced so far is final now: the model is about to be
+        # sent it. So it joins the history here, before the request that carries it.
+        # Each of its calls has its result by now: settling one says what that stands for.
+        for call in reply.calls():
+            self._late.settle(call)
+        self._keep(reply, reply.send_back())
         # No thinking before it speaks: in a conversation the wait is worse than the gain.
         # The exception is while the history ends in a search with no result yet: one
         # still running in the background, or finished and waiting to be delivered.
