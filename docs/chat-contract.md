@@ -454,8 +454,10 @@ known.` A zone that cannot be read never refuses a frame. One is written:
 
 - in a call, as it opens, straight after the call's opening line, before a greeting;
 - in writing, before a message, when none has been written yet, the last is more than
-  ten minutes old, or the date has changed since in the user's zone. It comes before the
-  reply's `turn.opened`. A reply with no message (a late result told) gets none.
+  ten minutes old, or the date has changed since in the user's zone. It is the last thing
+  before the reply's `turn.opened`: after the `settings.changed` the reply writes, after
+  the `chat-line` that follows a call, and after late results told with the message. A
+  reply with no message (a late result told) gets none.
 
 Like every line of ours, it is only ever added, and it is not a message of the
 conversation (`GET /v1/gems/{id}/chat` does not show it).
