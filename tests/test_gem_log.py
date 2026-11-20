@@ -204,7 +204,7 @@ async def test_a_request_is_written_down_with_its_tokens_and_what_they_cost() ->
         "calls": [{"call_id": "c1", "name": "web_search", "arguments": '{"query": "x"}'}],
         "usage": {"input": 300, "cache_read": 3100, "cache_write": 0, "output": 85, "thinking": 20},
         "cost_usd": 0.0001035,
-        "priced": "2026-11-18",
+        "priced": "2026-11-20",
         "error": None,
     }
 
