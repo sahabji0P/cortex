@@ -556,6 +556,32 @@ async def test_a_message_gets_the_time_again_once_the_last_line_is_over_ten_minu
     assert setup.llm.requests[-1]["input"] == stored[:-1]
 
 
+@pytest.mark.parametrize(
+    ("time_zone", "ends"),
+    [
+        ("Asia/Kolkata", " in Asia/Kolkata."),
+        # Anything that is not a zone is no reason to refuse the message.
+        (5, " UTC. The user's time zone is not known."),
+        (None, " UTC. The user's time zone is not known."),
+    ],
+)
+async def test_chat_send_carries_the_users_time_zone(time_zone: object, ends: str) -> None:
+    setup = await _chat([_delta("Hi."), _completed()])
+    socket, linked = await _open(setup.service())
+
+    socket.raw(
+        json.dumps(
+            {"type": "chat.send", "gem": str(setup.gem.id), "text": "hi", "time_zone": time_zone}
+        )
+    )
+    await socket.until("chat.done")
+
+    first = (await setup.stored())[0]
+    assert first == TIME_LINE
+    assert first["content"].endswith(ends)
+    await _close(socket, linked)
+
+
 async def test_a_zone_that_cannot_be_read_gives_the_time_in_utc() -> None:
     setup = await _chat([_delta("Hi."), _completed()])
 
