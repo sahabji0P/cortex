@@ -377,7 +377,7 @@ Every other kind is something that happened. No model is ever sent them.
 | --- | --- | --- |
 | `call.opened`, `call.closed` | none | A call began, or ended. No turn. Writing has neither |
 | `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) or `background_result` (results of calls that went on in the background are to be told, with nothing new from the user). `mode` is `call` or `chat` |
-| `settings.changed` | any of `model`, `instructions`, `tools` | What the gem's requests are made with differs from its last request. Only the parts that changed are there, each in full (see below) |
+| `settings.changed` | any of `model`, `instructions`, `tools` | What the gem's requests are made with differs from what was last written down. Only the parts that changed are there, each in full (see below). Written before what it applies to: in writing, before the reply's `turn.opened`; in a call, just after `call.opened`, before the call's first line. Then it has no turn, and holds from there on. A change found later, at a request, has that request's turn (see below) |
 | `request.sent` | `request`, `attempt`, `think`, `count` | A request went to the model. `request` is its number for this gem. `attempt` is always 1 for now: a request the provider's library tries again by itself is not seen. `think` is whether the model was asked to think first. `count` is how many items it was sent (see below) |
 | `request.done` | `request`, `attempt`, `outcome`, `text`, `calls`, `first_token_at`, `usage`, `cost_usd`, `priced`, `error` | How that request ended (see below) |
 | `tool.started` | `request`, `call_id`, `name`, `connection` | A tool call started running. `request` is the request that made it: its arguments are in that request's `request.done`, under `calls`. `connection` is the connection's name, or null for a built-in tool |
@@ -425,13 +425,17 @@ so its `turn.closed` can come before its `request.done`.
 **What changed.** `model` is `{"name", "provider", "via"}`: `name` as `GET
 /v1/voice/models` gives it, `provider` `OpenAI` or `Anthropic`, `via` `api` or `proxy`.
 The way in is read again for every request, so switching between the API key and the
-proxy writes a `settings.changed` with `model` before the next request, in a call too.
+proxy writes a `settings.changed` with `model` just before the next request, with that
+request's turn, in a call too. So does a change whose entry could not be written: the
+next request says all three parts again.
 `instructions` is the four layers in order, each `{"name", "text"}`: `darbar`, `gem`,
 `model`, `date`. Joined, they are the instructions as sent. `tools` is every tool the
 model is told of, each `{"name", "description", "parameters", "connection", "deferred"}`,
 with `parameters` the tool's schema as JSON text, laid out the same way every time. To
 show what changed, compare a part with the same part in the `settings.changed` before
-it. The first request of a gem writes all three.
+it. The first reply or call of a gem writes all three. One is written even when no
+request follows: a call in which nothing is said leaves `call.opened`,
+`settings.changed`, the call's first line (`note.written`) and `call.closed`.
 
 ### The life of a tool call
 
@@ -469,9 +473,9 @@ A search cut in writing, which ends later and is told in a reply of its own, as 
 
 | `seq` | `kind` | `turn` | Of note |
 | --- | --- | --- | --- |
-| 0 | `turn.opened` | 1 | `by` `user` |
-| 1 | `user.said` | 1 | |
-| 2 | `settings.changed` | 1 | |
+| 0 | `settings.changed` | null | all three parts: the gem's first reply |
+| 1 | `turn.opened` | 1 | `by` `user` |
+| 2 | `user.said` | 1 | |
 | 3 | `request.sent` | 1 | `request` 1, `count` 1 |
 | 4 | `request.done` | 1 | `calls`: `call_1`, `web_search`, its arguments |
 | 5 | `tool.started` | 1 | `call_id` `call_1`, `request` 1 |
