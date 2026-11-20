@@ -404,7 +404,7 @@ Everything in the history that neither the user nor the model wrote (all Enforce
 
 | What | Shape | When | Text |
 | --- | --- | --- | --- |
-| Call-start line | Note, after the stored conversation | A call whose stored conversation ends in writing, or is empty | "The user has called you. From here on the conversation is spoken." |
+| Call-start line | Note, after the stored conversation | Every call, as it opens (also straight after another call) | "The user has called you. From here on the conversation is spoken." |
 | Call-ended line | Note, written by chat | The first written turn after a call | "The call has ended. From here on the conversation is written." |
 | Time line | Note, right after the call-start line, before a greeting | Every call as it opens. In writing, before a message when none has been written, the last is over ten minutes old, or the date has changed in the user's zone | "It is {weekday}, {day} {month} {year}, {h:mm} {am/pm} in {time zone}." in the zone the app sent on `call.start` or `chat.send`; with none, "It is ... {h:mm} {am/pm} UTC. The user's time zone is not known." |
 | Greeting note | Note, after the stored conversation and the call-start line | The call opens with the assistant speaking first | "The call has just connected and the user has not said anything yet. Greet them in one short sentence and ask what you can do for them." |
