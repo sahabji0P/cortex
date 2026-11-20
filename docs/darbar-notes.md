@@ -79,13 +79,17 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A tool call still running when its reply is over goes to the background. It is read start to end by its call_id: started, backgrounded, done, then delivered, cancelled or lost.
 - Writing what happened never holds a reply up and never fails one. What is remembered must be stored: a reply or a call that cannot store it fails, and it is dropped, never stored later.
 - No plugin system. The log is the one place to listen: the next thing that looks at a gem reads it.
+- The date and time are a line of ours, not part of the instructions. The instructions change only when the user edits something. Built 2026-11-20.
+- The line gives the date, the time and the user's time zone. The app sends the zone on chat.send and call.start. With no zone, or one that cannot be read, the time is in UTC and the line says so.
+- When it is written: as a call opens, and in writing before a message when there is none yet, the last is over ten minutes old, or the date has changed.
+- The Darbar text does not mention the time line: the line explains itself.
+- To watch: a zone changed by the user may show only once the ten minutes are up.
 
 ## Base (next, order not fixed, no rush)
 
 - The log: a provider library's own retries, each written as a request of its own. Today up to two are made unseen.
 - The log: listening and speaking as entries, with their times and cost (speech-to-text is charged by the second of audio sent, speech by the character).
 - The log: totals by gem, by day and by service, for the app's home.
-- The date in the instructions: it changes them once a day by itself, which misses the cache, and it is in UTC. To decide: send it as a line of ours in the conversation instead. The app's settings panel can drop its date part when it is.
 - The log: the tokens of a reply cut while the model was still producing. Anthropic says what it read at the start of a reply. Whether OpenAI says anything before the end is to be checked.
 - Our lines sent the same way on every model: a user message in a tag, the developer role kept for instructions. The line that explains the tag in the instructions for every model. A change to what the model is sent, so on its own.
 
