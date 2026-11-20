@@ -70,19 +70,17 @@ def _a_gem(**fields: object) -> GemConfig:
 
 
 def _told(name: str, own: str, darbar: str = _DARBAR) -> str:
-    today = datetime.now(UTC).strftime("%A, %d %B %Y")
-    return f"{darbar}You are {name}.\n\n{own}\n\nToday is {today}.\n"
+    return f"{darbar}You are {name}.\n\n{own}\n\n"
 
 
 def test_a_gem_in_writing_is_told_what_it_is_told_in_a_call() -> None:
     # One instruction text for a gem: nothing in it depends on how the gem is reached.
-    told = instructions(gem=_a_gem(), model_needs="- A need of the model's.\n", now=_NOW)
+    told = instructions(gem=_a_gem(), model_needs="- A need of the model's.\n")
 
     assert told == (
         _DARBAR
         + "You are Gem One.\n\nYou look after the user's personal finances.\n\n"
         + "- A need of the model's.\n\n"
-        + "Today is Tuesday, 17 November 2026.\n"
     )
 
 

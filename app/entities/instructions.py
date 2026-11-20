@@ -2,15 +2,18 @@
 The instructions a gem's model is given, the same whichever way the gem is reached.
 
 They are in two parts: the environment, which is the Darbar text and the same for every
-gem, and the gem's own name and instructions. What the model needs of its own and the
-date follow. The instructions are the start of every request, and a prompt cache only
-helps while that start stays the same, so they go in order from what changes least to
-what changes most:
+gem, and the gem's own name and instructions. What the model needs of its own follows.
+The instructions are the start of every request, and a prompt cache only helps while
+that start stays the same, so they go in order from what changes least to what changes
+most:
 
 1. the Darbar text: how things are here, for every gem
 2. the gem: who this gem is, and its own instructions
 3. what the model itself needs
-4. the date
+
+Nothing in them changes by itself: only an edit of the Darbar text or the gem, or a
+change of model. The date and the time are not in them: a line of ours in the
+conversation gives them (see `history.py`).
 
 Each part is a paragraph of its own, followed by a blank line. An empty part adds
 nothing, not even the blank line.
@@ -18,7 +21,6 @@ nothing, not even the blank line.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from app.entities.gem_ent import GemConfig
 
@@ -66,19 +68,16 @@ def instruction_layers(
     darbar: str | None = None,
     gem: GemConfig,
     model_needs: str,
-    now: datetime | None = None,
 ) -> list[Layer]:
     """The layers of a gem's instructions, in the order they are sent.
 
     `darbar` is the Darbar text the user wrote, or None for the built-in one. An empty
     one tells the gem nothing. `model_needs` is what the model adds of its own.
     """
-    today = (now or datetime.now(UTC)).strftime("%A, %d %B %Y")
     return [
         Layer("darbar", _paragraph(DEFAULT_DARBAR if darbar is None else darbar)),
         Layer("gem", f"You are {gem.name}.\n\n" + _paragraph(gem.instructions)),
         Layer("model", _paragraph(model_needs)),
-        Layer("date", f"Today is {today}.\n"),
     ]
 
 
@@ -87,10 +86,9 @@ def instructions(
     darbar: str | None = None,
     gem: GemConfig,
     model_needs: str,
-    now: datetime | None = None,
 ) -> str:
     """The whole instructions, as the model is sent them."""
-    return joined(instruction_layers(darbar=darbar, gem=gem, model_needs=model_needs, now=now))
+    return joined(instruction_layers(darbar=darbar, gem=gem, model_needs=model_needs))
 
 
 def joined(layers: Sequence[Layer]) -> str:

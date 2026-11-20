@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -39,7 +40,7 @@ from tests.test_one_conversation import (
     _world,
 )
 from tests.test_voice_conversation import _Search, _search_call, _starts
-from tests.time_lines import TIME_LINE
+from tests.time_lines import TIME_LINE, set_clock
 
 
 async def _log(setup: _Chat) -> list[dict[str, Any]]:
@@ -125,7 +126,6 @@ async def test_a_written_reply_leaves_its_turn_its_request_and_what_is_remembere
         "darbar",
         "gem",
         "model",
-        "date",
     ]
     # The layers are the instructions the model was sent, cut where they join.
     assert (
@@ -214,6 +214,45 @@ async def test_a_second_reply_made_with_the_same_settings_says_nothing_of_them()
         "turn.closed",
     ]
     assert len(_of(log, "settings.changed")) == 1
+    await _close(socket, linked)
+
+
+async def test_a_message_the_next_day_keeps_the_cache_and_says_no_change_of_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    move = set_clock(monkeypatch, datetime(2026, 11, 20, 22, 0, tzinfo=UTC))
+    setup = await _chat(_said("Hi."), _said("Hi again."))
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done")
+
+    move(datetime(2026, 11, 21, 9, 0, tzinfo=UTC))
+    socket.send(setup.gem.id, "hello again")
+    await socket.until("chat.done", 2)
+
+    # The start of the request stays the same from one day to the next, so a prompt
+    # cache holds: the same instructions and tools, and the whole of the first request.
+    first, second = setup.llm.requests
+    assert second["instructions"] == first["instructions"]
+    assert second["tools"] == first["tools"]
+    assert second["input"][: len(first["input"])] == first["input"]
+    # The new day is told by a line of ours, before the message.
+    assert first["input"][0]["content"].startswith("It is Friday, 20 November 2026, 10:00 pm")
+    assert second["input"][len(first["input"]) :] == [
+        {"role": "assistant", "content": "Hi."},
+        {
+            "role": "developer",
+            "content": (
+                "It is Saturday, 21 November 2026, 9:00 am UTC. The user's time zone is not known."
+            ),
+        },
+        {"role": "user", "content": "hello again"},
+    ]
+    # A new day is no change of settings.
+    log = await _log(setup)
+    assert len(_of(log, "settings.changed")) == 1
+    lines = [entry for entry in _of(log, "note.written") if entry["source"] == "time-line"]
+    assert len(lines) == 2
     await _close(socket, linked)
 
 
