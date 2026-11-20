@@ -23,6 +23,7 @@ from app.entities.voice_ent import VoiceEvent
 from app.routers.link.service import LinkServiceV1Class
 from tests.test_chat import _Chat, _chat, _said, _stored_items
 from tests.test_voice_conversation import _completed, _delta
+from tests.time_lines import TIME_LINE
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -875,6 +876,7 @@ async def test_a_call_start_cuts_a_reply_being_written_and_opens_once_it_is_stor
     assert socket.frame("chat.cut")["text"] == "Once upon…"
     assert stored_by_then == [
         [
+            TIME_LINE,
             {"role": "user", "content": "a story"},
             {"role": "assistant", "content": "Once upon…"},
         ]

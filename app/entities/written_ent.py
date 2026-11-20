@@ -37,7 +37,17 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from app.entities.gem_log import Recording, TurnRecord
-from app.entities.history import Added, Mode, added_reply, mode_line, of_turn, said
+from app.entities.history import (
+    Added,
+    Mode,
+    TimeTold,
+    added_reply,
+    mode_line,
+    of_turn,
+    said,
+    time_due,
+    time_line,
+)
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import Item, Model
@@ -135,6 +145,7 @@ class WrittenConversation:
         history: Sequence[Item] = (),
         last_mode: Mode = "chat",
         record: Recording | None = None,
+        time_told: TimeTold | None = None,
     ) -> None:
         # `model` has to be told of exactly the tools in `tools`, and `instructions` are
         # the whole instructions, with what the model needs already in them. `late` holds
@@ -153,6 +164,9 @@ class WrittenConversation:
         self.left_running: list[ToolCall] = []
         # Where what happens is written down (see `gem_log.py`). Left out, nothing is.
         self._record = Recording() if record is None else record
+        # The user's time zone and when the time was last given, for the line that gives
+        # it before a message (see `history.py`). Left out, no such line is written.
+        self._time = time_told
         # After a call, a line says the conversation is written from here on. It is
         # stored with the first item that follows it (see `history.py`).
         for added in mode_line("chat", last_mode):
@@ -172,10 +186,11 @@ class WrittenConversation:
         With `text` None, no message is sent: the reply is written from the history as it
         stands, as when a late search result is to be told.
 
-        The message joins the history as it is sent. `at` is when it was sent, if not
-        now. Nothing happens until the stream is read. One reply at a time: reading a
-        second stream while a reply is being written raises `RuntimeError`. A reply that
-        fails raises its failure, after the text that was delivered, once it is settled.
+        The message joins the history as it is sent, after a line that gives the time
+        if one is due. `at` is when it was sent, if not now. Nothing happens until the
+        stream is read. One reply at a time: reading a second stream while a reply is
+        being written raises `RuntimeError`. A reply that fails raises its failure,
+        after the text that was delivered, once it is settled.
 
         To stop a reply part-way, call `cut`, and the stream ends with `cut`. Closing
         the stream (as with `contextlib.aclosing`) or cancelling its reader stops it the
@@ -186,6 +201,11 @@ class WrittenConversation:
         if self._writing:
             raise RuntimeError("a reply is still being written")
         self._writing = True
+        if text is not None and self._time is not None:
+            at = at or datetime.now(UTC)
+            if time_due(self._time, at):
+                self._add(time_line(self._time.zone, at))
+                self._time = TimeTold(self._time.zone, at)
         # A reply with no message is written to tell a late result.
         turn = self._record.turn("background_result" if text is None else "user")
         if text is not None:

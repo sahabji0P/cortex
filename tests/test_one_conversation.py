@@ -21,7 +21,7 @@ from app.entities.conversation_store import ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.gem_log import Recording
-from app.entities.history import Mode
+from app.entities.history import Mode, TimeTold
 from app.entities.late_results import LateResults
 from app.entities.model import Item
 from app.entities.tools import Tool
@@ -43,6 +43,7 @@ from tests.test_voice_conversation import (
     _search_call,
     _starts,
 )
+from tests.time_lines import TIME_LINE
 
 # The lines that say where the conversation changes mode, written out in full.
 _CALLED = {
@@ -107,6 +108,7 @@ class _Line:
         late: LateResults | None = None,
         connected: Sequence[Tool] = (),
         record: Recording | None = None,
+        time_told: TimeTold | None = None,
     ) -> VoiceConversation:
         voice = self._voice
         stt, tts = _STT(), _TTS()
@@ -123,6 +125,7 @@ class _Line:
             late=late,
             connected=connected,
             record=record,
+            time_told=time_told,
             clock=voice.clock,
         )
         voice.calls.append(
@@ -255,8 +258,11 @@ async def test_a_call_then_chat_then_a_call_are_one_conversation() -> None:
     # Every request started with the whole of the one before it, from the call to chat
     # and back: the model fake checks that on each.
     assert len(world.llm.requests) == 4
+    # Each call gives the time after its opening line. The message written straight
+    # after the call is not given it again: the call's line is minutes old at most.
     assert after_the_call == [
         _CALLED,
+        TIME_LINE,
         _user("hello"),
         _gem_said("Hi there."),
         _user("what's new"),
@@ -275,9 +281,20 @@ async def test_a_call_then_chat_then_a_call_are_one_conversation() -> None:
         _gem_said("Sunny."),
     ]
     # The second call starts with everything the first call and the chat stored.
-    assert world.llm.requests[3]["input"] == [*after_the_chat, _CALLED, _user("thanks")]
-    assert await world.stored() == [*after_the_chat, _CALLED, _user("thanks"), _gem_said("Bye.")]
-    assert await world.modes() == ["call"] * 5 + ["chat"] * 3 + ["call"] * 3
+    assert world.llm.requests[3]["input"] == [
+        *after_the_chat,
+        _CALLED,
+        TIME_LINE,
+        _user("thanks"),
+    ]
+    assert await world.stored() == [
+        *after_the_chat,
+        _CALLED,
+        TIME_LINE,
+        _user("thanks"),
+        _gem_said("Bye."),
+    ]
+    assert await world.modes() == ["call"] * 6 + ["chat"] * 3 + ["call"] * 4
     # The conversation is shown whole, without our lines.
     shown = await world.conversations.messages(str(world.gem.id))
     assert [(message.role, message.text) for message in shown] == [
@@ -316,6 +333,7 @@ async def test_a_reply_cut_in_a_call_is_stored_as_heard_and_sent_so_to_chat() ->
 
     stored = [
         _CALLED,
+        TIME_LINE,
         _user("tell me a story"),
         _gem_said("Once upon a…"),
         _user("never mind"),
@@ -336,7 +354,12 @@ async def test_a_reply_cut_by_hanging_up_is_stored_as_heard() -> None:
     f.clock.advance(_DELAY + 2.5)
     await _hang_up(call, keeping)
 
-    assert await world.stored() == [_CALLED, _user("tell me a story"), _gem_said("Once upon…")]
+    assert await world.stored() == [
+        _CALLED,
+        TIME_LINE,
+        _user("tell me a story"),
+        _gem_said("Once upon…"),
+    ]
 
 
 @pytest.mark.parametrize("how", ["silence", "greeting unheard"])
@@ -352,8 +375,8 @@ async def test_a_call_in_which_nothing_was_said_leaves_the_lines_that_opened_it(
 
     # A line of ours is final when it is written: the call happened, and it is stored.
     stored = await world.stored()
-    assert stored[0] == _CALLED
-    assert len(stored) == (1 if how == "silence" else 2)
+    assert stored[:2] == [_CALLED, TIME_LINE]
+    assert len(stored) == (2 if how == "silence" else 3)
     assert world.conversations._kept == {}
     # So whatever the call sent the model is what the next request starts with.
     sent_in_the_call = [request["input"] for request in world.llm.requests]
@@ -372,11 +395,11 @@ async def test_what_the_user_said_in_a_call_is_stored_though_no_reply_was_heard(
     await _hang_up(call, keeping)
 
     # They said it, and the model was sent it: it is stored, with the line before it.
-    assert await world.stored() == [_CALLED, _user("hello")]
+    assert await world.stored() == [_CALLED, TIME_LINE, _user("hello")]
     assert world.conversations._kept == {}
     # So the next request, in writing, starts with the whole of the one before it.
     in_the_call = world.llm.requests[-1]["input"]
-    assert in_the_call == [_CALLED, _user("hello")]
+    assert in_the_call == [_CALLED, TIME_LINE, _user("hello")]
     await world.write("hi")
     assert world.llm.requests[-1]["input"] == [*in_the_call, _ENDED, _user("hi")]
 
@@ -401,8 +424,10 @@ async def test_a_search_running_when_a_call_ends_is_stored_and_its_result_told_i
     await _hang_up(call, keeping)
 
     after_the_call = await world.stored()
-    assert after_the_call[2:5] == [
+    assert after_the_call[0] == TIME_LINE
+    assert after_the_call[3:7] == [
         _CALLED,
+        TIME_LINE,
         _user("weather in Pune?"),
         {
             "type": "function_call",
@@ -501,23 +526,27 @@ async def test_a_search_left_running_in_writing_is_told_in_the_call_that_cuts_it
         ("chat.tool", "weather in Pune"),
         ("chat.cut", "Let me look."),
     ]
+    assert before_the_call[0] == TIME_LINE
     assert [item.get("role") or item["type"] for item in before_the_call] == [
+        "developer",
         "user",
         "assistant",
         "function_call",
         "function_call_output",
     ]
     # The result is told in the call, with no user turn before it, and not in writing.
-    stub, result = world.llm.requests[-1]["input"][len(before_the_call) + 1 :]
-    assert world.llm.requests[-1]["input"][: len(before_the_call) + 1] == [
+    stub, result = world.llm.requests[-1]["input"][len(before_the_call) + 2 :]
+    assert world.llm.requests[-1]["input"][: len(before_the_call) + 2] == [
         *before_the_call,
         _CALLED,
+        TIME_LINE,
     ]
     assert stub["arguments"] == '{"deferred_result_for": "call_1"}'
     assert "Norris won in Las Vegas." in result["output"]
     assert await world.stored() == [
         *before_the_call,
         _CALLED,
+        TIME_LINE,
         stub,
         result,
         _gem_said("It is sunny in Pune."),
@@ -556,7 +585,7 @@ async def test_a_search_lost_to_a_restart_is_closed_before_the_call_s_first_repl
     stub, lost = closed[3:]
     assert stub["arguments"] == '{"deferred_result_for": "call_1"}'
     assert lost == {"type": "function_call_output", "call_id": stub["call_id"], "output": _LOST}
-    assert world.llm.requests[0]["input"] == [*closed, _CALLED, _user("hello")]
+    assert world.llm.requests[0]["input"] == [*closed, _CALLED, TIME_LINE, _user("hello")]
     # Closing it changed nothing about how the user was talking.
     assert (await world.modes())[:5] == ["chat"] * 5
 
@@ -573,11 +602,12 @@ async def test_a_call_straight_after_a_call_opens_with_its_own_line() -> None:
     await _said_and_heard(f, "it's me again")
     await _hang_up(call, keeping)
 
-    assert first == [_CALLED, _user("hello"), _gem_said("Hi there.")]
-    assert world.llm.requests[-1]["input"] == [*first, _CALLED, _user("it's me again")]
+    assert first == [_CALLED, TIME_LINE, _user("hello"), _gem_said("Hi there.")]
+    assert world.llm.requests[-1]["input"] == [*first, _CALLED, TIME_LINE, _user("it's me again")]
     assert await world.stored() == [
         *first,
         _CALLED,
+        TIME_LINE,
         _user("it's me again"),
         _gem_said("Hello again."),
     ]
@@ -604,8 +634,10 @@ async def test_a_message_no_reply_got_through_to_is_stored_before_a_call() -> No
     # The message was sent to the model and is stored as it was sent: the call follows it.
     assert client.frames == [("chat.cut", "…")]
     assert await world.stored() == [
+        TIME_LINE,
         _user("are you there?"),
         _CALLED,
+        TIME_LINE,
         _user("hello"),
         _gem_said("Hello."),
     ]
