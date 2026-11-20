@@ -60,6 +60,8 @@ What that means in practice:
 - **What a gem is told is two parts, the same in a call and in writing.** The Darbar
   text, which by default says how things are here (calls, writing, a cut reply, a late
   tool result), and the gem's own instructions. Both are the user's to change.
+  Nothing in them changes by itself: the date and the time are a line of ours in the
+  conversation, in the time zone the app sends on `chat.send` and `call.start`.
 - **A call is always with a gem.** `call.start` names the gem, and may say who speaks
   first. The gem's config says which model answers: a call cannot ask for another.
 - **A gem has one conversation, called or written to.** A call starts from what is
