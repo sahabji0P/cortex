@@ -155,10 +155,10 @@ class OpenCall:
             await asyncio.gather(self._writing, return_exceptions=True)
         try:
             await self._store()
-        except CallFault:
-            # The call fails for it, and nothing tries again: what could not be stored
-            # is dropped. The placeholders among it are in no stored conversation, so
-            # nothing could take the results of the calls they stand for.
+        except BaseException:
+            # The call fails for it, or this was stopped, and nothing tries again: what
+            # could not be stored is dropped. The placeholders among it are in no stored
+            # conversation, so nothing could take the results of the calls they stand for.
             dropped = self._conversations.log.give_up(self._gem_id)
             unstored = {
                 entry.data["item"]["call_id"]

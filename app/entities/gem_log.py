@@ -137,6 +137,10 @@ class _Gem:
         # it. They are tried again, ahead of anything remembered after them.
         self.unstored: list[LogEntry] = []
         self.fault: Exception | None = None
+        # The number of the last entry handed out when what could not be stored was
+        # given up (see `give_up`). Nothing remembered up to it is held to be tried
+        # again, whatever becomes of a write that was on its way at that moment.
+        self.given_up = -1
         self.dropped = False
 
 
@@ -159,12 +163,16 @@ class LogEntityClass:
         """Read where the gem's log stands, if this is the first use of it."""
         if gem_id in self._gems:
             return
-        # Asked together: this is waited for before a call opens.
-        last, turn, request, changes = await asyncio.gather(
+        # Asked together: this is waited for before a call opens. A turn's or a
+        # request's own entry may have been lost while others that name it were
+        # stored, so its number is read from every entry that could name it.
+        last, turn, changes, *requests = await asyncio.gather(
             self._store.last(gem_id),
-            self._store.last(gem_id, "turn.opened"),
-            self._store.last(gem_id, "request.sent"),
+            self._store.last_turn(gem_id),
             self._store.of_kind(gem_id, "settings.changed"),
+            self._store.last(gem_id, "request.sent"),
+            self._store.last(gem_id, "request.done"),
+            self._store.last(gem_id, "tool.started"),
         )
         settings: dict[str, Any] = {}
         for changed in changes:
@@ -174,8 +182,15 @@ class LogEntityClass:
             gem_id,
             _Gem(
                 seq=0 if last is None else last.seq + 1,
-                turn=0 if turn is None or turn.turn is None else turn.turn,
-                request=0 if request is None else int(request.data.get("request") or 0),
+                turn=turn,
+                request=max(
+                    (
+                        int(named.data.get("request") or 0)
+                        for named in requests
+                        if named is not None
+                    ),
+                    default=0,
+                ),
                 settings=settings,
             ),
         )
@@ -253,15 +268,23 @@ class LogEntityClass:
             raise kept.fault or RuntimeError("the gem's conversation could not be stored")
 
     def give_up(self, gem_id: ObjectId) -> list[LogEntry]:
-        """Drop what the gem remembers and could not be stored. Return what was dropped.
+        """Drop what the gem remembers and is not stored. Return what was dropped.
 
-        Whoever was holding the conversation has failed for it and will not try again.
-        What comes next starts from what is stored, so these must not be stored later.
+        Whoever was holding the conversation has failed for it, or was stopped, and will
+        not try again. What comes next starts from what is stored, so none of this may
+        be stored later: not what was held back, not what still waits to be written,
+        and not what a write on its way at this moment turns out to have failed to
+        store. (If that write succeeds, what it carried is stored, and whoever reads the
+        conversation next waits for it and reads it.)
         """
         kept = self._gems.get(gem_id)
         if kept is None:
             return []
-        dropped, kept.unstored, kept.fault = kept.unstored, [], None
+        waiting = [entry for entry in kept.pending if entry.kind in REMEMBERED]
+        dropped = [*kept.unstored, *waiting]
+        kept.pending = [entry for entry in kept.pending if entry.kind not in REMEMBERED]
+        kept.unstored, kept.fault = [], None
+        kept.given_up = kept.next - 1
         return dropped
 
     def turn_number(self, gem_id: ObjectId) -> int | None:
@@ -312,10 +335,23 @@ class LogEntityClass:
             try:
                 await self._store.write(batch)
                 kept.fault = None
-            except Exception as exc:
+            except BaseException as exc:
                 # What happened is lost. What the gem remembers is not: it is held, and
-                # whoever waits for it to be stored is told (see `stored`).
-                kept.unstored = [entry for entry in batch if entry.kind in REMEMBERED]
+                # whoever waits for it to be stored is told (see `stored`). Unless it
+                # was given up while this write was on its way.
+                kept.unstored = [
+                    entry
+                    for entry in batch
+                    if entry.kind in REMEMBERED and entry.seq > kept.given_up
+                ]
+                if any(entry.kind == "settings.changed" for entry in batch):
+                    # A change that was not written down is not known to the log, so
+                    # the next request says everything it is made with again.
+                    kept.settings = {}
+                if not isinstance(exc, Exception):
+                    # This writer was stopped, not the write refused. What it held is
+                    # kept for the next one, and nobody is told it is stored.
+                    raise
                 if kept.unstored:
                     kept.fault = exc
                 logger.warning(

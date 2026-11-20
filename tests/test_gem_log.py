@@ -11,7 +11,7 @@ from app.entities.conversation_ent import ConversationEntityClass, Stored
 from app.entities.conversation_store import REMEMBERED, ConversationStoreClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
-from app.entities.history import Added, line, stubs
+from app.entities.history import Added, line, said, stubs
 from app.entities.instructions import Layer
 from app.entities.loop import ToolCall
 from app.entities.model import ModelCall, ToolSpec, Usage
@@ -562,6 +562,87 @@ async def test_what_was_given_up_is_never_stored_later() -> None:
 
     # What comes next started from what was stored, so "one" must not turn up after it.
     assert [d["data"]["item"]["content"] for d in _log(docdb)] == ["two"]
+
+
+async def test_what_is_given_up_while_its_write_is_on_its_way_is_not_stored_when_that_fails() -> (
+    None
+):
+    docdb, conversations, gem_id, recording = await _recording()
+    docdb.slow = asyncio.Event()
+    docdb.breaks_after = 0
+
+    recording.remember(_user("given up"))
+    waiting = asyncio.create_task(conversations.stored(gem_id))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    # Whoever waited is stopped while the write is on its way, as when the user hangs
+    # up while a call is opening. Only then does the write fail.
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    docdb.slow.set()
+    await conversations.log.written(gem_id)
+    docdb.slow, docdb.breaks_after = None, None
+
+    # What comes next starts from what is stored, so what was given up stays out.
+    assert (await conversations.load(gem_id)).items == []
+    recording.remember(_user("next"))
+    await conversations.stored(gem_id)
+    assert [d["data"]["item"]["content"] for d in _log(docdb)] == ["next"]
+
+
+async def test_a_writer_that_is_stopped_mid_write_loses_nothing_that_is_remembered() -> None:
+    docdb, conversations, gem_id, recording = await _recording()
+    docdb.slow = asyncio.Event()
+
+    recording.remember(_user("held"))
+    await asyncio.sleep(0)
+    writer = conversations.log._gems[gem_id].writing
+    assert writer is not None
+    writer.cancel()
+    await asyncio.gather(writer, return_exceptions=True)
+    docdb.slow = None
+
+    # Nobody was told it is stored: whoever waits next has it written.
+    await conversations.stored(gem_id)
+    assert [d["data"]["item"]["content"] for d in _log(docdb)] == ["held"]
+
+
+async def test_a_change_that_could_not_be_written_down_is_said_again_in_full() -> None:
+    docdb, conversations, gem_id, recording = await _recording()
+    _described(recording)
+
+    docdb.breaks_after = 0
+    recording.request(None, [], False)
+    await conversations.log.written(gem_id)
+    docdb.breaks_after = None
+    recording.request(None, [], False)
+    await conversations.log.written(gem_id)
+
+    (changed,) = (d["data"] for d in _log(docdb) if d["kind"] == "settings.changed")
+    assert set(changed) == {"model", "instructions", "tools"}
+
+
+async def test_a_turn_whose_opening_was_lost_does_not_give_its_number_away_after_a_restart() -> (
+    None
+):
+    docdb, conversations, gem_id, recording = await _recording()
+
+    # The turn's opening and its request are lost. What the user said in it is stored.
+    docdb.breaks_after = 0
+    turn = recording.turn("user")
+    request = turn.sent([], False)
+    await conversations.log.written(gem_id)
+    docdb.breaks_after = None
+    recording.remember(said("hello", turn=turn.number))
+    request.done("Hi.", [], None)
+    await conversations.stored(gem_id)
+
+    again = ConversationEntityClass(gems=conversations._gems, store=conversations._store)
+    await again.load(gem_id)
+    later = again.recording(gem_id, "chat").turn("user")
+    assert (turn.number, later.number) == (1, 2)
+    assert later.sent([{"role": "user", "content": "hello"}], False).number == 2
 
 
 async def test_a_write_that_stops_part_way_leaves_no_call_without_its_result() -> None:

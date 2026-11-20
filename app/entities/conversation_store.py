@@ -217,6 +217,16 @@ class ConversationStoreClass:
         found = await self._docdb.get_many(LogEntry, filters=filters, sort=[("seq", -1)], limit=1)
         return found[0] if found else None
 
+    async def last_turn(self, gem_id: ObjectId) -> int:
+        """The highest turn any entry of the gem's log names, or 0 if none names one."""
+        found = await self._docdb.get_many(
+            LogEntry,
+            filters={"gem_id": gem_id, "turn": {"$gte": 0}},
+            sort=[("turn", -1)],
+            limit=1,
+        )
+        return found[0].turn or 0 if found else 0
+
     async def of_kind(self, gem_id: ObjectId, kind: str) -> list[LogEntry]:
         """Every entry of one kind, oldest first."""
         return await self._docdb.get_many(
