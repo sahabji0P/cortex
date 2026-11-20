@@ -21,8 +21,8 @@ says when a call starts and when it ends (`mode_line`): before the first turn of
 call, and before the first written turn that follows a call. An empty conversation
 counts as written. Nothing is written when a call ends: the line is written when the
 next turn needs it, and a call that follows a call is marked by its own opening line.
-A line of ours is stored together with the first item that follows it (`settled`), so a
-call in which nothing was said stores nothing.
+A line of ours is final when it is written, like everything else, so it is stored then:
+a call in which nothing was said leaves the line that opened it.
 """
 
 from collections.abc import Iterable, Sequence
@@ -43,7 +43,6 @@ __all__ = [
     "mode_line",
     "of_turn",
     "said",
-    "settled",
     "shown",
     "stubs",
     "told",
@@ -138,19 +137,6 @@ def mode_line(mode: Mode, before: Mode) -> list[Added]:
 def of_turn(added: Iterable[Added], turn: int | None) -> list[Added]:
     """The same items, each saying the turn whose reply it was settled with."""
     return [replace(one, turn=turn) for one in added]
-
-
-def settled(added: Sequence[Added]) -> int:
-    """How many of `added`, from the first, may be stored now.
-
-    All of them up to the last that is not a line of ours: a line is stored together
-    with the first item that follows it, and not at all if nothing does.
-    """
-    for count in range(len(added), 0, -1):
-        item = added[count - 1].item
-        if "role" not in item or item["role"] != "developer":
-            return count
-    return 0
 
 
 def stubs(calls: Iterable[ToolCall], source: Source = "late-result") -> list[Added]:

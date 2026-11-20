@@ -9,13 +9,12 @@ message cuts it, and the call opens once that reply is stored. The call then sta
 the gem's conversation as it is stored, and adds its turns to it. The standing socket
 (`app/routers/link`) holds the call from there.
 
-What the call adds is stored as it is settled, in order, after what was stored before:
-the user's turns, the gem's replies as they were heard, tool calls and their results,
-and our own lines. A line of ours is stored with the first item that follows it, so a
-call in which nothing was said stores nothing. A reply that can still be cut is never
-stored. The database is the truth: if what the call settled
-cannot be stored, the call is not to carry on unsaved, and fails. Everything settled is
-stored by the time the call is closed, and only then is the gem let go.
+What the call adds is stored as it is added, in order, after what was stored before:
+our own lines, what the user says, the gem's replies as they were heard, and tool calls
+with their results. A reply that can still be cut is never stored. The database is the
+truth: if what the call added cannot be stored, the call is not to carry on unsaved,
+and fails. Everything it added is stored by the time the call is closed, and only then
+is the gem let go.
 
 Two kinds of "no" are told apart, because the app is told them apart:
 
@@ -40,7 +39,6 @@ from app.entities.conversation_ent import ConversationEntityClass, Stored
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import Recording
-from app.entities.history import settled
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass, VoiceEvent, VoiceLine
 
@@ -183,8 +181,7 @@ class OpenCall:
         """Store what the conversation has settled and is not stored yet, in order."""
         conversation = self._open()
         async with self._storing:
-            # A line of ours waits for the first item that follows it.
-            ready = settled(conversation.added)
+            ready = len(conversation.added)
             if ready <= self._kept:
                 return
             try:

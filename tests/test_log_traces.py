@@ -255,15 +255,16 @@ async def test_a_call_is_written_down_from_its_opening_to_its_close() -> None:
         "settings.changed",
         "request.sent",
         "request.done",
+        # Our two lines are remembered as they are written.
+        "item",
+        "item",
         # The greeting is settled when the user next speaks, and their turn opens.
         "turn.closed",
         "turn.opened",
         "user.said",
         "request.sent",
         "request.done",
-        # Our two lines, the greeting as it was heard, and what the user said.
-        "item",
-        "item",
+        # The greeting as it was heard, and what the user said.
         "item",
         "item",
         # The last reply is settled when the call ends.
@@ -399,12 +400,15 @@ async def test_a_call_closed_as_it_opens_leaves_no_turn_open_in_the_log() -> Non
         "turn.opened",
         "note.written",
         "turn.closed",
+        "item",
+        "item",
         "call.closed",
     ]
     (closed,) = _shown(log, "turn.closed")
     assert (closed["turn"], closed["outcome"], closed["kept"]) == (1, "cut", None)
-    # Nothing was said, so nothing is remembered.
-    assert await world.stored() == []
+    # Nothing was said. What is remembered is our two lines: the call, and the greeting
+    # that was asked for.
+    assert [item["source"] for item in _shown(log, "item")] == ["call-line", "greeting"]
 
 
 async def test_a_greeting_cut_before_a_word_of_it_is_heard_keeps_nothing() -> None:

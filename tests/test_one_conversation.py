@@ -340,7 +340,7 @@ async def test_a_reply_cut_by_hanging_up_is_stored_as_heard() -> None:
 
 
 @pytest.mark.parametrize("how", ["silence", "greeting unheard"])
-async def test_a_call_in_which_nothing_was_said_stores_nothing(how: str) -> None:
+async def test_a_call_in_which_nothing_was_said_leaves_the_lines_that_opened_it(how: str) -> None:
     never = asyncio.Event()
     unheard = [] if how == "silence" else [[_delta("Hi, how can I help?"), never]]
     world = await _world(*unheard, _said("Hello."), speaks_first=how == "greeting unheard")
@@ -350,15 +350,16 @@ async def test_a_call_in_which_nothing_was_said_stores_nothing(how: str) -> None
         await _read_until(f.conversation, "assistant.word")
     await _hang_up(call, keeping)
 
-    # Our lines wait for something to follow them.
-    assert await world.stored() == []
+    # A line of ours is final when it is written: the call happened, and it is stored.
+    stored = await world.stored()
+    assert stored[0] == _CALLED
+    assert len(stored) == (1 if how == "silence" else 2)
     assert world.conversations._kept == {}
-    # Written to next, the conversation is as it was: written, and empty.
-    sent_in_the_call = len(world.llm.requests)
-    world.llm.requests.clear()
+    # So whatever the call sent the model is what the next request starts with.
+    sent_in_the_call = [request["input"] for request in world.llm.requests]
+    assert sent_in_the_call == ([] if how == "silence" else [stored])
     await world.write("hi")
-    assert sent_in_the_call == (0 if how == "silence" else 1)
-    assert world.llm.requests[-1]["input"] == [_user("hi")]
+    assert world.llm.requests[-1]["input"] == [*stored, _ENDED, _user("hi")]
 
 
 async def test_what_the_user_said_in_a_call_is_stored_though_no_reply_was_heard() -> None:

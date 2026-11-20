@@ -53,7 +53,7 @@ from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass, Stored, Writer, gem_key
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.history import mode_line, settled, shown, told
+from app.entities.history import mode_line, shown, told
 from app.entities.instructions import instruction_layers, joined
 from app.entities.late_results import LateResult
 from app.entities.model import LLM, ModelName, is_openai, model_for
@@ -310,9 +310,7 @@ class ChatEntityClass:
         turn.begin(conversation)
         ended, failure = await _read(conversation, text, at, gem_id, deliver)
         try:
-            # A line of ours with nothing after it is not stored: the next turn writes it.
-            added = conversation.added
-            await self._conversations.add(gem.id, history, added[: settled(added)], "chat")
+            await self._conversations.add(gem.id, history, conversation.added, "chat")
         except Exception as exc:
             # The calls left running are in no stored conversation: nothing could take
             # their results.
