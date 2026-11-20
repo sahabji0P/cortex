@@ -6,8 +6,9 @@ Voice entity: a spoken conversation as a cascade of three services.
                                       Anthropic)
 
 One `VoiceConversation` per call. It starts from the gem's conversation as it is stored,
-since a gem has one conversation whether the user calls it or writes to it, and hands
-back what it adds, as it is settled, for the caller to store (see `call_ent.py`). The
+since a gem has one conversation whether the user calls it or writes to it. Each thing
+it adds to the history it hands to the gem's log at that moment, to be remembered (see
+`gem_log.py`); whoever holds the call sees that it is stored (see `call_ent.py`). The
 speech-to-text service also detects turns:
 
 - `turn.end`   the user finished a sentence. Its transcript starts a reply: the model's
@@ -266,15 +267,12 @@ class VoiceConversation:
         self._standby.ready()
         # The instructions say a line in the conversation marks when a call starts. Every
         # call opens with it, whatever the conversation held before.
-        opening = mode_line("call", last_mode)
-        self._add(*opening)
-        self._record.wrote(opening)
+        self._add(*mode_line("call", last_mode))
         self._listening = asyncio.create_task(self._listen())
         if speaks_first:
             # Otherwise nothing is said until the user has spoken.
             turn = self._record.turn("gem")
-            self._add(line(_GREETING_NOTE, "greeting"))
-            turn.line("greeting", _GREETING_NOTE)
+            self._add(*of_turn([line(_GREETING_NOTE, "greeting")], turn.number))
             self._unstarted = turn
             self._producing = asyncio.create_task(self._respond(turn=turn))
         # A result that came in before the call opened is told in it.
@@ -478,7 +476,6 @@ class VoiceConversation:
             # Their words are final as they stand, so they join the history now.
             self._unanswered = True
             self._add(said(transcript, turn=turn.number))
-            turn.said(transcript)
             self._said, self._said_at = transcript, self._clock()
             self._user_scripts |= _scripts(transcript)
             self._emit("user.final", transcript)
@@ -486,8 +483,7 @@ class VoiceConversation:
             # Nothing was said, yet it stopped a reply that was being heard, which now
             # ends the history. (A reply cut before any of it was heard left the history
             # as it was, and is simply made again.)
-            self._add(line(_NO_WORDS_NOTE, "no-words"))
-            turn.line("no-words", _NO_WORDS_NOTE)
+            self._add(*of_turn([line(_NO_WORDS_NOTE, "no-words")], turn.number))
         self._unstarted = turn
         self._producing = asyncio.create_task(self._respond(turn=turn))
         # A result that comes in from here on, or one left waiting by a turn with no
@@ -561,10 +557,11 @@ class VoiceConversation:
         return trailing and _is_stray(transcript, self._said, self._user_scripts)
 
     def _add(self, *added: Added) -> None:
-        """Add items to the history, where they are final."""
+        """Add items to the history, where they are final, and have the gem remember them."""
         for one in added:
             self._history.append(one.item)
             self.added.append(one)
+            self._record.remember(one)
         if added:
             self.grew.set()
 

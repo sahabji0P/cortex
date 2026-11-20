@@ -33,9 +33,11 @@ _WAIT = 2.0
 class _Conversation:
     """A voice conversation: records what it is fed, and says what the test puts out."""
 
-    def __init__(self) -> None:
+    def __init__(self, record: Any = None) -> None:
         # What `outputs()` yields, in order. None ends it; an exception is raised.
         self.out: asyncio.Queue[VoiceEvent | bytes | Exception | None] = asyncio.Queue()
+        # Where it hands what it adds to the gem's conversation, as the real one does.
+        self.record = record
         # What it adds to the gem's conversation: nothing, unless a test adds to it.
         self.added: list[Any] = []
         self.grew = asyncio.Event()
@@ -124,10 +126,10 @@ class _Line:
         self._voice = voice
         self._asked = asked
 
-    def open(self, *, darbar: str | None = None, **_: object) -> _Conversation:
+    def open(self, *, darbar: str | None = None, record: Any = None, **_: object) -> _Conversation:
         speaks_first, gem, _ = self._voice.asked[self._asked]
         self._voice.asked[self._asked] = (speaks_first, gem, darbar)
-        conversation = _Conversation()
+        conversation = _Conversation(record)
         self._voice.made.append(conversation)
         return conversation
 
@@ -882,15 +884,18 @@ async def test_a_call_start_cuts_a_reply_being_written_and_opens_once_it_is_stor
 
 
 def _said_in_the_call(conversation: _Conversation, *, grew: bool = True) -> None:
-    """The conversation settles a turn and its reply, for the call to store.
+    """The conversation adds what the user said and a reply, and the gem remembers them.
 
-    Without `grew`, the call is not told, and stores them only as it ends.
+    Without `grew`, the call is not told: it learns whether they were stored as it ends.
     """
     now = datetime.now(UTC)
-    conversation.added += [
+    added = [
         Added({"role": "user", "content": "hello"}, now),
-        Added({"role": "assistant", "content": "Hi."}, now),
+        Added({"role": "assistant", "content": "Hi."}, now, source="gem"),
     ]
+    conversation.added += added
+    for one in added:
+        conversation.record.remember(one)
     if grew:
         conversation.grew.set()
 
@@ -950,7 +955,7 @@ async def test_what_a_call_settles_is_stored_as_it_goes_and_the_call_carries_on(
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "Hi."},
     ]
-    assert [d["mode"] for d in _stored_items(setup.chat.docdb)] == ["call", "call"]
+    assert [d["data"]["mode"] for d in _stored_items(setup.chat.docdb)] == ["call", "call"]
     assert "call.failed" not in socket.types()
     await _close(socket, linked)
 

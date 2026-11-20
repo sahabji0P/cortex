@@ -6,10 +6,11 @@ One message in, one reply out. The reply is made by the same loop as a call's (s
 stream `send` returns. A reply can also be written with no new message, as when a late
 search result is to be told.
 
-A conversation is given the history to start from, and hands back what it added to it
-(`added`): the user's turn, the reply as it was delivered, and its tool calls with their
-results. Keeping those is the caller's job. Chat makes one of these for every message,
-from what is stored (see `chat_ent.py`).
+A conversation is given the history to start from. Each thing it adds to it (the user's
+message, the reply as it was delivered, its tool calls with their results) it hands to
+the gem's log at that moment, to be remembered (see `gem_log.py`), and keeps in `added`.
+Seeing that it is stored before the reply's last frame is the caller's job. Chat makes
+one of these for every message, from what is stored (see `chat_ent.py`).
 
 The history follows the same rules as a call's (see `history.py`). In writing, what was
 delivered is what the reader was handed, and the reply runs at most one piece of text
@@ -154,10 +155,8 @@ class WrittenConversation:
         self._record = Recording() if record is None else record
         # After a call, a line says the conversation is written from here on. It is
         # stored with the first item that follows it (see `history.py`).
-        lines = mode_line("chat", last_mode)
-        for added in lines:
+        for added in mode_line("chat", last_mode):
             self._add(added)
-        self._record.wrote(lines)
         self._writing = False
         self._cut = False
         self._out: asyncio.Queue[_Handed] | None = None
@@ -192,7 +191,6 @@ class WrittenConversation:
         if text is not None:
             # Final as it stands, so it joins the history now, whatever the reply does.
             self._add(said(text, at, turn.number))
-            turn.said(text)
         out: asyncio.Queue[_Handed] = asyncio.Queue()
         self._out = out
         reply = Reply(_Page(out))
@@ -297,5 +295,7 @@ class WrittenConversation:
             self._add(added)
 
     def _add(self, added: Added) -> None:
+        """Add an item to the history, where it is final, and have the gem remember it."""
         self._history.append(added.item)
         self.added.append(added)
+        self._record.remember(added)

@@ -1,13 +1,14 @@
-"""The gem's log: its order, and what it holds beside the items of the conversation."""
+"""The gem's log: its order, what a gem remembers in it, and what else it holds."""
 
 import asyncio
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import pytest
 from bson import ObjectId
 
 from app.entities.conversation_ent import ConversationEntityClass, Stored
-from app.entities.conversation_store import ConversationStoreClass
+from app.entities.conversation_store import REMEMBERED, ConversationStoreClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, line, stubs
@@ -37,7 +38,11 @@ async def test_items_are_numbered_in_the_order_they_are_added() -> None:
     stored = await conversations.add(gem_id, Stored([]), [_user("one"), _user("two")], "chat")
     await conversations.add(gem_id, stored, [_user("three")], "chat")
 
-    assert [(d["seq"], d["place"]) for d in _stored_items(docdb)] == [(0, 0), (1, 1), (2, 2)]
+    assert [(d["seq"], d["kind"]) for d in _stored_items(docdb)] == [
+        (0, "user.said"),
+        (1, "user.said"),
+        (2, "user.said"),
+    ]
 
 
 async def test_each_gem_has_its_own_numbers() -> None:
@@ -77,7 +82,7 @@ async def test_two_who_open_a_gems_log_at_once_do_not_hand_out_a_number_twice() 
     assert list(log.take(gem_id, 2)) == [2, 3]
 
 
-async def test_an_item_is_stored_with_who_wrote_it() -> None:
+async def test_what_is_remembered_is_stored_as_the_kind_it_is_with_who_wrote_it() -> None:
     docdb, _, conversations = await _conversations()
     late = ToolCall("late_1", "web_search", '{"deferred_result_for": "c1"}', output="Sunny.")
 
@@ -93,16 +98,25 @@ async def test_an_item_is_stored_with_who_wrote_it() -> None:
         "call",
     )
 
-    assert [d["source"] for d in _stored_items(docdb)] == [
-        "call-line",
-        "user",
-        "gem",
-        "late-result",
-        "late-result",
+    assert [(d["kind"], d["data"]["source"]) for d in _stored_items(docdb)] == [
+        ("note.written", "call-line"),
+        ("user.said", "user"),
+        ("gem.said", "gem"),
+        ("tool.called", "late-result"),
+        ("tool.result", "late-result"),
     ]
+    # Every entry has one shape: the item is in what is known of it, as the model is
+    # sent it, and a field with nothing to say is left out.
+    said = _stored_items(docdb)[1]
+    assert set(said) == {"_id", "gem_id", "kind", "seq", "at", "turn", "data"}
+    assert said["data"] == {
+        "item": {"role": "user", "content": "hello"},
+        "mode": "call",
+        "source": "user",
+    }
 
 
-# ---- what happened, beside the items
+# ---- what happened, beside what is remembered
 
 
 def _log(docdb: Any) -> list[dict[str, Any]]:
@@ -144,37 +158,37 @@ async def _recording(
 async def test_what_happens_and_what_is_remembered_share_one_order() -> None:
     docdb, conversations, gem_id, recording = await _recording()
 
+    # As a conversation does it: each thing is handed over the moment it is final.
     turn = recording.turn("user")
-    turn.said("hello")
+    recording.remember(_user("hello"))
     request = turn.sent([{"role": "user", "content": "hello"}], False)
     request.first()
     request.done("Hi.", [], Usage(input=10, cache_read=0, cache_write=0, output=2))
+    recording.remember(Added({"role": "assistant", "content": "Hi."}, _NOW, source="gem"))
     turn.closed(finished=True, kept=None)
-    await conversations.add(
-        gem_id,
-        Stored([]),
-        [_user("hello"), Added({"role": "assistant", "content": "Hi."}, _NOW, source="gem")],
-        "chat",
-    )
+    await conversations.stored(gem_id)
 
     assert _kinds(docdb) == [
         "turn.opened",
         "user.said",
         "request.sent",
         "request.done",
+        "gem.said",
         "turn.closed",
-        "item",
-        "item",
     ]
-    assert [d["seq"] for d in _log(docdb)] == list(range(7))
-    # Only the items are the conversation.
-    assert [item.place for item in await conversations._store.load(gem_id)] == [0, 1]
+    assert [d["seq"] for d in _log(docdb)] == list(range(6))
+    # Only the entries of the kinds a gem remembers are its conversation.
+    assert [entry.kind for entry in await conversations._store.load(gem_id)] == [
+        "user.said",
+        "gem.said",
+    ]
 
 
 async def test_a_request_is_written_down_with_its_tokens_and_what_they_cost() -> None:
     docdb, conversations, _, recording = await _recording()
     turn = _described(recording).turn("user")
 
+    recording.remember(_user("hello"))
     request = turn.sent([{"role": "user", "content": "hello"}], True)
     request.first()
     request.done(
@@ -185,14 +199,8 @@ async def test_a_request_is_written_down_with_its_tokens_and_what_they_cost() ->
     await conversations.log.written()
 
     sent, done = (d for d in _log(docdb) if d["kind"].startswith("request."))
-    assert sent["data"] == {
-        "request": 1,
-        "attempt": 1,
-        "think": True,
-        "kept": 0,
-        "added": [{"role": "user", "content": "hello"}],
-        "count": 1,
-    }
+    # A request holds none of what it was sent: only how many items that was.
+    assert sent["data"] == {"request": 1, "attempt": 1, "think": True, "count": 1}
     assert sent["turn"] == done["turn"] == 1
     data = done["data"]
     assert data["first_token_at"] is not None
@@ -213,6 +221,7 @@ async def test_a_request_cut_while_the_model_produced_has_no_usage_and_no_cost()
     docdb, conversations, _, recording = await _recording()
     turn = _described(recording).turn("user")
 
+    recording.remember(_user("hello"))
     turn.sent([{"role": "user", "content": "hello"}], False).stopped(
         "Once upon", asyncio.CancelledError()
     )
@@ -232,30 +241,35 @@ async def test_a_request_cut_while_the_model_produced_has_no_usage_and_no_cost()
     assert (failed["outcome"], failed["error"]) == ("failed", "the model call failed")
 
 
-async def test_a_request_says_what_it_adds_to_the_gems_request_before_it() -> None:
-    docdb, conversations, _, recording = await _recording()
-    first: list[Any] = [{"role": "user", "content": "one"}]
-    grown = [*first, {"role": "assistant", "content": "Hi."}, {"role": "user", "content": "two"}]
-    # The user's open turn gained a line: the last item is not the one sent before.
-    joined = [*grown[:2], {"role": "user", "content": "two\nthree"}]
+async def test_a_request_was_sent_what_the_gem_remembered_before_it() -> None:
+    docdb, conversations, gem_id, recording = await _recording()
+    one: list[Any] = [{"role": "user", "content": "one"}]
+    three = [*one, {"role": "assistant", "content": "Hi."}, {"role": "user", "content": "two"}]
 
     turn = recording.turn("user")
-    for items in (first, grown, joined, joined):
-        turn.sent(items, False)
-    await conversations.log.written()
+    recording.remember(_user("one"))
+    turn.sent(one, False)
+    recording.remember(Added({"role": "assistant", "content": "Hi."}, _NOW, source="gem"))
+    recording.remember(_user("two"))
+    turn.sent(three, False)
+    # The same again, as when a reply was cut before it left anything.
+    turn.sent(three, False)
+    await conversations.stored(gem_id)
 
-    sent = [d["data"] for d in _log(docdb) if d["kind"] == "request.sent"]
-    assert [(d["kept"], d["added"], d["count"]) for d in sent] == [
-        (0, first, 1),
-        (1, grown[1:], 3),
-        (2, joined[2:], 3),
-        (3, [], 3),
-    ]
+    sent = [d for d in _log(docdb) if d["kind"] == "request.sent"]
+    assert [d["data"]["count"] for d in sent] == [1, 3, 3]
+    # Nothing of it is written a second time: what a request was sent is every
+    # remembered entry before it, in order.
+    for request, items in zip(sent, (one, three, three), strict=True):
+        before = [d for d in _log(docdb) if d["kind"] in REMEMBERED and d["seq"] < request["seq"]]
+        assert [d["data"]["item"] for d in before] == items
+    assert all(set(d["data"]) == {"request", "attempt", "think", "count"} for d in sent)
 
 
 async def test_a_change_of_model_instructions_or_tools_is_written_before_the_request() -> None:
     docdb, conversations, _, recording = await _recording()
     items: list[Any] = [{"role": "user", "content": "hello"}]
+    recording.remember(_user("hello"))
 
     _described(recording).turn("user").sent(items, False)
     # The same again: nothing changed, so nothing is written but the request.
@@ -265,7 +279,7 @@ async def test_a_change_of_model_instructions_or_tools_is_written_before_the_req
     _described(recording, model="Haiku 5.5", layers=changed).turn("user").sent(items, False)
     await conversations.log.written()
 
-    assert [k for k in _kinds(docdb) if k != "turn.opened"] == [
+    assert [k for k in _kinds(docdb) if k not in ("turn.opened", "user.said")] == [
         "settings.changed",
         "request.sent",
         "request.sent",
@@ -313,6 +327,7 @@ async def test_the_way_to_a_provider_is_read_again_for_every_request() -> None:
 
 async def test_after_a_restart_nothing_is_said_to_have_changed_and_the_numbers_carry_on() -> None:
     docdb, conversations, gem_id, recording = await _recording()
+    recording.remember(_user("one"))
     _described(recording).turn("user").sent([{"role": "user", "content": "one"}], False)
     await conversations.log.written()
 
@@ -326,8 +341,6 @@ async def test_after_a_restart_nothing_is_said_to_have_changed_and_the_numbers_c
     assert [d["turn"] for d in _log(docdb) if d["kind"] == "turn.opened"] == [1, 2]
     requests = [d["data"] for d in _log(docdb) if d["kind"] == "request.sent"]
     assert [d["request"] for d in requests] == [1, 2]
-    # What the request before was sent is not kept across a restart: it is sent in full.
-    assert requests[1]["kept"] == 0
 
 
 async def test_a_tool_call_is_written_down_when_it_starts_and_when_it_ends() -> None:
@@ -456,28 +469,22 @@ async def test_whoever_listens_is_told_each_entry_as_it_is_written_down() -> Non
 
     conversations.log.listen(listener)
     recording.call_opened()
-    recording.line("call-line", "The user has called you.")
-    await conversations.add(gem_id, Stored([]), [_user("hello")], "call")
+    recording.remember(line("The user has called you.", "call-line"))
+    recording.remember(_user("hello"))
     conversations.log.ignore(listener)
     recording.call_closed()
     await asyncio.sleep(0)
 
+    # Each is told the moment it is numbered, in order, whatever kind it is.
     assert [gem for gem, _ in heard] == [str(gem_id)] * 3
-    opened, note, item = (entry for _, entry in heard)
-    assert (opened["seq"], opened["kind"], opened["turn"]) == (0, "call.opened", None)
+    opened, note, said = (entry for _, entry in heard)
+    assert [entry["seq"] for _, entry in heard] == [0, 1, 2]
+    assert (opened["kind"], opened["turn"]) == ("call.opened", None)
     assert opened["at"].endswith("Z")
-    assert (note["kind"], note["reason"], note["text"]) == (
-        "note.written",
-        "call-line",
-        "The user has called you.",
-    )
-    assert (item["kind"], item["place"], item["source"], item["mode"]) == (
-        "item",
-        0,
-        "user",
-        "call",
-    )
-    assert item["item"] == {"role": "user", "content": "hello"}
+    assert (note["kind"], note["source"], note["mode"]) == ("note.written", "call-line", "call")
+    assert note["item"] == {"role": "developer", "content": "The user has called you."}
+    assert (said["kind"], said["source"], said["mode"]) == ("user.said", "user", "call")
+    assert said["item"] == {"role": "user", "content": "hello"}
 
 
 async def test_a_log_that_cannot_be_written_fails_nothing() -> None:
@@ -485,13 +492,70 @@ async def test_a_log_that_cannot_be_written_fails_nothing() -> None:
     docdb.breaks_after = 0
 
     turn = recording.turn("user")
-    turn.said("hello")
+    turn.sent([], False)
     await conversations.log.written()
     docdb.breaks_after = None
     await conversations.add(gem_id, Stored([]), [_user("hello")], "chat")
 
-    # What happened was lost. The item is stored, after it in the order.
-    assert [(d["kind"], d["seq"]) for d in _log(docdb)] == [("item", 2)]
+    # What happened was lost, and nothing failed for it. What is remembered is stored,
+    # after it in the order.
+    assert [(d["kind"], d["seq"]) for d in _log(docdb)] == [("user.said", 2)]
+
+
+async def test_what_is_remembered_and_could_not_be_stored_is_tried_again_in_order() -> None:
+    docdb, conversations, gem_id, recording = await _recording()
+    docdb.breaks_after = 0
+
+    recording.remember(_user("one"))
+    await conversations.log.written()
+    # Whoever waits for it to be stored is told it is not.
+    with pytest.raises(ConnectionError):
+        await conversations.log.stored(gem_id)
+    assert _log(docdb) == []
+
+    # The database is back. What is added now is not stored ahead of what was held.
+    docdb.breaks_after = None
+    recording.remember(_user("two"))
+    await conversations.log.stored(gem_id)
+
+    assert [(d["seq"], d["data"]["item"]["content"]) for d in _log(docdb)] == [
+        (0, "one"),
+        (1, "two"),
+    ]
+
+
+async def test_what_was_given_up_is_never_stored_later() -> None:
+    docdb, conversations, gem_id, recording = await _recording()
+    docdb.breaks_after = 0
+
+    recording.remember(_user("one"))
+    # Whoever holds the conversation fails for it, and does not try again.
+    with pytest.raises(ConnectionError):
+        await conversations.stored(gem_id)
+    docdb.breaks_after = None
+    recording.remember(_user("two"))
+    await conversations.stored(gem_id)
+
+    # What comes next started from what was stored, so "one" must not turn up after it.
+    assert [d["data"]["item"]["content"] for d in _log(docdb)] == ["two"]
+
+
+async def test_a_write_that_stops_part_way_leaves_no_call_without_its_result() -> None:
+    docdb, conversations, gem_id, recording = await _recording()
+    call = ToolCall("c1", "web_search", "{}", output="Sunny.")
+    # The write stops after its first entry.
+    docdb.breaks_after = 1
+
+    for added in stubs([call], "gem"):
+        recording.remember(added)
+    with pytest.raises(ConnectionError):
+        await conversations.log.stored(gem_id)
+
+    # What it did put in was taken out again.
+    assert _log(docdb) == []
+    docdb.breaks_after = None
+    await conversations.log.stored(gem_id)
+    assert _kinds(docdb) == ["tool.called", "tool.result"]
 
 
 async def test_nothing_is_written_of_a_gem_that_is_gone() -> None:
@@ -500,8 +564,9 @@ async def test_nothing_is_written_of_a_gem_that_is_gone() -> None:
     await conversations.log.written()
 
     assert await conversations.gone(gem_id)
-    recording.turn("user").said("hello")
-    await conversations.log.written()
+    recording.turn("user")
+    recording.remember(_user("hello"))
+    await conversations.stored(gem_id)
 
     assert _log(docdb) == []
 
@@ -516,9 +581,10 @@ async def test_deleting_a_gem_ends_its_log_for_whatever_was_still_running() -> N
     await conversations.log.written()
 
     await gems.delete(str(gem.id))
-    # A tool call that outlived the gem ends now.
-    turn.said("too late")
-    await conversations.log.written()
+    # A tool call that outlived the gem ends now, and a reply adds what it was writing.
+    turn.sent([], False)
+    recording.remember(_user("too late"))
+    await conversations.stored(gem.id)
 
     assert _log(docdb) == []
 
@@ -527,7 +593,7 @@ async def test_a_conversation_made_with_no_log_writes_nothing_down() -> None:
     recording = Recording()
 
     turn = recording.turn("user")
-    turn.said("hello")
+    recording.remember(_user("hello"))
     request = turn.sent([{"role": "user", "content": "hello"}], False)
     request.done("Hi.", [], None)
     turn.closed(finished=True, kept=None)

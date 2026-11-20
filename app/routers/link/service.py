@@ -446,9 +446,9 @@ def _trimmed(entry: dict[str, Any]) -> dict[str, Any]:
     """A log entry as the link carries it: a long text or list in it cut short, and said to be.
 
     The link carries a call's audio too, and a client slow to take one frame counts as
-    gone. So a tool's long result, or a request's long list of items (the first request
-    after a restart is sent the gem's whole conversation), is not sent whole: the entry
-    says `partial`, and the whole of it is read over its route.
+    gone. So a long text, such as a tool's result or a long message, or a long list,
+    such as a gem's tools, is not sent whole: the entry says `partial`, and the whole of
+    it is read over its route.
     """
     cut = False
 

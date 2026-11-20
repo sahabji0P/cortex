@@ -1,31 +1,39 @@
 """
-Gem log entity: what happens with each gem, written down as it happens.
+Gem log entity: everything of a gem, written down as it happens, in one list.
 
-A gem's log holds two kinds of entry in one order (see `conversation_store.py`): the
-items the gem remembers, which are what a model is sent, and what happened, which no
-model is ever sent. This is where what happened is written down, and where every entry
-gets its number.
+A gem's log is one list of entries, in one order (see `conversation_store.py`). Each
+thing is written once, as the kind of entry it is, at the moment it is final. This is
+where every entry gets its number, and the one place entries are written from.
 
-What happened, by `kind`. Each belongs to a turn unless it says otherwise:
+Some kinds are what the gem remembers: what the user said, a line of ours, what the gem
+said, a tool call and its result (`conversation_store.REMEMBERED`). Each holds one item
+as a model is sent it, and the gem's conversation is those entries in order. A
+conversation hands each one over the moment it joins its history (`Recording.remember`),
+so the log's order is the order the model was sent things in.
+
+The other kinds are what happened. No model is ever sent them. Each belongs to a turn
+unless it says otherwise:
 
 - `call.opened`, `call.closed`   a call began, or ended. No turn. Writing has neither.
 - `turn.opened`      a reply was asked for. `by` says by what: the `user`, the `gem`
                      speaking first, or a `late_result`. `mode` is `call` or `chat`.
-- `user.said`        the user's words as they arrived, typed or spoken.
-- `note.written`     a line of ours was put in front of the model. `reason` says which
-                     (see `history.Source`). The line that opens a call has no turn.
 - `settings.changed` the model, the instructions or the tools differ from the gem's
                      last request. Only the parts that changed, each in full.
-- `request.sent`     a request went to the model. `kept` and `added` say what it was
-                     sent: the first `kept` items of the gem's request before it, then
-                     `added`. `count` is how many that makes.
+- `request.sent`     a request went to the model. It was sent everything the gem
+                     remembered by then: every remembered entry before this one, and
+                     nothing else. `count` is how many that is.
 - `request.done`     how the request ended: `done`, `failed`, or `cut` while the model
-                     was still producing. The text produced in full, the tool calls,
-                     when the first of it came, the tokens charged for and their cost.
+                     was still producing. Everything the model produced, in full: its
+                     text and its tool calls. When the first of it came, the tokens
+                     charged for and their cost.
 - `tool.started`, `tool.done`    a tool call ran. A call that outlives its reply ends
                      later, in order of time, and still names the turn that made it.
 - `turn.closed`      the reply was settled into what the gem remembers: `finished`,
                      `cut` or `failed`, and for a cut reply the text that is kept.
+
+What the model produced and what the gem remembers of it are two things, and both are
+written: `request.done` holds all of a reply's text, which is what was charged for, and
+a `gem.said` holds what was delivered of it, which may be less.
 
 Times: an entry's `at` is when it was written down, which is when it happened, with one
 exception. A reply is settled when the next thing happens (in a call: when the user next
@@ -44,11 +52,18 @@ only thing that adds to a log. A tool call that outlives its reply adds to it wh
 nobody holds the gem. A gem's numbers are read from the database the first time the gem
 is used, and counted in memory from then on. This process is the only one that writes.
 
-Writing down what happened never holds a reply up and never fails one. Each entry is
-numbered and told to whoever listens at once, and written to the database behind the
-reply's back, in order. Items are different: they are stored before the reply's last
-frame, as they always were, and what happened before them is written first. If the
-process stops, the last moment of what happened can be lost. An item cannot.
+Writing: every entry is numbered and told to whoever listens at once, and written to
+the database behind the reply's back, in order. Nothing waits for it, with one
+exception: whoever holds a conversation waits, before it lets the gem go or sends a
+reply's last frame, until what the gem remembers is stored (`stored`). The two kinds of
+entry differ in what a failed write means:
+
+- What happened is lost, and nothing fails for it. Writing it down never holds a reply
+  up and never fails one.
+- What the gem remembers is kept and tried again, in order, and `stored` raises while it
+  is not stored. Nothing remembered is ever stored ahead of something remembered before
+  it, so what is stored of a conversation is always a start of it, and a tool call is
+  never stored without its result.
 """
 
 import asyncio
@@ -63,13 +78,13 @@ from typing import Any, Literal
 from bson import ObjectId
 
 from app.entities.conversation_store import (
-    ConversationItem,
+    REMEMBERED,
     ConversationStoreClass,
     LogEntry,
-    as_shown,
+    remembered,
     stamp,
 )
-from app.entities.history import Added, Mode, Source
+from app.entities.history import Added, Mode
 from app.entities.instructions import Layer
 from app.entities.loop import ToolCall
 from app.entities.model import MODELS, Item, ModelCall, ModelName, Usage
@@ -97,11 +112,13 @@ class _Gem:
         self.request = request  # the last request's number
         # The model, instructions and tools as they were last written down.
         self.settings = settings
-        # The items the gem's last request was sent, to say what the next one adds.
-        self.sent: list[Item] = []
-        # What happened and is not written to the database yet, in order.
+        # Entries not written to the database yet, in order.
         self.pending: list[LogEntry] = []
         self.writing: asyncio.Task[None] | None = None
+        # Remembered entries that a write failed to store, in order, and what stopped
+        # it. They are tried again, ahead of anything remembered after them.
+        self.unstored: list[LogEntry] = []
+        self.fault: Exception | None = None
         self.dropped = False
 
 
@@ -133,14 +150,14 @@ class LogEntityClass:
         )
         settings: dict[str, Any] = {}
         for changed in changes:
-            settings.update(_data(changed.shown()))
+            settings.update(changed.data)
         # Another task may have read it, and counted on, while this one waited.
         self._gems.setdefault(
             gem_id,
             _Gem(
                 seq=0 if last is None else last.seq + 1,
                 turn=0 if turn is None or turn.turn is None else turn.turn,
-                request=0 if request is None else int(request.shown().get("request") or 0),
+                request=0 if request is None else int(request.data.get("request") or 0),
                 settings=settings,
             ),
         )
@@ -158,6 +175,7 @@ class LogEntityClass:
         if kept is not None:
             kept.dropped = True
             kept.pending = []
+            kept.unstored = []
 
     def recording(self, gem_id: ObjectId, mode: Mode) -> "Recording":
         """What one conversation with the gem, in `mode`, writes down. The log must be open."""
@@ -169,35 +187,64 @@ class LogEntityClass:
         Nothing is written of a gem whose log is not open: one that was deleted.
         """
         try:
-            kept = self._gems.get(gem_id)
-            if kept is None:
+            if gem_id not in self._gems:
                 return
             (seq,) = self.take(gem_id)
-            entry = LogEntry(
-                gem_id=gem_id, kind=kind, seq=seq, at=datetime.now(UTC), turn=turn, data=data
+            self._add(
+                LogEntry(
+                    gem_id=gem_id, kind=kind, seq=seq, at=datetime.now(UTC), turn=turn, data=data
+                )
             )
-            kept.pending.append(entry)
-            self._tell(gem_id, as_shown(entry.seq, entry.at, entry.kind, entry.turn, entry.data))
-            if kept.writing is None or kept.writing.done():
-                kept.writing = asyncio.get_running_loop().create_task(self._write(gem_id, kept))
         except Exception:
             logger.warning("a %s of gem %s could not be written down", kind, gem_id, exc_info=True)
 
-    def stored(self, items: Sequence[ConversationItem]) -> None:
-        """Items have been stored: tell whoever listens."""
-        for item in items:
-            if item.seq is not None:
-                self._tell(
-                    item.gem_id, as_shown(item.seq, item.at, "item", item.turn, _item_fields(item))
-                )
+    def remember(self, gem_id: ObjectId, added: Added, mode: Mode) -> None:
+        """One item has joined the gem's history, in `mode`: it is remembered from here on.
+
+        It is numbered now, so the log has it in the order the model is sent it, and
+        written behind the caller's back (see `stored`). Nothing is remembered of a gem
+        whose log is not open: one that was deleted, and its conversation with it.
+        """
+        if gem_id not in self._gems:
+            return
+        (seq,) = self.take(gem_id)
+        self._add(remembered(gem_id, seq, added, mode))
 
     async def written(self, gem_id: ObjectId | None = None) -> None:
-        """Wait until what happened so far is in the database: of one gem, or of every gem."""
+        """Wait until every entry so far has been written, or could not be: of one gem, or all."""
         for key, kept in list(self._gems.items()):
             if gem_id is not None and key != gem_id:
                 continue
             while kept.writing is not None and not kept.writing.done():
                 await asyncio.wait({kept.writing})
+
+    async def stored(self, gem_id: ObjectId) -> None:
+        """Wait until everything the gem remembers so far is in the database.
+
+        Raises what stopped it, if something of it could not be stored. It is tried
+        once more first, and stays to be tried again: see `give_up`.
+        """
+        kept = self._gems.get(gem_id)
+        if kept is None:
+            return
+        await self.written(gem_id)
+        if kept.unstored:
+            self._start_writing(gem_id, kept)
+            await self.written(gem_id)
+        if kept.unstored:
+            raise kept.fault or RuntimeError("the gem's conversation could not be stored")
+
+    def give_up(self, gem_id: ObjectId) -> list[LogEntry]:
+        """Drop what the gem remembers and could not be stored. Return what was dropped.
+
+        Whoever was holding the conversation has failed for it and will not try again.
+        What comes next starts from what is stored, so these must not be stored later.
+        """
+        kept = self._gems.get(gem_id)
+        if kept is None:
+            return []
+        dropped, kept.unstored, kept.fault = kept.unstored, [], None
+        return dropped
 
     def turn_number(self, gem_id: ObjectId) -> int | None:
         kept = self._gems.get(gem_id)
@@ -224,31 +271,41 @@ class LogEntityClass:
         kept.settings.update(changed)
         return changed
 
-    def sent(self, gem_id: ObjectId, items: Sequence[Item]) -> tuple[int, list[Item]]:
-        """What a request adds to the gem's last: how many items it keeps, and the rest."""
-        kept = self._gems.get(gem_id)
-        if kept is None:
-            return 0, list(items)
-        same = 0
-        for before, now in zip(kept.sent, items, strict=False):
-            if before != now:
-                break
-            same += 1
-        kept.sent = list(items)
-        return same, list(items[same:])
+    def _add(self, entry: LogEntry) -> None:
+        """Tell whoever listens of an entry, and have it written."""
+        kept = self._gems[entry.gem_id]
+        kept.pending.append(entry)
+        self._tell(entry.gem_id, entry.shown())
+        self._start_writing(entry.gem_id, kept)
+
+    def _start_writing(self, gem_id: ObjectId, kept: _Gem) -> None:
+        if kept.writing is None or kept.writing.done():
+            kept.writing = asyncio.get_running_loop().create_task(self._write(gem_id, kept))
 
     async def _write(self, gem_id: ObjectId, kept: _Gem) -> None:
-        while kept.pending:
-            batch, kept.pending = kept.pending, []
+        # What could not be stored before is tried again each time this runs, once.
+        again = True
+        while kept.pending or (again and kept.unstored):
+            again = False
+            # In order, and what was held back first: nothing remembered is stored
+            # ahead of something remembered before it.
+            held, kept.unstored = kept.unstored, []
+            batch, kept.pending = [*held, *kept.pending], []
             try:
-                await self._store.note(batch)
-            except Exception:
-                # What happened is lost. The gem's replies and its items are not.
+                await self._store.write(batch)
+                kept.fault = None
+            except Exception as exc:
+                # What happened is lost. What the gem remembers is not: it is held, and
+                # whoever waits for it to be stored is told (see `stored`).
+                kept.unstored = [entry for entry in batch if entry.kind in REMEMBERED]
+                if kept.unstored:
+                    kept.fault = exc
                 logger.warning(
                     "%d entries of gem %s's log could not be written", len(batch), gem_id
                 )
             if kept.dropped:
                 # The gem was deleted while this was being written: it goes too.
+                kept.unstored = []
                 with contextlib.suppress(Exception):
                     await self._store.forget(gem_id)
 
@@ -264,23 +321,6 @@ def _told(telling: asyncio.Task[None]) -> None:
     """A listener that has gone or failed is no reason to stop writing down."""
     if not telling.cancelled():
         telling.exception()
-
-
-def _data(entry: dict[str, Any]) -> dict[str, Any]:
-    """An entry's own fields, without the ones every entry has."""
-    return {key: value for key, value in entry.items() if key not in ("seq", "at", "kind", "turn")}
-
-
-def _item_fields(item: ConversationItem) -> dict[str, Any]:
-    fields = {
-        "place": item.place,
-        "item": item.item,
-        "source": item.source,
-        "mode": item.mode,
-        "mark": item.mark,
-        "shown": item.shown,
-    }
-    return {key: value for key, value in fields.items() if value is not None}
 
 
 def _now() -> str:
@@ -343,16 +383,10 @@ class Recording:
     def call_closed(self) -> None:
         self.note("call.closed", None, {})
 
-    def line(self, source: Source, text: str, turn: "TurnRecord | None" = None) -> None:
-        """A line of ours was put in front of the model."""
-        number = None if turn is None else turn.number
-        self.note("note.written", number, {"reason": source, "text": text})
-
-    def wrote(self, lines: Sequence[Added]) -> None:
-        """Lines of ours were added to a history, outside any turn: write each down."""
-        for one in lines:
-            if "role" in one.item:
-                self.line(one.source, one.item["content"])
+    def remember(self, added: Added) -> None:
+        """An item has joined the conversation's history: the gem remembers it from here on."""
+        if self._log is not None and self._gem_id is not None:
+            self._log.remember(self._gem_id, added, self.mode)
 
     def turn(self, by: OpenedBy) -> "TurnRecord":
         """A reply is asked for: open its turn."""
@@ -368,7 +402,11 @@ class Recording:
             self._log.note(self._gem_id, kind, turn, data)
 
     def request(self, turn: int | None, items: Sequence[Item], think: bool) -> "RequestRecord":
-        """A request is about to be sent: write down what changed, and what it is sent."""
+        """A request is about to be sent: write down what changed, and that it is sent.
+
+        It is sent `items`, which are what the gem remembers by now: every one of them
+        is in the log already, before this entry.
+        """
         number = None
         with contextlib.suppress(Exception):
             if self._log is not None and self._gem_id is not None:
@@ -377,18 +415,10 @@ class Recording:
                     if changed:
                         self.note("settings.changed", turn, changed)
                 number = self._log.request_number(self._gem_id)
-                kept, added = self._log.sent(self._gem_id, items)
                 self.note(
                     "request.sent",
                     turn,
-                    {
-                        "request": number,
-                        "attempt": 1,
-                        "think": think,
-                        "kept": kept,
-                        "added": added,
-                        "count": len(items),
-                    },
+                    {"request": number, "attempt": 1, "think": think, "count": len(items)},
                 )
         return RequestRecord(self, turn, number, self._model)
 
@@ -406,13 +436,6 @@ class TurnRecord:
         self._request: int | None = None
         self._error: str | None = None
         self._closed = False
-
-    def said(self, text: str) -> None:
-        """The user's words arrived."""
-        self._recording.note("user.said", self.number, {"text": text, "mode": self._recording.mode})
-
-    def line(self, source: Source, text: str) -> None:
-        self._recording.line(source, text, self)
 
     def sent(self, items: Sequence[Item], think: bool) -> "RequestRecord":
         request = self._recording.request(self.number, items, think)

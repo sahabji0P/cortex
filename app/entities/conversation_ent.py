@@ -3,8 +3,9 @@ Conversation entity: each gem's one conversation, and who is adding to it.
 
 A gem is one entity with one conversation, whether the user calls it or writes to it.
 The database is the truth (see `conversation_store.py`): every written reply and every
-call starts from what is stored, and what each adds is stored after it, in order. What
-is kept in memory, for each gem, is a `GemConversation`:
+call starts from what the gem's log remembers, and what each adds is remembered after
+it, in order, the moment it joins the history (see `gem_log.py`). What is kept in
+memory, for each gem, is a `GemConversation`:
 
 - who is adding to the conversation now: one writer at a time, a reply being written or
   a call. A call holds the gem from when it starts opening until what it added is
@@ -19,7 +20,6 @@ before the next reply is made.
 """
 
 import asyncio
-import contextlib
 import json
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -29,7 +29,7 @@ from typing import Any, Literal, Protocol
 from bson import ObjectId
 
 from app.core.errors import NotFoundError
-from app.entities.conversation_store import ConversationItem, ConversationStoreClass
+from app.entities.conversation_store import ConversationStoreClass, Remembered
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, Mode, stubs
@@ -185,17 +185,20 @@ class ConversationEntityClass:
         """
         if not await self._gems.exists(gem_id):
             raise NotFoundError("Gem")
+        found = ObjectId(gem_id)
+        # What has just been added is on its way to the database: it is waited for.
+        await self.log.written(found)
         shown: list[Message] = []
-        for stored in await self._store.load(ObjectId(gem_id)):
-            item = stored.item
+        for stored in await self._store.load(found):
+            item = stored.data.item
             if "role" in item:
                 if item["role"] == "user":
                     shown.append(Message("user", item["content"], stored.at))
                 elif item["role"] == "assistant":
                     shown.append(Message("gem", item["content"], stored.at))
             # Stubs and cancels are stored with nothing to show.
-            elif item["type"] == "function_call" and stored.shown is not None:
-                shown.append(Message("tool", stored.shown, stored.at))
+            elif item["type"] == "function_call" and stored.data.shown is not None:
+                shown.append(Message("tool", stored.data.shown, stored.at))
         return shown
 
     async def load(self, gem_id: ObjectId, *, told: Sequence[LateResult] = ()) -> Stored:
@@ -207,44 +210,45 @@ class ConversationEntityClass:
         """
         # Whoever reads the conversation is about to add to the gem's log.
         await self.log.open(gem_id)
+        # What was added last is on its way to the database: it is waited for.
+        await self.log.written(gem_id)
         found = await self._store.load(gem_id)
-        stored = Stored([entry.item for entry in found], found[-1].mode if found else "chat")
+        mode = found[-1].data.mode if found else "chat"
+        stored = Stored([entry.data.item for entry in found], mode)
         lost = self._lost(str(gem_id), found, told)
         return await self.add(gem_id, stored, stubs(lost, "lost-call"), stored.mode)
 
     async def add(
         self, gem_id: ObjectId, stored: Stored, added: Sequence[Added], mode: Mode
     ) -> Stored:
-        """Store items after the conversation, all or none, as added in `mode`.
+        """Add items after the conversation, as added in `mode`, by nobody's reply.
 
-        Returns the conversation with them.
+        Such as the stub that closes a lost call, or a late result told in writing. What
+        a conversation adds itself, it hands to the log as it goes (`Recording.remember`).
+        Returns the conversation with them, once they are stored: raises if they could
+        not be, and then none of them is.
         """
         if not added:
             return stored
         await self.log.open(gem_id)
-        numbers = self.log.take(gem_id, len(added))
-        items = [
-            ConversationItem(
-                gem_id=gem_id,
-                seq=seq,
-                place=len(stored.items) + offset,
-                at=one.at,
-                item=one.item,
-                source=one.source,
-                turn=one.turn,
-                shown=one.shown,
-                mark=one.mark,
-                mode=mode,
-            )
-            for offset, (seq, one) in enumerate(zip(numbers, added, strict=True))
-        ]
-        # What happened before them is written first, so the log is in order on disk.
-        await self.log.written(gem_id)
-        await self._store.add(items)
-        # Telling whoever watches is no part of storing: it cannot fail what is stored.
-        with contextlib.suppress(Exception):
-            self.log.stored(items)
+        record = self.log.recording(gem_id, mode)
+        for one in added:
+            record.remember(one)
+        await self.stored(gem_id)
         return Stored([*stored.items, *(one.item for one in added)], mode)
+
+    async def stored(self, gem_id: ObjectId) -> None:
+        """Wait until what the gem remembers so far is stored.
+
+        Raises what stopped it, if it could not be. What could not be stored is then
+        dropped: whoever asked has failed for it, and what comes next starts from what
+        is stored.
+        """
+        try:
+            await self.log.stored(gem_id)
+        except BaseException:
+            self.log.give_up(gem_id)
+            raise
 
     async def log_page(
         self, gem_id: str, *, before: int | None = None, limit: int = 200
@@ -263,7 +267,7 @@ class ConversationEntityClass:
         # What has just happened is on its way to the database: it is waited for.
         await self.log.written(found)
         entries = [
-            line.shown() for line in await self._store.page(found, before=before, limit=limit)
+            entry.shown() for entry in await self._store.page(found, before=before, limit=limit)
         ]
         first = entries[0]["seq"] if entries else 0
         return entries, await self._settings(found, upto=first)
@@ -271,39 +275,34 @@ class ConversationEntityClass:
     async def log_sent(self, gem_id: str, seq: int) -> dict[str, Any]:
         """Everything the request written down as entry `seq` was sent.
 
-        Its items, worked out from what each of the gem's requests added to the one
-        before it, and the model, instructions and tools in force. `exact` is False if
-        the items do not come to the count the request wrote down: an entry before it
-        was lost. Raises `NotFoundError` if `seq` is not a request of this gem.
+        Its items are what the gem remembered by then: every remembered entry before
+        the request's own, in order. With them come the model, instructions and tools
+        in force. `exact` is False if the items do not come to the count the request
+        wrote down: an entry before it was lost. Raises `NotFoundError` if `seq` is not
+        a request of this gem.
         """
         if not await self._gems.exists(gem_id):
             raise NotFoundError("Gem")
         found = ObjectId(gem_id)
         await self.log.written(found)
-        items: list[Any] = []
-        request: dict[str, Any] | None = None
-        for line in await self._store.of_kind(found, "request.sent"):
-            if line.seq > seq:
-                break
-            request = line.shown()
-            items = [*items[: request.get("kept", 0)], *request.get("added", [])]
-        if request is None or request["seq"] != seq:
+        request = await self._store.one(found, seq)
+        if request is None or request.kind != "request.sent":
             raise NotFoundError("Request")
+        items = [entry.data.item for entry in await self._store.load(found) if entry.seq < seq]
         return {
-            "request": request.get("request"),
+            "request": request.data.get("request"),
             "items": items,
-            "exact": len(items) == request.get("count"),
+            "exact": len(items) == request.data.get("count"),
             **await self._settings(found, upto=seq),
         }
 
     async def _settings(self, gem_id: ObjectId, *, upto: int) -> dict[str, Any]:
         """The model, instructions and tools in force before entry `upto`, as last written."""
         parts: dict[str, Any] = {"model": None, "instructions": None, "tools": None}
-        for line in await self._store.of_kind(gem_id, "settings.changed"):
-            if line.seq >= upto:
+        for changed in await self._store.of_kind(gem_id, "settings.changed"):
+            if changed.seq >= upto:
                 break
-            changed = line.shown()
-            parts.update({part: changed[part] for part in parts if part in changed})
+            parts.update({part: changed.data[part] for part in parts if part in changed.data})
         return parts
 
     async def log_entry(self, gem_id: str, seq: int) -> dict[str, Any]:
@@ -312,10 +311,10 @@ class ConversationEntityClass:
             raise NotFoundError("Gem")
         found = ObjectId(gem_id)
         await self.log.written(found)
-        line = await self._store.one(found, seq)
-        if line is None:
+        entry = await self._store.one(found, seq)
+        if entry is None:
             raise NotFoundError("Log entry")
-        return line.shown()
+        return entry.shown()
 
     def recording(self, gem_id: ObjectId, mode: Mode) -> Recording:
         """What a conversation with the gem writes down of what happens (see `gem_log.py`).
@@ -337,7 +336,7 @@ class ConversationEntityClass:
         return True
 
     def _lost(
-        self, key: str, stored: Sequence[ConversationItem], told: Sequence[LateResult]
+        self, key: str, stored: Sequence[Remembered], told: Sequence[LateResult]
     ) -> list[ToolCall]:
         """A stub for each call lost to a restart, closing its placeholder.
 
@@ -347,7 +346,7 @@ class ConversationEntityClass:
         """
         kept = self._kept.get(key)
         here = {late.call.call_id for late in told}
-        items = [entry.item for entry in stored]
+        items = [entry.data.item for entry in stored]
         calls = {
             item["call_id"]: item
             for item in items
@@ -357,12 +356,12 @@ class ConversationEntityClass:
         placeholders: list[str] = []
         cancelled: set[str | None] = set()
         for entry in stored:
-            item = entry.item
+            item = entry.data.item
             if "type" not in item or item["type"] != "function_call_output":
                 continue
-            if entry.mark == "placeholder":
+            if entry.data.mark == "placeholder":
                 placeholders.append(item["call_id"])
-            elif entry.mark == "cancelled" and item["call_id"] in calls:
+            elif entry.data.mark == "cancelled" and item["call_id"] in calls:
                 cancelled.add(_named(calls[item["call_id"]]["arguments"]))
         lost: list[ToolCall] = []
         for call_id in placeholders:

@@ -3,7 +3,7 @@ from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
 from app.entities.connection_ent import Connection, ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass
-from app.entities.conversation_store import ConversationItem, ConversationStoreClass
+from app.entities.conversation_store import ConversationStoreClass, LogEntry
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.gem_log import LogEntityClass
@@ -19,18 +19,10 @@ class EntitiesRegistry:
         await adapter.DocDB.create_index(User, [("email", 1)], unique=True)
         # The gem list is shown in the order the gems were made.
         await adapter.DocDB.create_index(GemConfig, [("created_at", 1)], name="gems_created")
-        # A gem's conversation is read whole, in order: the items of its log. Only an
-        # item has a place.
+        # A gem's log is read in order, whole or in pages, and no two entries share a
+        # number. What the gem remembers is read from it by kind, in that same order.
         await adapter.DocDB.create_index(
-            ConversationItem,
-            [("gem_id", 1), ("place", 1)],
-            unique=True,
-            name="gem_log_items_in_order",
-            only={"kind": "item"},
-        )
-        # A gem's log is read in pages, in order, and no two entries share a number.
-        await adapter.DocDB.create_index(
-            ConversationItem,
+            LogEntry,
             [("gem_id", 1), ("seq", 1)],
             unique=True,
             name="gem_log_in_order",

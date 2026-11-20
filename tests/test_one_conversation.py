@@ -17,7 +17,7 @@ import pytest
 from app.entities.call_ent import CallEntityClass, OpenCall
 from app.entities.chat_ent import ChatEntityClass, ChatEvent
 from app.entities.conversation_ent import ConversationEntityClass
-from app.entities.conversation_store import ConversationItem, ConversationStoreClass
+from app.entities.conversation_store import ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.gem_log import Recording
@@ -26,7 +26,7 @@ from app.entities.late_results import LateResults
 from app.entities.model import Item
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation
-from tests.test_chat import _NOW, _docdb, _NoKey, _said
+from tests.test_chat import _docdb, _kept, _NoKey, _said
 from tests.test_voice_conversation import (
     _DELAY,
     _LLM,
@@ -163,10 +163,10 @@ class _World(SimpleNamespace):
     gem: GemConfig
 
     async def stored(self) -> list[Any]:
-        return [entry.item for entry in await self.store.load(self.gem.id)]
+        return [entry.data.item for entry in await self.store.load(self.gem.id)]
 
     async def modes(self) -> list[str]:
-        return [entry.mode for entry in await self.store.load(self.gem.id)]
+        return [entry.data.mode for entry in await self.store.load(self.gem.id)]
 
     async def write(self, text: str, client: _Client | None = None) -> _Client:
         """Write to the gem, and wait until the reply is stored."""
@@ -412,9 +412,9 @@ async def test_a_search_running_when_a_call_ends_is_stored_and_its_result_told_i
         },
     ]
     placeholder = (await world.store.load(world.gem.id))[-1]
-    assert placeholder.item["type"] == "function_call_output"
-    assert placeholder.mark == "placeholder"
-    assert placeholder.mode == "call"
+    assert placeholder.data.item["type"] == "function_call_output"
+    assert placeholder.data.mark == "placeholder"
+    assert placeholder.data.mode == "call"
     # The search carries on after the call.
     assert world.conversations._kept[str(world.gem.id)].late.holds("call_1")
 
@@ -538,10 +538,10 @@ async def test_a_search_lost_to_a_restart_is_closed_before_the_call_s_first_repl
         "call_id": "call_1",
         "output": "Still running in the background.",
     }
-    await world.store.add(
+    await world.store.write(
         [
-            ConversationItem(gem_id=world.gem.id, place=place, at=_NOW, item=item, mark=mark)
-            for place, (item, mark) in enumerate(
+            _kept(world.gem.id, seq, item, mark=mark)
+            for seq, (item, mark) in enumerate(
                 [(_user("weather?"), None), (search_call, None), (placeholder, "placeholder")]
             )
         ]

@@ -310,7 +310,9 @@ class ChatEntityClass:
         turn.begin(conversation)
         ended, failure = await _read(conversation, text, at, gem_id, deliver)
         try:
-            await self._conversations.add(gem.id, history, conversation.added, "chat")
+            # What the reply added was handed to the gem's log as it was added. The
+            # reply's last frame waits until it is stored.
+            await self._conversations.stored(gem.id)
         except Exception as exc:
             # The calls left running are in no stored conversation: nothing could take
             # their results.
@@ -430,9 +432,7 @@ class ChatEntityClass:
         history = await self._conversations.load(gem_id, told=results)
         added = told(results)
         if added:
-            lines = mode_line("chat", history.mode)
-            self._conversations.recording(gem_id, "chat").wrote(lines)
-            added = [*lines, *added]
+            added = [*mode_line("chat", history.mode), *added]
         return await self._conversations.add(gem_id, history, added, "chat")
 
 
