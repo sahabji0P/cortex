@@ -14,7 +14,7 @@ from typing import Any, cast
 
 import pytest
 
-from app.entities.call_ent import CallEntityClass, CallFault, OpenCall
+from app.entities.call_ent import CallEntityClass, OpenCall
 from app.entities.chat_ent import ChatEntityClass, ChatEvent
 from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
@@ -339,31 +339,45 @@ async def test_a_reply_cut_by_hanging_up_is_stored_as_heard() -> None:
     assert await world.stored() == [_CALLED, _user("tell me a story"), _gem_said("Once upon…")]
 
 
-@pytest.mark.parametrize("how", ["silence", "greeting unheard", "reply unheard"])
+@pytest.mark.parametrize("how", ["silence", "greeting unheard"])
 async def test_a_call_in_which_nothing_was_said_stores_nothing(how: str) -> None:
     never = asyncio.Event()
     unheard = [] if how == "silence" else [[_delta("Hi, how can I help?"), never]]
     world = await _world(*unheard, _said("Hello."), speaks_first=how == "greeting unheard")
 
     call, f, keeping = await world.call()
-    if how == "reply unheard":
-        f.stt.say("hello")
     if how != "silence":
         await _read_until(f.conversation, "assistant.word")
     await _hang_up(call, keeping)
 
-    # Our lines wait for something to follow them, and the user's open turn, with no
-    # reply heard, is not stored.
+    # Our lines wait for something to follow them.
     assert await world.stored() == []
     assert world.conversations._kept == {}
-    # Written to next, the conversation is as it was: written, and empty. What the call
-    # sent the model and never settled is not in that request: the one place a request
-    # does not start with the whole of the one before it.
+    # Written to next, the conversation is as it was: written, and empty.
     sent_in_the_call = len(world.llm.requests)
     world.llm.requests.clear()
     await world.write("hi")
     assert sent_in_the_call == (0 if how == "silence" else 1)
     assert world.llm.requests[-1]["input"] == [_user("hi")]
+
+
+async def test_what_the_user_said_in_a_call_is_stored_though_no_reply_was_heard() -> None:
+    never = asyncio.Event()
+    world = await _world([_delta("Hi, how can I help?"), never], _said("Hello."))
+
+    call, f, keeping = await world.call()
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.word")
+    await _hang_up(call, keeping)
+
+    # They said it, and the model was sent it: it is stored, with the line before it.
+    assert await world.stored() == [_CALLED, _user("hello")]
+    assert world.conversations._kept == {}
+    # So the next request, in writing, starts with the whole of the one before it.
+    in_the_call = world.llm.requests[-1]["input"]
+    assert in_the_call == [_CALLED, _user("hello")]
+    await world.write("hi")
+    assert world.llm.requests[-1]["input"] == [*in_the_call, _ENDED, _user("hi")]
 
 
 # ---- tool calls that outlive a call, or a written reply
@@ -571,7 +585,7 @@ async def test_a_call_straight_after_a_call_opens_with_its_own_line() -> None:
 # ---- one writer at a time
 
 
-async def test_a_written_turn_left_open_is_closed_before_a_call() -> None:
+async def test_a_message_no_reply_got_through_to_is_stored_before_a_call() -> None:
     pause = asyncio.Event()
     world = await _world([pause, _delta("Never said.")], _spoken("Hello."))
     client = _Client()
@@ -586,7 +600,7 @@ async def test_a_written_turn_left_open_is_closed_before_a_call() -> None:
     await _said_and_heard(f, "hello")
     await _hang_up(call, keeping)
 
-    # The message was sent to the model, so the call follows it rather than drop it.
+    # The message was sent to the model and is stored as it was sent: the call follows it.
     assert client.frames == [("chat.cut", "…")]
     assert await world.stored() == [
         _user("are you there?"),
@@ -594,35 +608,3 @@ async def test_a_written_turn_left_open_is_closed_before_a_call() -> None:
         _user("hello"),
         _gem_said("Hello."),
     ]
-
-
-async def test_a_written_turn_left_open_stays_open_when_the_call_cannot_store_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The message was sent to the model. If the call that was to follow it does not
-    # open, it must still be there for the next message to join, or the next request
-    # would not start with the one before it.
-    pause = asyncio.Event()
-    world = await _world([pause, _delta("Never said.")], _said("Here I am."))
-    client = _Client()
-    world.chat.send(str(world.gem.id), "are you there?", client.deliver)
-    async with asyncio.timeout(2):
-        while True:
-            if world.llm.requests:
-                break
-            await asyncio.sleep(0)
-
-    async def out_of_reach(items: Sequence[ConversationItem]) -> None:
-        raise ConnectionError("the database is out of reach")
-
-    monkeypatch.setattr(world.store, "add", out_of_reach)
-    with pytest.raises(CallFault, match="could not be stored"):
-        await world.calls.open(str(world.gem.id))
-    monkeypatch.undo()  # the database is back
-
-    again = await world.write("hello?")
-
-    assert client.frames == [("chat.cut", "…")]
-    assert again.frames[-1] == ("chat.done", "Here I am.")
-    assert world.llm.requests[-1]["input"] == [_user("are you there?\nhello?")]
-    assert await world.stored() == [_user("are you there?\nhello?"), _gem_said("Here I am.")]

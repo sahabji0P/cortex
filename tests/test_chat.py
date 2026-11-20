@@ -599,18 +599,19 @@ async def test_messages_faster_than_the_reply_are_each_cut_in_turn() -> None:
         ("chat.done", "Sure."),
     ]
     assert len(setup.llm.requests) == 2
-    # No reply got through to the middle message, so the last one joins it: they are
-    # one turn, as words are in a call.
+    # No reply got through to the middle message. It is stored as it was sent, and the
+    # last one follows it: the reply answers both.
     assert [item["content"] for item in await setup.stored()] == [
         "a story",
         "Once upon…",
-        "no wait\nthe weather",
+        "no wait",
+        "the weather",
         "Sure.",
     ]
     await _close(socket, linked)
 
 
-async def test_a_message_sent_before_any_of_the_reply_got_through_joins_the_open_turn() -> None:
+async def test_a_message_sent_before_any_of_the_reply_got_through_follows_the_first() -> None:
     pause = asyncio.Event()
     setup = await _chat([pause, _delta("Never said.")], _said("Sunny."))
     socket, linked = await _open(setup.service())
@@ -621,16 +622,24 @@ async def test_a_message_sent_before_any_of_the_reply_got_through_joins_the_open
     await socket.until("chat.done")
 
     assert socket.chat() == [("chat.cut", "…"), ("chat.text", "Sunny."), ("chat.done", "Sunny.")]
-    # The model was asked about the first message, and is then asked about both, as
-    # one turn that gained a line. They are stored once, as one user item.
+    # The model was asked about the first message, and is then asked about both: the
+    # second follows the first, and nothing it was sent before has changed.
     first, second = setup.llm.requests
     assert first["input"] == [{"role": "user", "content": "a story"}]
-    assert second["input"] == [{"role": "user", "content": "a story\nno, the weather"}]
+    assert second["input"] == [
+        {"role": "user", "content": "a story"},
+        {"role": "user", "content": "no, the weather"},
+    ]
     assert await setup.stored() == [
-        {"role": "user", "content": "a story\nno, the weather"},
+        {"role": "user", "content": "a story"},
+        {"role": "user", "content": "no, the weather"},
         {"role": "assistant", "content": "Sunny."},
     ]
-    assert await setup.shown() == [("user", "a story\nno, the weather"), ("gem", "Sunny.")]
+    assert await setup.shown() == [
+        ("user", "a story"),
+        ("user", "no, the weather"),
+        ("gem", "Sunny."),
+    ]
     await _close(socket, linked)
 
 
@@ -2318,7 +2327,7 @@ async def test_a_search_running_when_its_gem_is_deleted_is_stopped() -> None:
     assert setup.conversations._kept == {}
 
 
-async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_open() -> None:
+async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_stored() -> None:
     setup = await _chat(_said("Hi."))
     socket, linked = await _open(setup.service())
 
@@ -2326,17 +2335,17 @@ async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_open(
     await _close(socket, linked)
     await _settle()
 
-    # No reply got through, so nothing is stored: the message waits, in memory, for the
-    # next one to join it. That client is not written to again.
-    assert await setup.stored() == []
-    [kept] = setup.conversations._kept.values()
-    assert kept.turn.open
+    # No reply got through, yet the message was sent: it is stored as it stands, and
+    # nothing of it is kept in memory. That client is not written to again.
+    assert await setup.stored() == [{"role": "user", "content": "hello"}]
+    assert setup.conversations._kept == {}
     assert setup.chat._latest == {}
     other, other_linked = await _open(setup.service())
     other.send(setup.gem.id, "are you there?")
     await other.until("chat.done")
     assert await setup.stored() == [
-        {"role": "user", "content": "hello\nare you there?"},
+        {"role": "user", "content": "hello"},
+        {"role": "user", "content": "are you there?"},
         {"role": "assistant", "content": "Hi."},
     ]
     await _close(other, other_linked)

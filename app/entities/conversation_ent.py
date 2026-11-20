@@ -11,8 +11,7 @@ is kept in memory, for each gem, is a `GemConversation`:
   stored; while it does, nothing is written to the gem.
 - the gem's tool calls that outlived their replies, until their results are told (see
   `late_results.py`): one `LateResults` for the gem, whoever made the call. A result is
-  told in the call if one holds the gem, and in writing otherwise,
-- the user's written turn that no reply has got through to yet (see `history.py`).
+  told in the call if one holds the gem, and in writing otherwise.
 
 A gem with none of these is not kept. Running calls live in this process's memory, so a
 restart loses them. A placeholder whose call is gone is closed with a stub saying so,
@@ -33,7 +32,7 @@ from app.core.errors import NotFoundError
 from app.entities.conversation_store import ConversationItem, ConversationStoreClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
-from app.entities.history import Added, Mode, UserTurn, stubs
+from app.entities.history import Added, Mode, stubs
 from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
 from app.entities.model import Item
@@ -106,15 +105,12 @@ class GemConversation:
         self.writer: Writer | None = None
         # The call that holds the gem, from its opening until it is stored.
         self.call: Caller | None = None
-        # Messages whose replies were cut or failed before they left anything in the
-        # history. The next message joins them, and they are stored as one.
-        self.turn = UserTurn()
 
     @property
     def idle(self) -> bool:
         """Whether nothing of it needs keeping."""
         held = self.writer is not None or self.call is not None
-        return not held and not self.late.pending and not self.turn.open
+        return not held and not self.late.pending
 
     def _results_came(self) -> None:
         if self.call is not None:

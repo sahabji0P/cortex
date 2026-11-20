@@ -592,9 +592,11 @@ async def test_a_reply_cut_before_any_of_it_played_leaves_no_trace() -> None:
 
     # Cut before its first word: the client is told so with the bare mark.
     assert _event(outputs, "interrupt").text == "…"
-    # None of the reply was heard, so the user's turn is still the same, open turn.
+    # None of the reply was heard, so nothing of it stands between what they said and
+    # what they say now: two user items, each as it was said.
     assert _after_the_call_start(llm.requests[1]) == [
-        {"role": "user", "content": "tell me a story\nnever mind"},
+        {"role": "user", "content": "tell me a story"},
+        {"role": "user", "content": "never mind"},
     ]
     await f.conversation.close()
 
@@ -930,7 +932,7 @@ async def test_a_turn_that_ends_without_starting_still_cuts_the_reply() -> None:
 # ---- putting the user's turn together
 
 
-async def test_words_that_trail_a_sentence_join_the_same_turn_on_a_new_line() -> None:
+async def test_words_that_trail_a_sentence_follow_it_as_an_item_of_their_own() -> None:
     never = asyncio.Event()
     llm = _LLM(
         [_delta("I am"), never],
@@ -946,16 +948,20 @@ async def test_words_that_trail_a_sentence_join_the_same_turn_on_a_new_line() ->
     outputs = await _read_until(f.conversation, "assistant.done")
 
     assert _event(outputs, "user.final").text == "happening?"
+    # The first half was sent as it was said, and is not changed: the second follows it.
+    assert _after_the_call_start(llm.requests[0]) == [{"role": "user", "content": "Hello, what's"}]
     assert _after_the_call_start(llm.requests[1]) == [
-        {"role": "user", "content": "Hello, what's\nhappening?"}
+        {"role": "user", "content": "Hello, what's"},
+        {"role": "user", "content": "happening?"},
     ]
 
-    # Once the reply has been heard, the turn is closed: the next words are a new turn.
+    # Once the reply has been heard, the next words follow it.
     f.clock.advance(60)
     f.stt.say("bye")
     await _read_until(f.conversation, "assistant.done")
     assert _after_the_call_start(llm.requests[2]) == [
-        {"role": "user", "content": "Hello, what's\nhappening?"},
+        {"role": "user", "content": "Hello, what's"},
+        {"role": "user", "content": "happening?"},
         {"role": "assistant", "content": "Nothing much."},
         {"role": "user", "content": "bye"},
     ]

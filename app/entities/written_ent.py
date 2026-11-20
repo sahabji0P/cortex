@@ -19,10 +19,9 @@ the text the reader was handed, ending in "…". Nothing is made up to mark the 
 reply cut before any of it was handed over leaves no reply at all, as a call's does, and
 one cut while a tool ran keeps the text before the call whole.
 
-The user's message joins the history with the first reply that leaves something there.
-A reply that leaves nothing leaves the message open: it is in the turn the conversation
-is given, and the next message joins it on a new line. The turn outlives the
-conversation, so a caller that makes one conversation per message hands each the same.
+The user's message joins the history when it is sent, as an item of its own, whatever
+becomes of the reply to it. A reply that leaves nothing leaves the message unanswered:
+the next message is one more user item after it, and its reply answers both.
 
 A tool call still running at a cut is not stopped, as in a call. It is left to the
 conversation's `LateResults`, given by the caller, which holds it until its result is
@@ -37,7 +36,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from app.entities.gem_log import Recording, TurnRecord
-from app.entities.history import Added, Mode, UserTurn, added_reply, mode_line, of_turn
+from app.entities.history import Added, Mode, added_reply, mode_line, of_turn, said
 from app.entities.late_results import LateResults
 from app.entities.loop import CUT_MARK, Reply, RoundInput, ToolCall, run_reply
 from app.entities.model import Item, Model
@@ -134,15 +133,13 @@ class WrittenConversation:
         late: LateResults,
         history: Sequence[Item] = (),
         last_mode: Mode = "chat",
-        turn: UserTurn | None = None,
         record: Recording | None = None,
     ) -> None:
         # `model` has to be told of exactly the tools in `tools`, and `instructions` are
         # the whole instructions, with what the model needs already in them. `late` holds
         # the calls of this conversation that outlive their replies, those of earlier
         # replies included. `last_mode` is the mode of the last item of `history`, "chat"
-        # if it is empty. `turn` is the user's turn no reply has got through to yet, if
-        # one is open: the next message joins it.
+        # if it is empty.
         self._model = model
         self._tools = tools
         self._instructions = instructions
@@ -153,7 +150,6 @@ class WrittenConversation:
         # The tool calls left running at a cut, in order. Each has the placeholder as its
         # result in the history, and is held by `late` until its result is told.
         self.left_running: list[ToolCall] = []
-        self._turn = UserTurn() if turn is None else turn
         # Where what happens is written down (see `gem_log.py`). Left out, nothing is.
         self._record = Recording() if record is None else record
         # After a call, a line says the conversation is written from here on. It is
@@ -177,11 +173,10 @@ class WrittenConversation:
         With `text` None, no message is sent: the reply is written from the history as it
         stands, as when a late search result is to be told.
 
-        The message joins the user's open turn, if there is one. `at` is when it was
-        sent, if not now. Nothing happens until the stream
-        is read. One reply at a time: reading a second stream while a reply is being
-        written raises `RuntimeError`. A reply that fails raises its failure, after the
-        text that was delivered, once it is settled.
+        The message joins the history as it is sent. `at` is when it was sent, if not
+        now. Nothing happens until the stream is read. One reply at a time: reading a
+        second stream while a reply is being written raises `RuntimeError`. A reply that
+        fails raises its failure, after the text that was delivered, once it is settled.
 
         To stop a reply part-way, call `cut`, and the stream ends with `cut`. Closing
         the stream (as with `contextlib.aclosing`) or cancelling its reader stops it the
@@ -195,7 +190,8 @@ class WrittenConversation:
         # A reply with no message is written to tell a late result.
         turn = self._record.turn("late_result" if text is None else "user")
         if text is not None:
-            self._turn.add(text, at)
+            # Final as it stands, so it joins the history now, whatever the reply does.
+            self._add(said(text, at, turn.number))
             turn.said(text)
         out: asyncio.Queue[_Handed] = asyncio.Queue()
         self._out = out
@@ -253,7 +249,7 @@ class WrittenConversation:
     def _next_round(self) -> RoundInput:
         # As in a call: the least thinking the model allows, except while a tool call has
         # no result in the history yet. Whether writing wants more is not settled.
-        return RoundInput([*self._history, *self._turn.items()], think=self._late.pending)
+        return RoundInput(list(self._history), think=self._late.pending)
 
     async def _settle(
         self, reply: Reply, producing: asyncio.Task[None] | None, turn: TurnRecord
@@ -273,11 +269,7 @@ class WrittenConversation:
             delivered = reply.delivered(0.0)
             items = delivered.items
             whole = reply.finished and delivered.kept is None
-            # The user's turn joins the history only if the reply left something there.
-            settled = [
-                *self._turn.answered(items),
-                *added_reply(items, reply.calls(), datetime.now(UTC)),
-            ]
+            settled = added_reply(items, reply.calls(), datetime.now(UTC))
             for added in of_turn(settled, turn.number):
                 self._add(added)
             turn.closed(finished=reply.finished, kept=delivered.kept)

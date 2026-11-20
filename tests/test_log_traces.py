@@ -104,7 +104,7 @@ async def test_a_written_reply_leaves_its_turn_its_request_and_what_is_remembere
     await _close(socket, linked)
 
 
-async def test_a_message_whose_reply_left_nothing_is_sent_again_joined_to_the_next() -> None:
+async def test_a_message_whose_reply_left_nothing_is_sent_again_with_the_next_after_it() -> None:
     setup = await _chat([SimpleNamespace(type="error", message="boom")], _said("Hello to both."))
     socket, linked = await _open(setup.service())
 
@@ -121,6 +121,8 @@ async def test_a_message_whose_reply_left_nothing_is_sent_again_joined_to_the_ne
         "request.sent",
         "request.done",
         "turn.closed",
+        # The message is remembered as it was sent, though its reply failed.
+        "item",
         "turn.opened",
         "user.said",
         "request.sent",
@@ -136,12 +138,16 @@ async def test_a_message_whose_reply_left_nothing_is_sent_again_joined_to_the_ne
     assert _of(log, "turn.closed")[0] == {"outcome": "failed", "kept": None, "error": "boom"}
     first, second = _of(log, "request.sent")
     assert first["added"] == [{"role": "user", "content": "one"}]
-    # The second request keeps nothing of the first: the user's turn gained a line, so
-    # the one item it was sent is not the one sent before.
-    assert (second["kept"], second["added"]) == (0, [{"role": "user", "content": "one\ntwo"}])
-    assert second["added"] == setup.llm.requests[1]["input"]
-    # What is remembered is the two as one message, and the reply to it.
-    assert [item["item"]["content"] for item in _of(log, "item")] == ["one\ntwo", "Hello to both."]
+    # The second request keeps the whole of the first, and adds the second message.
+    assert (second["kept"], second["added"]) == (1, [{"role": "user", "content": "two"}])
+    assert [*first["added"], *second["added"]] == setup.llm.requests[1]["input"]
+    # What is remembered is each message as it was sent, and the reply to both.
+    assert [item["item"]["content"] for item in _of(log, "item")] == [
+        "one",
+        "two",
+        "Hello to both.",
+    ]
+    assert [item["turn"] for item in _of(log, "item")] == [1, 2, 2]
     assert answered["text"] == "Hello to both."
     await _close(socket, linked)
 
@@ -255,12 +261,13 @@ async def test_a_call_is_written_down_from_its_opening_to_its_close() -> None:
         "user.said",
         "request.sent",
         "request.done",
+        # Our two lines, the greeting as it was heard, and what the user said.
+        "item",
         "item",
         "item",
         "item",
         # The last reply is settled when the call ends.
         "turn.closed",
-        "item",
         "item",
         "call.closed",
     ]
@@ -455,7 +462,8 @@ async def test_a_message_cut_before_the_model_is_asked_leaves_a_turn_with_no_req
     log = await _log(setup)
 
     turns = {turn: [e["kind"] for e in log if e.get("turn") == turn] for turn in (1, 2, 3)}
-    assert turns[2] == ["turn.opened", "user.said", "turn.closed"]
+    # The second message is remembered, in a turn that asked the model nothing.
+    assert turns[2] == ["turn.opened", "user.said", "turn.closed", "item"]
     assert [closed["outcome"] for closed in _of(log, "turn.closed")] == ["cut", "cut", "finished"]
     assert [said["text"] for said in _of(log, "user.said")] == ["one", "two", "three"]
     assert len(_of(log, "request.sent")) == len(_of(log, "request.done")) == 2

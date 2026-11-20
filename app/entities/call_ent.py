@@ -12,8 +12,8 @@ the gem's conversation as it is stored, and adds its turns to it. The standing s
 What the call adds is stored as it is settled, in order, after what was stored before:
 the user's turns, the gem's replies as they were heard, tool calls and their results,
 and our own lines. A line of ours is stored with the first item that follows it, so a
-call in which nothing was said stores nothing. The user's open turn, and a reply that
-can still be cut, are never stored. The database is the truth: if what the call settled
+call in which nothing was said stores nothing. A reply that can still be cut is never
+stored. The database is the truth: if what the call settled
 cannot be stored, the call is not to carry on unsaved, and fails. Everything settled is
 stored by the time the call is closed, and only then is the gem let go.
 
@@ -40,7 +40,7 @@ from app.entities.conversation_ent import ConversationEntityClass, Stored
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import Recording
-from app.entities.history import mode_line, settled
+from app.entities.history import settled
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass, VoiceEvent, VoiceLine
 
@@ -290,18 +290,6 @@ class CallEntityClass:
                 stored = await self._conversations.load(gem_id)
             except Exception as exc:
                 raise CallFault("the conversation could not be read", exc) from exc
-            if kept.turn.open:
-                # A written turn left open has been sent to the model: the call follows it.
-                lines = mode_line("chat", stored.mode)
-                self._conversations.recording(gem_id, "chat").wrote(lines)
-                added = [*lines, *kept.turn.added()]
-                try:
-                    stored = await self._conversations.add(gem_id, stored, added, "chat")
-                except Exception as exc:
-                    raise CallFault("the conversation could not be stored", exc) from exc
-                # Closed only now that it is stored. Until then it is still open: if the
-                # call does not open after all, the next message joins it.
-                kept.turn.close()
             # What happens in the call is written down in the gem's log.
             record = self._conversations.recording(gem_id, "call")
             record.call_opened()

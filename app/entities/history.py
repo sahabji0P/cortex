@@ -1,24 +1,20 @@
 """
 What joins a gem's history, by the same rules in a call and in writing.
 
-The user's turn stays open until a reply to it leaves something in the history: some of
-its text was delivered, or it called a tool. What the user says before then joins the
-same turn, on a new line. In a call, speech recognition often splits one sentence in
-two, and the second half is not a new request. In writing, a message sent before the
-reply to the one before it got anywhere is the same: the user is still saying what they
-want. A reply cut before it left anything leaves the turn open, and the next reply
-answers all of it.
+Everything is added to the history once it is final, and nothing in the history is
+changed afterwards. What the user says is final when they have said it, so it is added
+then, as an item of its own (`said`). If no reply has got through to it when they speak
+again (the reply was cut before it left anything, or it failed), what they say next is
+one more user item after it, and the next reply answers both. In a call, speech
+recognition often splits one sentence in two: the two halves are then two items in a
+row, and the model reads them together.
 
-A turn joins the history as one user item, and is final from then on. Until then it is
-the last thing a request is sent, and the one thing in a request that can change
-afterwards: it can gain a line. So it is never stored while it is open.
+Late results (see `late_results.py`) are added after everything else, as stub calls
+with their results (`told`). When the user's turn ends while results wait, they are
+added ahead of what the user said, so one reply answers the user and tells them.
 
-Late results (see `late_results.py`) close the open turn and follow it (`told`). So a
-turn that ends while results wait is answered with them in front of it.
-
-Everything else is added to the history once it is final, and is added with what is
-kept beside it (`Added`): when it was added, what a tool call showed, and what a call's
-result stands for.
+Each item is added with what is kept beside it (`Added`): when it was added, what a
+tool call showed, and what a call's result stands for.
 
 The conversation is one, whether the user calls the gem or writes to it. A line of ours
 says when a call starts and when it ends (`mode_line`): before the first turn of every
@@ -42,11 +38,11 @@ __all__ = [
     "Added",
     "Mode",
     "Source",
-    "UserTurn",
     "added_reply",
     "line",
     "mode_line",
     "of_turn",
+    "said",
     "settled",
     "shown",
     "stubs",
@@ -96,7 +92,7 @@ class Added:
     """One item added to a history, with what is kept beside it."""
 
     item: Item
-    # When it was added. The user's turn carries when its first piece came.
+    # When it was added. What the user said carries when it arrived.
     at: datetime
     # For a tool call, the text of its `tool.call` event, if it had one.
     shown: str | None = None
@@ -109,48 +105,13 @@ class Added:
     turn: int | None = None
 
 
-class UserTurn:
-    """The user's turn that no reply has got through to yet, as the pieces it came in."""
+def said(text: str, at: datetime | None = None, turn: int | None = None) -> Added:
+    """What the user said, typed or spoken, as it joins the history: one item, final.
 
-    def __init__(self) -> None:
-        self._pieces: list[str] = []
-        self._at: datetime | None = None
-
-    @property
-    def open(self) -> bool:
-        """Whether the user has said anything that no reply has got through to yet."""
-        return bool(self._pieces)
-
-    def add(self, text: str, at: datetime | None = None) -> None:
-        """What the user says next joins the turn, on a new line. `at` is when it came."""
-        if not self._pieces:
-            self._at = at or datetime.now(UTC)
-        self._pieces.append(text)
-
-    def items(self) -> list[Item]:
-        """The turn as one user item, for a request, or nothing if no turn is open."""
-        return [{"role": "user", "content": "\n".join(self._pieces)}] if self._pieces else []
-
-    def added(self) -> list[Added]:
-        """The turn as it would join the history now. It stays open."""
-        return [Added(item, self._at or datetime.now(UTC)) for item in self.items()]
-
-    def close(self) -> list[Added]:
-        """Take the turn out as it stands, to join the history, where it is final.
-
-        Whatever is added next follows it, and what the user says next is a new turn.
-        """
-        added = self.added()
-        self._pieces, self._at = [], None
-        return added
-
-    def answered(self, items: Sequence[Item]) -> list[Added]:
-        """A reply to the turn leaves `items` in the history. Return what goes before them.
-
-        If the reply left anything, it got through, so the turn it answers is closed and
-        goes before it. If it left nothing, the turn stays open.
-        """
-        return self.close() if items else []
+    `at` is when it arrived, if not now. `turn` is the number of the turn it opened in
+    the gem's log, if it has one.
+    """
+    return Added({"role": "user", "content": text}, at or datetime.now(UTC), turn=turn)
 
 
 def line(text: str, source: Source) -> Added:
@@ -201,16 +162,14 @@ def stubs(calls: Iterable[ToolCall], source: Source = "late-result") -> list[Add
     return [Added(item, now, source=source) for call in calls for item in call.items()]
 
 
-def told(turn: UserTurn, results: Sequence[LateResult]) -> list[Added]:
-    """Late results as they join the history, after the user's open turn, which is closed.
+def told(results: Sequence[LateResult]) -> list[Added]:
+    """Late results as they join the history: a stub call and its result for each.
 
-    The open turn has already been sent to the model, so the results follow it. What the
-    user says next is a new turn after them: a turn that ends while results wait is
-    answered with the results in front of it, in one reply. Nothing if there are none.
+    They follow everything the model has been sent. What the user says next comes after
+    them: a turn that ends while results wait is answered with the results in front of
+    it, in one reply. Nothing if there are none.
     """
-    if not results:
-        return []
-    return [*turn.close(), *stubs(late.stub for late in results)]
+    return stubs(late.stub for late in results)
 
 
 def added_reply(items: Sequence[Item], calls: Sequence[ToolCall], at: datetime) -> list[Added]:
