@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     # Cartesia (speech-to-text and text-to-speech)
     cartesia_api_key: str = ""
 
+    # ElevenLabs (text-to-speech). Empty = it cannot be used.
+    elevenlabs_api_key: str = ""
+
     # Parallel (web search tool for the voice pipeline). Empty = the tool is not offered.
     parallel_api_key: str = ""
 
