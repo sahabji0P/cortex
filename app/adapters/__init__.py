@@ -5,6 +5,7 @@ from app.adapters.cartesia_stt_adp import CartesiaSTTAdapterClass
 from app.adapters.cartesia_tts_adp import CartesiaTTSAdapterClass
 from app.adapters.cliproxy_adp import CLIProxyAdapterClass
 from app.adapters.docdb_adp import DocDBAdapterClass
+from app.adapters.elevenlabs_tts_adp import ElevenLabsTTSAdapterClass
 from app.adapters.http_adp import HttpAdapterClass
 from app.adapters.mcp_adp import McpAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
@@ -21,6 +22,7 @@ class AdapterRegistry:
         self.Anthropic = AnthropicAdapterClass()
         self.CartesiaSTT = CartesiaSTTAdapterClass()
         self.CartesiaTTS = CartesiaTTSAdapterClass()
+        self.ElevenLabsTTS = ElevenLabsTTSAdapterClass()
         self.Parallel = ParallelAdapterClass()
         self.Mcp = McpAdapterClass()
         self.CLIProxy = CLIProxyAdapterClass()
@@ -32,6 +34,7 @@ class AdapterRegistry:
             self.Anthropic.initialize(),
             self.CartesiaSTT.initialize(),
             self.CartesiaTTS.initialize(),
+            self.ElevenLabsTTS.initialize(),
             self.Parallel.initialize(),
             self.Mcp.initialize(),
             self.CLIProxy.initialize(),
@@ -46,6 +49,7 @@ class AdapterRegistry:
             self.Anthropic.close(),
             self.CartesiaSTT.close(),
             self.CartesiaTTS.close(),
+            self.ElevenLabsTTS.close(),
             self.Parallel.close(),
             self.Mcp.close(),
             self.CLIProxy.close(),
