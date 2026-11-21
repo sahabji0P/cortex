@@ -98,6 +98,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A tool registry, then skills.
 - Chat.
 - A sound before the greeting's first word leaves the call silent. Small fix.
+- Speech by ElevenLabs (Eleven v4 Turbo): the adapter is built, no call uses it yet. How to choose between it and Cartesia is open.
 - A reply that begins with "..." can be judged unheard and dropped from memory: the speech service gives its first word without the dots. To be fixed.
 - The code's own names still say late results (`late_results.py`, `LateResults`). The log says background.
 - A log written before the one shape (entries of kind `item`) is not read. It is cleared, not carried over.
