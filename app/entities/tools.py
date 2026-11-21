@@ -81,21 +81,36 @@ class Toolbox:
         """What the model is told of each tool, always in the same order."""
         return [tool.spec for tool in self._tools.values()]
 
+    @property
+    def tools(self) -> list[Tool]:
+        """Every tool, in the order the model is told of them."""
+        return list(self._tools.values())
+
     async def run(self, name: str, arguments: str, *, show: Callable[[str], None]) -> str:
         """Run one call. A failure goes back to the model as text, so it can say so.
 
         `show` is given the text of the call's `tool.call` event, if it has one, just
         before the call runs. Arguments that cannot be read send no event.
         """
+        return (await self.attempt(name, arguments, show=show))[0]
+
+    async def attempt(
+        self, name: str, arguments: str, *, show: Callable[[str], None]
+    ) -> tuple[str, bool]:
+        """Run one call, as `run` does. Return its result for the model, and whether it failed.
+
+        A call of a tool that is not here failed too. The result's text does not say
+        which it was in any one way, so whoever needs to know is told beside it.
+        """
         tool = self._tools.get(name)
         if tool is None:
-            return f"Unknown tool: {name}"
+            return f"Unknown tool: {name}", True
         try:
             if (shown := tool.shown(arguments)) is not None:
                 show(shown)
-            return await tool.run(arguments)
+            return await tool.run(arguments), False
         except Exception as exc:
-            return f"{name} failed: {exc}"
+            return f"{name} failed: {exc}", True
 
 
 def gem_toolbox(

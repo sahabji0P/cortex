@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Response
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Query, Response
 
 from app.routers.gems.models import GemsModels
 from app.routers.gems.service import GemsServiceRegistry
@@ -30,6 +32,33 @@ async def get_gem(gem_id: str, service: GemsServiceRegistry.V1) -> GemsModels.V1
 async def get_chat(gem_id: str, service: GemsServiceRegistry.V1) -> GemsModels.V1.Output.Chat:
     """The gem's conversation so far, calls included, oldest first, for showing on screen."""
     return await service.get_chat(gem_id)
+
+
+@router.get("/{gem_id}/log")
+async def get_log(
+    gem_id: str,
+    service: GemsServiceRegistry.V1,
+    before: Annotated[int | None, Query(ge=0)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> GemsModels.V1.Output.Log:
+    """A page of the gem's log, oldest first: everything it remembers and everything that happened.
+
+    The latest page, or with `before` the entries just before that number. To read
+    back from the end, ask again with `before` set to the `seq` of a page's first entry.
+    """
+    return await service.get_log(gem_id, before=before, limit=limit)
+
+
+@router.get("/{gem_id}/log/{seq}")
+async def get_log_entry(gem_id: str, seq: int, service: GemsServiceRegistry.V1) -> dict[str, Any]:
+    """One entry of the gem's log, in full: the link trims a long one (`partial`)."""
+    return await service.get_log_entry(gem_id, seq)
+
+
+@router.get("/{gem_id}/log/{seq}/sent")
+async def get_log_sent(gem_id: str, seq: int, service: GemsServiceRegistry.V1) -> dict[str, Any]:
+    """Everything the request written down as entry `seq` was sent: items, instructions, tools."""
+    return await service.get_log_sent(gem_id, seq)
 
 
 @router.patch("/{gem_id}")

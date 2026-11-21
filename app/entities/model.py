@@ -65,6 +65,7 @@ __all__ = [
     "RoundDone",
     "TextDelta",
     "ToolSpec",
+    "Usage",
     "found",
     "is_openai",
     "model_for",
@@ -193,10 +194,29 @@ class ModelCall:
 
 
 @dataclass(frozen=True, slots=True)
+class Usage:
+    """The tokens one model call was charged for, as its provider reported them.
+
+    The three kinds of input do not overlap: what was sent is their sum. `thinking` is
+    part of `output`, never added to it, and None where the provider does not say.
+    """
+
+    input: int  # read in full: neither read from a cache nor written to one
+    cache_read: int
+    cache_write: int
+    output: int
+    thinking: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RoundDone:
-    """The model call finished. Always the last event; `calls` is empty if it only spoke."""
+    """The model call finished. Always the last event; `calls` is empty if it only spoke.
+
+    `usage` is None if the provider reported none.
+    """
 
     calls: list[ModelCall]
+    usage: Usage | None = None
 
 
 type ModelEvent = TextDelta | CallStarted | RoundDone
@@ -295,6 +315,7 @@ class _OpenAIModel:
             store=False,
         )
         output = None
+        usage: Usage | None = None
         # Leaving this block closes the connection, which is what stops the model when
         # the reply is cut off while it is busy with something else, such as speaking.
         async with contextlib.aclosing(stream):
@@ -308,6 +329,7 @@ class _OpenAIModel:
                         yield CallStarted(SEARCH_TOOL)
                 elif event.type == "response.completed":
                     output = event.response.output
+                    usage = _openai_usage(event.response)
                 elif event.type == "response.failed":
                     error = event.response.error
                     raise RuntimeError(error.message if error else "the model call failed")
@@ -325,7 +347,36 @@ class _OpenAIModel:
                 calls.append(ModelCall(item.call_id, item.name, item.arguments))
             elif item.type == "tool_search_call" and item.call_id:
                 calls.append(ModelCall(item.call_id, SEARCH_TOOL, json.dumps(item.arguments)))
-        yield RoundDone(calls)
+        yield RoundDone(calls, usage)
+
+
+def _openai_usage(response: object) -> Usage | None:
+    """What a finished response says it used. Its input count includes what a cache held."""
+    used = getattr(response, "usage", None)
+    sent, output = _count(used, "input_tokens"), _count(used, "output_tokens")
+    if sent is None or output is None:
+        return None
+    details = getattr(used, "input_tokens_details", None)
+    cache_read = _count(details, "cached_tokens") or 0
+    cache_write = _count(details, "cache_write_tokens") or 0
+    return Usage(
+        input=max(sent - cache_read - cache_write, 0),
+        cache_read=cache_read,
+        cache_write=cache_write,
+        output=output,
+        thinking=_count(getattr(used, "output_tokens_details", None), "reasoning_tokens"),
+    )
+
+
+def _count(reported: object, name: str) -> int | None:
+    """One count of a provider's usage, or None if it is not there as a whole number.
+
+    What a provider reports of its use is only written down. A reply that came through
+    is never failed for a count that is missing or of another shape, as an answer by
+    way of a proxy may have it.
+    """
+    value = getattr(reported, name, None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def to_input(
@@ -471,8 +522,23 @@ class _AnthropicModel:
                 ModelCall(block.id, block.name, json.dumps(block.input))
                 for block in message.content
                 if block.type == "tool_use"
-            ]
+            ],
+            _anthropic_usage(message),
         )
+
+
+def _anthropic_usage(message: object) -> Usage | None:
+    """What a finished message says it used. Its input count leaves out what a cache held."""
+    used = getattr(message, "usage", None)
+    sent, output = _count(used, "input_tokens"), _count(used, "output_tokens")
+    if sent is None or output is None:
+        return None
+    return Usage(
+        input=sent,
+        cache_read=_count(used, "cache_read_input_tokens") or 0,
+        cache_write=_count(used, "cache_creation_input_tokens") or 0,
+        output=output,
+    )
 
 
 def to_messages(items: Sequence[Item], tools: Collection[str] = ()) -> list[MessageParam]:

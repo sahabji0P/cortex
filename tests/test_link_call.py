@@ -21,7 +21,7 @@ from app.entities.gem_ent import GEM_CONFIG_VERSION
 from app.entities.history import Added
 from app.entities.voice_ent import VoiceEvent
 from app.routers.link.service import LinkServiceV1Class
-from tests.test_chat import _Chat, _chat, _said
+from tests.test_chat import _Chat, _chat, _said, _stored_items
 from tests.test_voice_conversation import _completed, _delta
 
 if TYPE_CHECKING:
@@ -33,9 +33,11 @@ _WAIT = 2.0
 class _Conversation:
     """A voice conversation: records what it is fed, and says what the test puts out."""
 
-    def __init__(self) -> None:
+    def __init__(self, record: Any = None) -> None:
         # What `outputs()` yields, in order. None ends it; an exception is raised.
         self.out: asyncio.Queue[VoiceEvent | bytes | Exception | None] = asyncio.Queue()
+        # Where it hands what it adds to the gem's conversation, as the real one does.
+        self.record = record
         # What it adds to the gem's conversation: nothing, unless a test adds to it.
         self.added: list[Any] = []
         self.grew = asyncio.Event()
@@ -124,10 +126,10 @@ class _Line:
         self._voice = voice
         self._asked = asked
 
-    def open(self, *, darbar: str | None = None, **_: object) -> _Conversation:
+    def open(self, *, darbar: str | None = None, record: Any = None, **_: object) -> _Conversation:
         speaks_first, gem, _ = self._voice.asked[self._asked]
         self._voice.asked[self._asked] = (speaks_first, gem, darbar)
-        conversation = _Conversation()
+        conversation = _Conversation(record)
         self._voice.made.append(conversation)
         return conversation
 
@@ -285,7 +287,7 @@ async def test_a_call_carries_audio_and_events_both_ways_and_ends_on_call_end() 
 
     assert conversation.audio == [b"\x01\x02", b"\x03\x04"]
     assert socket.frames == [
-        {"type": "link.ready", "version": 5},
+        {"type": "link.ready", "version": 6},
         {"type": "call.ready"},
         {"type": "call.user.final", "text": "hello"},
         b"\x05\x06",
@@ -882,15 +884,18 @@ async def test_a_call_start_cuts_a_reply_being_written_and_opens_once_it_is_stor
 
 
 def _said_in_the_call(conversation: _Conversation, *, grew: bool = True) -> None:
-    """The conversation settles a turn and its reply, for the call to store.
+    """The conversation adds what the user said and a reply, and the gem remembers them.
 
-    Without `grew`, the call is not told, and stores them only as it ends.
+    Without `grew`, the call is not told: it learns whether they were stored as it ends.
     """
     now = datetime.now(UTC)
-    conversation.added += [
+    added = [
         Added({"role": "user", "content": "hello"}, now),
-        Added({"role": "assistant", "content": "Hi."}, now),
+        Added({"role": "assistant", "content": "Hi."}, now, source="gem"),
     ]
+    conversation.added += added
+    for one in added:
+        conversation.record.remember(one)
     if grew:
         conversation.grew.set()
 
@@ -944,13 +949,13 @@ async def test_what_a_call_settles_is_stored_as_it_goes_and_the_call_carries_on(
     [conversation] = setup.voice.made
 
     _said_in_the_call(conversation)
-    await _eventually(lambda: len(setup.chat.docdb.collections.get("ChatItems", [])) == 2)
+    await _eventually(lambda: len(_stored_items(setup.chat.docdb)) == 2)
 
     assert await setup.chat.stored() == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "Hi."},
     ]
-    assert [d["mode"] for d in setup.chat.docdb.collections["ChatItems"]] == ["call", "call"]
+    assert [d["data"]["mode"] for d in _stored_items(setup.chat.docdb)] == ["call", "call"]
     assert "call.failed" not in socket.types()
     await _close(socket, linked)
 

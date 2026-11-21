@@ -121,7 +121,12 @@ class DocDBAdapterClass:
         *,
         unique: bool = False,
         name: str | None = None,
+        only: MutableMapping[str, Any] | None = None,
     ) -> str:
+        """Create an index. `only` limits it to the documents that match that filter."""
+        options: dict[str, Any] = {"unique": unique, "name": name}
+        if only is not None:
+            options["partialFilterExpression"] = only
         return await self.db.get_collection(_collection_name(collection)).create_index(
-            keys, unique=unique, name=name
+            keys, **options
         )

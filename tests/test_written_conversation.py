@@ -13,7 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.entities.history import UserTurn
 from app.entities.late_results import LateResults
 from app.entities.loop import ToolCall
 from app.entities.model import Item, ToolSpec, model_for
@@ -106,13 +105,12 @@ def _conversation(
     llm: _LLM,
     look_up: _LookUp | None = None,
     history: list[Item] | None = None,
-    turn: UserTurn | None = None,
 ) -> WrittenConversation:
-    return _with_tools(llm, (look_up or _LookUp()).tools(), history, turn)
+    return _with_tools(llm, (look_up or _LookUp()).tools(), history)
 
 
 def _with_tools(
-    llm: _LLM, tools: Toolbox, history: list[Item] | None = None, turn: UserTurn | None = None
+    llm: _LLM, tools: Toolbox, history: list[Item] | None = None
 ) -> WrittenConversation:
     model = model_for(llm, "6 Luna", tools.specs)
     return WrittenConversation(
@@ -121,7 +119,6 @@ def _with_tools(
         instructions="Be brief.",
         late=LateResults(lambda: None),
         history=history or [],
-        turn=turn,
     )
 
 
@@ -295,6 +292,25 @@ async def test_a_tool_that_finished_before_the_cut_is_not_handed_back() -> None:
     }
 
 
+async def test_what_a_round_produced_joins_the_history_before_the_round_that_is_sent_it() -> None:
+    call = _call("Pune weather")
+    llm = _LLM([_delta("Let me look."), _starts(call), _completed(call)], [asyncio.Event()])
+    conversation = _conversation(llm)
+
+    async with asyncio.timeout(2), contextlib.aclosing(conversation.send("weather?")) as stream:
+        assert [(await anext(stream)).type for _ in range(2)] == ["text", "tool.call"]
+        await asyncio.sleep(0.02)
+        assert len(llm.requests) == 2
+        # The second round is still being made, and what it was sent is in the history
+        # already: the history is everything the model has been sent, in that order.
+        assert [entry.item for entry in conversation.added] == llm.requests[1]["input"]
+        conversation.cut()
+        assert [event.type async for event in stream] == ["cut"]
+
+    # Settling the reply adds none of it a second time.
+    assert [entry.item for entry in conversation.added] == llm.requests[1]["input"]
+
+
 async def test_a_second_message_while_a_reply_is_written_is_refused() -> None:
     gate = asyncio.Event()
     llm = _LLM([_delta("Thinking "), gate, _delta("done."), _completed()], _said("Yes."))
@@ -466,36 +482,35 @@ async def test_a_cut_ends_the_stream_with_what_is_kept() -> None:
     ]
 
 
-async def test_a_reply_cut_before_it_begins_asks_nothing_and_leaves_the_message_open() -> None:
+async def test_a_reply_cut_before_it_begins_asks_nothing_and_keeps_the_message() -> None:
     llm = _LLM()
-    turn = UserTurn()
-    conversation = _conversation(llm, turn=turn)
+    conversation = _conversation(llm)
 
     conversation.cut()
     events = await _read(conversation, "hello")
 
     assert events == [WrittenEvent("cut", "…")]
     assert llm.requests == []
-    # No reply got through, so the message is not added: it waits for the next one.
-    assert conversation.added == []
-    assert turn.items() == [{"role": "user", "content": "hello"}]
+    # No reply got through, yet the message was sent: it is in the history as it stands.
+    assert [entry.item for entry in conversation.added] == [{"role": "user", "content": "hello"}]
 
 
-async def test_a_message_sent_before_any_reply_got_through_joins_the_open_turn() -> None:
+async def test_a_message_sent_before_any_reply_got_through_follows_the_one_before() -> None:
     llm = _LLM(_said("Sunny."))
-    turn = UserTurn()
-    turn.add("a story")
-    conversation = _conversation(llm, turn=turn)
+    # The message before it is stored, and no reply to it is.
+    conversation = _conversation(llm, history=[{"role": "user", "content": "a story"}])
 
     await _read(conversation, "no, the weather")
 
-    open_turn = {"role": "user", "content": "a story\nno, the weather"}
-    assert llm.requests[0]["input"] == [open_turn]
+    # Two user items in a row, each as it was sent: the reply answers both.
+    assert llm.requests[0]["input"] == [
+        {"role": "user", "content": "a story"},
+        {"role": "user", "content": "no, the weather"},
+    ]
     assert [entry.item for entry in conversation.added] == [
-        open_turn,
+        {"role": "user", "content": "no, the weather"},
         {"role": "assistant", "content": "Sunny."},
     ]
-    assert not turn.open
 
 
 async def test_a_failed_reply_is_handed_back_as_delivered() -> None:

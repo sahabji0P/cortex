@@ -21,9 +21,15 @@ from app.entities import chat_ent, conversation_ent, late_results
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
 from app.entities.conversation_ent import ConversationEntityClass
-from app.entities.conversation_store import ConversationItem, ConversationStoreClass
+from app.entities.conversation_store import (
+    REMEMBERED,
+    ConversationStoreClass,
+    LogEntry,
+    remembered,
+)
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig, GemEntityClass
+from app.entities.history import Added
 from app.entities.instructions import instructions
 from app.routers.gems.service import GemsServiceV1Class
 from app.routers.link.service import LinkServiceV1Class
@@ -90,8 +96,8 @@ class _DocDB:
     """The database adapter, faked: documents as plain dicts, one list per collection.
 
     Reads go through `model_validate`, as the real adapter's do. Times lose their zone
-    on the way in, as they do in Mongo. A conversation's (gem_id, place) is unique, as
-    the real index makes it.
+    on the way in, as they do in Mongo. A log's (gem_id, seq) is unique, as the real
+    index makes it.
     """
 
     def __init__(self) -> None:
@@ -109,6 +115,13 @@ class _DocDB:
         def same(found: Any, wanted: Any) -> bool:
             if isinstance(wanted, dict) and set(wanted) == {"$in"}:
                 return found in wanted["$in"]
+            if isinstance(wanted, dict) and set(wanted) <= {"$gte", "$lt"}:
+                # As in Mongo, a document without the field, or with none, is not found.
+                return (
+                    found is not None
+                    and ("$gte" not in wanted or found >= wanted["$gte"])
+                    and ("$lt" not in wanted or found < wanted["$lt"])
+                )
             return found == wanted
 
         return all(
@@ -136,11 +149,12 @@ class _DocDB:
         *,
         filters: MutableMapping[str, Any],
         sort: Iterable[tuple[str, Literal[-1, 1]]] | None = None,
+        limit: int | None = None,
     ) -> list[T]:
         found = [d for d in self._all(collection) if self._matches(d, filters)]
         for field, direction in reversed(list(sort or [])):
             found.sort(key=lambda document: document[field], reverse=direction == -1)
-        return [collection.model_validate(document) for document in found]
+        return [collection.model_validate(document) for document in found[:limit]]
 
     async def count(self, collection: type[BaseModel], *, filters: MutableMapping[str, Any]) -> int:
         return len([d for d in self._all(collection) if self._matches(d, filters)])
@@ -157,11 +171,12 @@ class _DocDB:
             if self.breaks_after is not None and written == self.breaks_after:
                 raise ConnectionError("the database went away part-way")
             document = self._stored(item)
-            if isinstance(item, ConversationItem) and any(
-                (d["gem_id"], d["place"]) == (document["gem_id"], document["place"])
+            # No two entries of a gem's log share a number.
+            if isinstance(item, LogEntry) and any(
+                (d["gem_id"], d.get("seq")) == (document["gem_id"], document["seq"])
                 for d in documents
             ):
-                raise RuntimeError("duplicate key: that place is taken")
+                raise RuntimeError("duplicate key: that number is taken")
             documents.append(document)
         return list(data)
 
@@ -210,14 +225,18 @@ def _docdb() -> tuple[_DocDB, "DocDBAdapterClass"]:
     return docdb, cast("DocDBAdapterClass", docdb)
 
 
-def _item(gem_id: ObjectId, place: int, text: str, **fields: Any) -> ConversationItem:
-    return ConversationItem(
-        gem_id=gem_id,
-        place=place,
-        at=_NOW,
-        item={"role": "user", "content": text},
-        **fields,
-    )
+def _stored_items(docdb: _DocDB) -> list[dict[str, Any]]:
+    """What every gem remembers, as it is stored, without what else its log holds."""
+    return [d for d in docdb.collections.get("GemLog", []) if d.get("kind") in REMEMBERED]
+
+
+def _kept(gem_id: ObjectId, seq: int, item: Any, mode: str = "chat", **fields: Any) -> LogEntry:
+    """The entry that remembers `item`, as entry `seq` of the gem's log."""
+    return remembered(gem_id, seq, Added(item, _NOW, **fields), cast("Any", mode))
+
+
+def _item(gem_id: ObjectId, seq: int, text: str, **fields: Any) -> LogEntry:
+    return _kept(gem_id, seq, {"role": "user", "content": text}, **fields)
 
 
 async def test_a_conversation_is_read_back_in_order_with_its_times_in_utc() -> None:
@@ -225,18 +244,18 @@ async def test_a_conversation_is_read_back_in_order_with_its_times_in_utc() -> N
     store = ConversationStoreClass(adapter)
     gem_id, other = ObjectId(), ObjectId()
 
-    await store.add([_item(gem_id, 1, "second"), _item(gem_id, 2, "third")])
-    await store.add([_item(other, 0, "another gem's")])
-    await store.add([_item(gem_id, 0, "first")])
+    await store.write([_item(gem_id, 1, "second"), _item(gem_id, 2, "third")])
+    await store.write([_item(other, 0, "another gem's")])
+    await store.write([_item(gem_id, 0, "first")])
 
     read = await store.load(gem_id)
-    assert [item.item for item in read] == [
+    assert [item.data.item for item in read] == [
         {"role": "user", "content": "first"},
         {"role": "user", "content": "second"},
         {"role": "user", "content": "third"},
     ]
     # Stored without a zone, as Mongo keeps them, and read back in UTC.
-    assert docdb.collections["ChatItems"][0]["at"].tzinfo is None
+    assert _stored_items(docdb)[0]["at"].tzinfo is None
     assert all(item.at == _NOW and item.at.tzinfo is UTC for item in read)
 
 
@@ -251,28 +270,23 @@ async def test_every_shape_of_item_is_stored_as_it_was_given() -> None:
         {"type": "function_call_output", "call_id": "c1", "output": "Sunny."},
     ]
 
-    await store.add(
-        [
-            ConversationItem(gem_id=gem_id, place=place, at=_NOW, item=item, shown=None)
-            for place, item in enumerate(items)
-        ]
-    )
+    await store.write([_kept(gem_id, seq, item) for seq, item in enumerate(items)])
 
-    assert [item.item for item in await store.load(gem_id)] == items
+    assert [item.data.item for item in await store.load(gem_id)] == items
 
 
 async def test_deleting_a_gem_deletes_its_conversation() -> None:
     docdb, adapter = _docdb()
     gems, store = GemEntityClass(adapter), ConversationStoreClass(adapter)
     gem, other = await gems.create(name="Gem One"), await gems.create(name="Gem Two")
-    await store.add([_item(gem.id, 0, "hello"), _item(gem.id, 1, "again")])
-    await store.add([_item(other.id, 0, "hello")])
+    await store.write([_item(gem.id, 0, "hello"), _item(gem.id, 1, "again")])
+    await store.write([_item(other.id, 0, "hello")])
 
     await gems.delete(str(gem.id))
 
     assert await store.load(gem.id) == []
     assert len(await store.load(other.id)) == 1
-    assert len(docdb.collections["ChatItems"]) == 1
+    assert len(_stored_items(docdb)) == 1
 
 
 # ---- chat over the standing socket, with the model and the search faked
@@ -415,7 +429,7 @@ class _Chat(SimpleNamespace):
         return _Chat(**{**vars(self), "conversations": conversations, "chat": chat})
 
     async def stored(self) -> list[Any]:
-        return [item.item for item in await self.store.load(self.gem.id)]
+        return [item.data.item for item in await self.store.load(self.gem.id)]
 
     async def shown(self) -> list[tuple[str, str]]:
         chat = await GemsServiceV1Class(self.gems, self.conversations).get_chat(str(self.gem.id))
@@ -476,7 +490,7 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
 
-    assert socket.frames[0] == {"type": "link.ready", "version": 5}
+    assert socket.frames[0] == {"type": "link.ready", "version": 6}
     assert socket.frames[1:] == [
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "Hi "},
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "there."},
@@ -516,7 +530,9 @@ async def test_the_next_message_is_sent_the_stored_conversation() -> None:
         {"role": "user", "content": "how are you?"},
     ]
     stored = await setup.store.load(setup.gem.id)
-    assert [item.place for item in stored] == [0, 1, 2, 3]
+    # Each is the kind of entry it is, and they are read back in the order of their numbers.
+    assert [item.kind for item in stored] == ["user.said", "gem.said", "user.said", "gem.said"]
+    assert [item.seq for item in stored] == sorted(item.seq for item in stored)
     await _close(socket, linked)
 
 
@@ -585,18 +601,19 @@ async def test_messages_faster_than_the_reply_are_each_cut_in_turn() -> None:
         ("chat.done", "Sure."),
     ]
     assert len(setup.llm.requests) == 2
-    # No reply got through to the middle message, so the last one joins it: they are
-    # one turn, as words are in a call.
+    # No reply got through to the middle message. It is stored as it was sent, and the
+    # last one follows it: the reply answers both.
     assert [item["content"] for item in await setup.stored()] == [
         "a story",
         "Once upon…",
-        "no wait\nthe weather",
+        "no wait",
+        "the weather",
         "Sure.",
     ]
     await _close(socket, linked)
 
 
-async def test_a_message_sent_before_any_of_the_reply_got_through_joins_the_open_turn() -> None:
+async def test_a_message_sent_before_any_of_the_reply_got_through_follows_the_first() -> None:
     pause = asyncio.Event()
     setup = await _chat([pause, _delta("Never said.")], _said("Sunny."))
     socket, linked = await _open(setup.service())
@@ -607,16 +624,24 @@ async def test_a_message_sent_before_any_of_the_reply_got_through_joins_the_open
     await socket.until("chat.done")
 
     assert socket.chat() == [("chat.cut", "…"), ("chat.text", "Sunny."), ("chat.done", "Sunny.")]
-    # The model was asked about the first message, and is then asked about both, as
-    # one turn that gained a line. They are stored once, as one user item.
+    # The model was asked about the first message, and is then asked about both: the
+    # second follows the first, and nothing it was sent before has changed.
     first, second = setup.llm.requests
     assert first["input"] == [{"role": "user", "content": "a story"}]
-    assert second["input"] == [{"role": "user", "content": "a story\nno, the weather"}]
+    assert second["input"] == [
+        {"role": "user", "content": "a story"},
+        {"role": "user", "content": "no, the weather"},
+    ]
     assert await setup.stored() == [
-        {"role": "user", "content": "a story\nno, the weather"},
+        {"role": "user", "content": "a story"},
+        {"role": "user", "content": "no, the weather"},
         {"role": "assistant", "content": "Sunny."},
     ]
-    assert await setup.shown() == [("user", "a story\nno, the weather"), ("gem", "Sunny.")]
+    assert await setup.shown() == [
+        ("user", "a story"),
+        ("user", "no, the weather"),
+        ("gem", "Sunny."),
+    ]
     await _close(socket, linked)
 
 
@@ -728,7 +753,7 @@ async def test_a_message_no_reply_can_be_made_to_gets_chat_error_and_stores_noth
     await socket.until("chat.error")
 
     assert socket.frames[1:] == [{"type": "chat.error", "gem": gem_id, "text": reason}]
-    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert _stored_items(setup.docdb) == []
     assert setup.llm.requests == []
     await _close(socket, linked)
 
@@ -750,32 +775,28 @@ async def test_a_reply_that_fails_part_way_keeps_what_was_sent() -> None:
 
 async def test_a_reply_that_cannot_be_stored_ends_in_chat_error() -> None:
     setup = await _chat(_said("Hi."), _said("Hi again."))
-    # Another process took the conversation's next place first.
-    await setup.store.add([_item(setup.gem.id, 0, "from elsewhere")])
-    setup = setup.again(store=_BlindStore(setup.store))
     socket, linked = await _open(setup.service())
+    # The database takes nothing.
+    setup.docdb.breaks_after = 0
 
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.error")
 
     assert socket.chat()[-1] == (
         "chat.error",
-        "the reply could not be stored: duplicate key: that place is taken",
+        "the reply could not be stored: the database went away part-way",
     )
+    assert await setup.stored() == []
+    # What could not be stored is dropped, not kept for later: the next reply starts
+    # from what is stored, and is stored by itself.
+    setup.docdb.breaks_after = None
+    socket.send(setup.gem.id, "hello again")
+    await socket.until("chat.done")
+    assert await setup.stored() == [
+        {"role": "user", "content": "hello again"},
+        {"role": "assistant", "content": "Hi again."},
+    ]
     await _close(socket, linked)
-
-
-class _BlindStore:
-    """A store that does not see what another process wrote."""
-
-    def __init__(self, store: ConversationStoreClass) -> None:
-        self._store = store
-
-    async def load(self, gem_id: ObjectId) -> list[ConversationItem]:
-        return []
-
-    async def add(self, items: Sequence[ConversationItem]) -> None:
-        await self._store.add(items)
 
 
 @pytest.mark.parametrize(
@@ -906,14 +927,13 @@ async def test_a_gem_without_search_or_without_the_key_is_offered_no_tools() -> 
 
 async def test_the_history_is_shown_oldest_first_with_times_in_utc() -> None:
     setup = await _chat()
-    await setup.store.add(
+    await setup.store.write(
         [
             _item(setup.gem.id, 0, "what is my balance?"),
-            ConversationItem(
-                gem_id=setup.gem.id,
-                place=1,
-                at=_NOW,
-                item={
+            _kept(
+                setup.gem.id,
+                1,
+                {
                     "type": "function_call",
                     "call_id": "c",
                     "name": "web_search",
@@ -921,17 +941,15 @@ async def test_the_history_is_shown_oldest_first_with_times_in_utc() -> None:
                 },
                 shown="current balance of the savings account",
             ),
-            ConversationItem(
-                gem_id=setup.gem.id,
-                place=2,
-                at=_NOW,
-                item={"type": "function_call_output", "call_id": "c", "output": "40,000"},
+            _kept(
+                setup.gem.id,
+                2,
+                {"type": "function_call_output", "call_id": "c", "output": "40,000"},
             ),
-            ConversationItem(
-                gem_id=setup.gem.id,
-                place=3,
-                at=_NOW,
-                item={"role": "assistant", "content": "It is forty thousand rupees."},
+            _kept(
+                setup.gem.id,
+                3,
+                {"role": "assistant", "content": "It is forty thousand rupees."},
             ),
         ]
     )
@@ -968,7 +986,7 @@ async def test_a_deleted_gem_has_no_history() -> None:
 
     await setup.gems.delete(str(setup.gem.id))
 
-    assert setup.docdb.collections["ChatItems"] == []
+    assert _stored_items(setup.docdb) == []
     with pytest.raises(NotFoundError):
         await GemsServiceV1Class(setup.gems, setup.conversations).get_chat(str(setup.gem.id))
 
@@ -1034,16 +1052,17 @@ async def test_a_gem_that_lost_its_search_still_declares_it_while_its_history_ho
     await _close(socket, linked)
 
 
-async def test_a_write_that_stops_part_way_leaves_none_of_the_reply() -> None:
+async def test_a_write_that_stops_part_way_leaves_nothing_half_stored() -> None:
     call = _search_call("Pune weather")
     setup = await _chat(
         [_delta("Let me look."), _starts(call), _completed(call)], _said("Sunny."), _said("Hi.")
     )
     socket, linked = await _open(setup.service())
 
-    # The write stops after the user's message, the first text and the call: a call
-    # would be left with no result.
-    setup.docdb.breaks_after = 3
+    # Every write of more than one entry stops after its first, as it would between a
+    # call and its result. What it did put in is taken out again, and nothing that was
+    # added after an entry that is not stored is stored ahead of it.
+    setup.docdb.breaks_after = 1
     socket.send(setup.gem.id, "weather?")
     await socket.until("chat.error")
     assert socket.chat()[-1][1].startswith("the reply could not be stored")
@@ -1070,7 +1089,7 @@ async def test_a_gem_deleted_while_its_reply_is_written_leaves_no_conversation()
     held.set()
     await socket.until("chat.done")
 
-    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert _stored_items(setup.docdb) == []
     await _close(socket, linked)
 
 
@@ -1951,7 +1970,7 @@ async def test_a_deleted_gems_late_result_is_dropped() -> None:
     searches.gates[_WEATHER].set()
     await _settle()
 
-    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert _stored_items(setup.docdb) == []
     assert ("chat.result", _WEATHER) not in socket.chat()
     assert len(setup.llm.requests) == 2
     await _close(socket, linked)
@@ -2002,10 +2021,12 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
     searches.gates[_WEATHER].set()
     await socket.until("chat.done", 2)
     # And a search lost to a restart, closed before a message.
-    await setup.store.add(
+    await setup.store.write(
         [
-            ConversationItem(gem_id=setup.gem.id, place=place, at=_NOW, item=item, mark=mark)
-            for place, (item, mark) in enumerate(
+            _kept(setup.gem.id, seq, item, mark=mark)
+            for seq, (item, mark) in zip(
+                # The next numbers of the gem's log, as the log itself hands them out.
+                setup.conversations.log.take(setup.gem.id, 3),
                 [
                     ({"role": "user", "content": "and Delhi?"}, None),
                     (
@@ -2026,7 +2047,7 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
                         "placeholder",
                     ),
                 ],
-                start=len(await setup.stored()),
+                strict=True,
             )
         ]
     )
@@ -2173,6 +2194,9 @@ class _FlakyGems:
     async def get(self, gem_id: str) -> GemConfig:
         return await self._gems.get(gem_id)
 
+    def when_deleted(self, told: Any) -> None:
+        self._gems.when_deleted(told)
+
     async def exists(self, gem_id: str) -> bool:
         if self.fails:
             self.fails -= 1
@@ -2262,10 +2286,9 @@ async def test_a_search_running_when_its_reply_cannot_be_stored_is_stopped() -> 
     # Its call is in no stored conversation, so nothing could take its result.
     searches = _Searches(_WEATHER)
     setup = await _chat(_looks(), search=searches)
-    # Another process took the conversation's next place first.
-    await setup.store.add([_item(setup.gem.id, 0, "from elsewhere")])
-    setup = setup.again(store=_BlindStore(setup.store))
     socket, linked = await _open(setup.service())
+    # The database takes nothing.
+    setup.docdb.breaks_after = 0
     socket.send(setup.gem.id, "weather?")
     await socket.until("chat.tool")
 
@@ -2273,6 +2296,7 @@ async def test_a_search_running_when_its_reply_cannot_be_stored_is_stopped() -> 
     await _settle()
 
     assert searches.cancelled == [_WEATHER]
+    assert _stored_items(setup.docdb) == []
     assert setup.conversations._kept == {}
 
 
@@ -2288,11 +2312,11 @@ async def test_a_search_running_when_its_gem_is_deleted_is_stopped() -> None:
     await _settle()
 
     assert searches.cancelled == [_WEATHER]
-    assert setup.docdb.collections.get("ChatItems", []) == []
+    assert _stored_items(setup.docdb) == []
     assert setup.conversations._kept == {}
 
 
-async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_open() -> None:
+async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_stored() -> None:
     setup = await _chat(_said("Hi."))
     socket, linked = await _open(setup.service())
 
@@ -2300,17 +2324,17 @@ async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_open(
     await _close(socket, linked)
     await _settle()
 
-    # No reply got through, so nothing is stored: the message waits, in memory, for the
-    # next one to join it. That client is not written to again.
-    assert await setup.stored() == []
-    [kept] = setup.conversations._kept.values()
-    assert kept.turn.open
+    # No reply got through, yet the message was sent: it is stored as it stands, and
+    # nothing of it is kept in memory. That client is not written to again.
+    assert await setup.stored() == [{"role": "user", "content": "hello"}]
+    assert setup.conversations._kept == {}
     assert setup.chat._latest == {}
     other, other_linked = await _open(setup.service())
     other.send(setup.gem.id, "are you there?")
     await other.until("chat.done")
     assert await setup.stored() == [
-        {"role": "user", "content": "hello\nare you there?"},
+        {"role": "user", "content": "hello"},
+        {"role": "user", "content": "are you there?"},
         {"role": "assistant", "content": "Hi."},
     ]
     await _close(other, other_linked)

@@ -16,12 +16,13 @@ Each part is a paragraph of its own, followed by a blank line. An empty part add
 nothing, not even the blank line.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.entities.gem_ent import GemConfig
 
-__all__ = ["DEFAULT_DARBAR", "Layer", "instruction_layers", "instructions"]
+__all__ = ["DEFAULT_DARBAR", "Layer", "instruction_layers", "instructions", "joined"]
 
 # How things are here, told to every gem first, until the user writes their own (see
 # `darbar_ent.py`). It says what a call and writing are, what a reply ending in "…" means
@@ -89,7 +90,11 @@ def instructions(
     now: datetime | None = None,
 ) -> str:
     """The whole instructions, as the model is sent them."""
-    layers = instruction_layers(darbar=darbar, gem=gem, model_needs=model_needs, now=now)
+    return joined(instruction_layers(darbar=darbar, gem=gem, model_needs=model_needs, now=now))
+
+
+def joined(layers: Sequence[Layer]) -> str:
+    """The layers as one text, as the model is sent them."""
     return "".join(layer.text for layer in layers)
 
 

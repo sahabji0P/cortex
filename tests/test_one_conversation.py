@@ -14,18 +14,19 @@ from typing import Any, cast
 
 import pytest
 
-from app.entities.call_ent import CallEntityClass, CallFault, OpenCall
+from app.entities.call_ent import CallEntityClass, OpenCall
 from app.entities.chat_ent import ChatEntityClass, ChatEvent
 from app.entities.conversation_ent import ConversationEntityClass
-from app.entities.conversation_store import ConversationItem, ConversationStoreClass
+from app.entities.conversation_store import ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
+from app.entities.gem_log import Recording
 from app.entities.history import Mode
 from app.entities.late_results import LateResults
 from app.entities.model import Item
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation
-from tests.test_chat import _NOW, _docdb, _NoKey, _said
+from tests.test_chat import _docdb, _kept, _NoKey, _said
 from tests.test_voice_conversation import (
     _DELAY,
     _LLM,
@@ -105,6 +106,7 @@ class _Line:
         last_mode: Mode = "chat",
         late: LateResults | None = None,
         connected: Sequence[Tool] = (),
+        record: Recording | None = None,
     ) -> VoiceConversation:
         voice = self._voice
         stt, tts = _STT(), _TTS()
@@ -120,6 +122,7 @@ class _Line:
             last_mode=last_mode,
             late=late,
             connected=connected,
+            record=record,
             clock=voice.clock,
         )
         voice.calls.append(
@@ -160,10 +163,10 @@ class _World(SimpleNamespace):
     gem: GemConfig
 
     async def stored(self) -> list[Any]:
-        return [entry.item for entry in await self.store.load(self.gem.id)]
+        return [entry.data.item for entry in await self.store.load(self.gem.id)]
 
     async def modes(self) -> list[str]:
-        return [entry.mode for entry in await self.store.load(self.gem.id)]
+        return [entry.data.mode for entry in await self.store.load(self.gem.id)]
 
     async def write(self, text: str, client: _Client | None = None) -> _Client:
         """Write to the gem, and wait until the reply is stored."""
@@ -336,31 +339,46 @@ async def test_a_reply_cut_by_hanging_up_is_stored_as_heard() -> None:
     assert await world.stored() == [_CALLED, _user("tell me a story"), _gem_said("Once upon…")]
 
 
-@pytest.mark.parametrize("how", ["silence", "greeting unheard", "reply unheard"])
-async def test_a_call_in_which_nothing_was_said_stores_nothing(how: str) -> None:
+@pytest.mark.parametrize("how", ["silence", "greeting unheard"])
+async def test_a_call_in_which_nothing_was_said_leaves_the_lines_that_opened_it(how: str) -> None:
     never = asyncio.Event()
     unheard = [] if how == "silence" else [[_delta("Hi, how can I help?"), never]]
     world = await _world(*unheard, _said("Hello."), speaks_first=how == "greeting unheard")
 
     call, f, keeping = await world.call()
-    if how == "reply unheard":
-        f.stt.say("hello")
     if how != "silence":
         await _read_until(f.conversation, "assistant.word")
     await _hang_up(call, keeping)
 
-    # Our lines wait for something to follow them, and the user's open turn, with no
-    # reply heard, is not stored.
-    assert await world.stored() == []
+    # A line of ours is final when it is written: the call happened, and it is stored.
+    stored = await world.stored()
+    assert stored[0] == _CALLED
+    assert len(stored) == (1 if how == "silence" else 2)
     assert world.conversations._kept == {}
-    # Written to next, the conversation is as it was: written, and empty. What the call
-    # sent the model and never settled is not in that request: the one place a request
-    # does not start with the whole of the one before it.
-    sent_in_the_call = len(world.llm.requests)
-    world.llm.requests.clear()
+    # So whatever the call sent the model is what the next request starts with.
+    sent_in_the_call = [request["input"] for request in world.llm.requests]
+    assert sent_in_the_call == ([] if how == "silence" else [stored])
     await world.write("hi")
-    assert sent_in_the_call == (0 if how == "silence" else 1)
-    assert world.llm.requests[-1]["input"] == [_user("hi")]
+    assert world.llm.requests[-1]["input"] == [*stored, _ENDED, _user("hi")]
+
+
+async def test_what_the_user_said_in_a_call_is_stored_though_no_reply_was_heard() -> None:
+    never = asyncio.Event()
+    world = await _world([_delta("Hi, how can I help?"), never], _said("Hello."))
+
+    call, f, keeping = await world.call()
+    f.stt.say("hello")
+    await _read_until(f.conversation, "assistant.word")
+    await _hang_up(call, keeping)
+
+    # They said it, and the model was sent it: it is stored, with the line before it.
+    assert await world.stored() == [_CALLED, _user("hello")]
+    assert world.conversations._kept == {}
+    # So the next request, in writing, starts with the whole of the one before it.
+    in_the_call = world.llm.requests[-1]["input"]
+    assert in_the_call == [_CALLED, _user("hello")]
+    await world.write("hi")
+    assert world.llm.requests[-1]["input"] == [*in_the_call, _ENDED, _user("hi")]
 
 
 # ---- tool calls that outlive a call, or a written reply
@@ -394,9 +412,9 @@ async def test_a_search_running_when_a_call_ends_is_stored_and_its_result_told_i
         },
     ]
     placeholder = (await world.store.load(world.gem.id))[-1]
-    assert placeholder.item["type"] == "function_call_output"
-    assert placeholder.mark == "placeholder"
-    assert placeholder.mode == "call"
+    assert placeholder.data.item["type"] == "function_call_output"
+    assert placeholder.data.mark == "placeholder"
+    assert placeholder.data.mode == "call"
     # The search carries on after the call.
     assert world.conversations._kept[str(world.gem.id)].late.holds("call_1")
 
@@ -520,10 +538,10 @@ async def test_a_search_lost_to_a_restart_is_closed_before_the_call_s_first_repl
         "call_id": "call_1",
         "output": "Still running in the background.",
     }
-    await world.store.add(
+    await world.store.write(
         [
-            ConversationItem(gem_id=world.gem.id, place=place, at=_NOW, item=item, mark=mark)
-            for place, (item, mark) in enumerate(
+            _kept(world.gem.id, seq, item, mark=mark)
+            for seq, (item, mark) in enumerate(
                 [(_user("weather?"), None), (search_call, None), (placeholder, "placeholder")]
             )
         ]
@@ -568,7 +586,7 @@ async def test_a_call_straight_after_a_call_opens_with_its_own_line() -> None:
 # ---- one writer at a time
 
 
-async def test_a_written_turn_left_open_is_closed_before_a_call() -> None:
+async def test_a_message_no_reply_got_through_to_is_stored_before_a_call() -> None:
     pause = asyncio.Event()
     world = await _world([pause, _delta("Never said.")], _spoken("Hello."))
     client = _Client()
@@ -583,7 +601,7 @@ async def test_a_written_turn_left_open_is_closed_before_a_call() -> None:
     await _said_and_heard(f, "hello")
     await _hang_up(call, keeping)
 
-    # The message was sent to the model, so the call follows it rather than drop it.
+    # The message was sent to the model and is stored as it was sent: the call follows it.
     assert client.frames == [("chat.cut", "…")]
     assert await world.stored() == [
         _user("are you there?"),
@@ -591,35 +609,3 @@ async def test_a_written_turn_left_open_is_closed_before_a_call() -> None:
         _user("hello"),
         _gem_said("Hello."),
     ]
-
-
-async def test_a_written_turn_left_open_stays_open_when_the_call_cannot_store_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The message was sent to the model. If the call that was to follow it does not
-    # open, it must still be there for the next message to join, or the next request
-    # would not start with the one before it.
-    pause = asyncio.Event()
-    world = await _world([pause, _delta("Never said.")], _said("Here I am."))
-    client = _Client()
-    world.chat.send(str(world.gem.id), "are you there?", client.deliver)
-    async with asyncio.timeout(2):
-        while True:
-            if world.llm.requests:
-                break
-            await asyncio.sleep(0)
-
-    async def out_of_reach(items: Sequence[ConversationItem]) -> None:
-        raise ConnectionError("the database is out of reach")
-
-    monkeypatch.setattr(world.store, "add", out_of_reach)
-    with pytest.raises(CallFault, match="could not be stored"):
-        await world.calls.open(str(world.gem.id))
-    monkeypatch.undo()  # the database is back
-
-    again = await world.write("hello?")
-
-    assert client.frames == [("chat.cut", "…")]
-    assert again.frames[-1] == ("chat.done", "Here I am.")
-    assert world.llm.requests[-1]["input"] == [_user("are you there?\nhello?")]
-    assert await world.stored() == [_user("are you there?\nhello?"), _gem_said("Here I am.")]

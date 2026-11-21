@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, Field
 
@@ -54,6 +54,18 @@ class LinkModels:
                 type: Literal["call.playback"]
                 delay: float = Field(ge=0)
 
+            class LogWatch(BaseModel):
+                """Send this socket each entry of a gem's log as it is written down.
+
+                `gem` is the gem's id. Left out, or null, every gem's log is sent.
+                Nothing is sent of what was written down before: that is read with
+                `GET /v1/gems/{id}/log`. `log.unwatch` with a gem's id stops that
+                gem's, and with none stops them all, whatever was asked for.
+                """
+
+                type: Literal["log.watch", "log.unwatch"]
+                gem: str | None = None
+
         class Output:
             class Ready(BaseModel):
                 """Sent once, as soon as the socket is open."""
@@ -63,7 +75,22 @@ class LinkModels:
                 # 3: a search carries on after a cut, and its result is told later.
                 # 4: a call's reply comes as words timed to its audio, not as text.
                 # 5: a connection whose sign-in changes is told (`connection.changed`).
-                version: Literal[5] = 5
+                # 6: a gem's log can be watched (`log.watch`, `log.entry`).
+                version: Literal[6] = 6
+
+            class LogEntry(BaseModel):
+                """One entry of a gem's log, as it is written down, for a socket that watches it.
+
+                `entry` has `seq`, `at`, `kind` and `turn`, then its own fields by kind
+                (see `docs/chat-contract.md`). A long text or list in it is cut short
+                here, and the entry then says `partial`: the whole of it is read with
+                `GET /v1/gems/{id}/log/{seq}`. An entry is placed by its `seq`: an item
+                can come after an entry with a higher number.
+                """
+
+                type: Literal["log.entry"] = "log.entry"
+                gem: str
+                entry: dict[str, Any]
 
             class ConnectionChanged(BaseModel):
                 """A connection's sign-in has changed: read it again (`GET /v1/connections/{id}`).

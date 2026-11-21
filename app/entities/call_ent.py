@@ -9,13 +9,12 @@ message cuts it, and the call opens once that reply is stored. The call then sta
 the gem's conversation as it is stored, and adds its turns to it. The standing socket
 (`app/routers/link`) holds the call from there.
 
-What the call adds is stored as it is settled, in order, after what was stored before:
-the user's turns, the gem's replies as they were heard, tool calls and their results,
-and our own lines. A line of ours is stored with the first item that follows it, so a
-call in which nothing was said stores nothing. The user's open turn, and a reply that
-can still be cut, are never stored. The database is the truth: if what the call settled
-cannot be stored, the call is not to carry on unsaved, and fails. Everything settled is
-stored by the time the call is closed, and only then is the gem let go.
+What the call adds is stored as it is added, in order, after what was stored before:
+our own lines, what the user says, the gem's replies as they were heard, and tool calls
+with their results. A reply that can still be cut is never stored. The database is the
+truth: if what the call added cannot be stored, the call is not to carry on unsaved,
+and fails. Everything it added is stored by the time the call is closed, and only then
+is the gem let go.
 
 Two kinds of "no" are told apart, because the app is told them apart:
 
@@ -36,10 +35,10 @@ from pydantic import ValidationError
 
 from app.core.errors import NotFoundError
 from app.entities.connection_ent import ConnectionEntityClass
-from app.entities.conversation_ent import ConversationEntityClass, Stored
+from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
-from app.entities.history import mode_line, settled
+from app.entities.gem_log import Recording
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass, VoiceEvent, VoiceLine
 
@@ -69,9 +68,10 @@ class CallFault(Exception):
 class OpenCall:
     """A call with a gem, from when it takes hold of the gem until it lets it go.
 
-    It holds the voice conversation, and stores what the conversation settles after the
-    gem's stored conversation. `keep` stores as the call goes; `close` ends the call,
-    stores the rest, and lets the gem go.
+    It holds the voice conversation. What the conversation adds is handed to the gem's
+    log as it is added, and written behind the call's back: `keep` sees to it that it is
+    stored as the call goes, and fails the call if it cannot be. `close` ends the call,
+    waits for the rest to be stored, and lets the gem go.
     """
 
     def __init__(self, conversations: ConversationEntityClass, key: str, gem_id: ObjectId) -> None:
@@ -79,20 +79,19 @@ class OpenCall:
         self._key = key
         self._gem_id = gem_id
         self._conversation: VoiceConversation | None = None
-        # The gem's conversation as stored, with what this call has stored of its own.
-        self._stored = Stored([])
-        # How many of the items the conversation added are stored.
-        self._kept = 0
-        self._storing = asyncio.Lock()
-        # The latest write `keep` started. It is not stopped when `keep` is, so a write
-        # the database may already have taken is never cut off half-way.
+        # The latest wait for a write that `keep` started. It is not stopped when `keep`
+        # is, so a write the database may already have taken is never cut off half-way.
         self._writing: asyncio.Future[None] | None = None
         self._let_go = False
+        self._record: Recording | None = None
 
-    def begin(self, conversation: VoiceConversation, stored: Stored) -> None:
-        """The call's conversation is open, on the gem's conversation as `stored`."""
+    def begin(self, conversation: VoiceConversation, record: Recording | None = None) -> None:
+        """The call's conversation is open, on the gem's conversation as it is stored.
+
+        `record` is where the call's end is written down, if anywhere.
+        """
         self._conversation = conversation
-        self._stored = stored
+        self._record = record
 
     def results_came(self) -> None:
         """A late result of the gem's has come in: it is told in the call."""
@@ -109,7 +108,7 @@ class OpenCall:
         return self._open().outputs()
 
     async def keep(self) -> None:
-        """Store what the call settles, as it settles, for as long as the call is open.
+        """See that what the call adds is stored, as it is added, for as long as it is open.
 
         Raises `CallFault` if it cannot be stored.
         """
@@ -131,7 +130,13 @@ class OpenCall:
                 try:
                     await self._conversation.close()
                 finally:
-                    await self._store_last()
+                    try:
+                        await self._store_last()
+                    finally:
+                        # Last, after what the call settled: the call is over.
+                        if self._record is not None:
+                            self._record.call_closed()
+                            self._record = None
         finally:
             self.let_go()
 
@@ -142,21 +147,23 @@ class OpenCall:
             self._conversations.call_ended(self._key, self)
 
     async def _store_last(self) -> None:
-        """Store the rest of what the call settled, once it is closed."""
+        """Wait for the rest of what the call added to be stored, once it is closed."""
         conversation = self._open()
         if self._writing is not None:
-            # A write `keep` started finishes first. If it failed, what it was writing
-            # is tried again below.
+            # A wait `keep` started finishes first. If the write it waited for failed,
+            # it is tried again below.
             await asyncio.gather(self._writing, return_exceptions=True)
         try:
             await self._store()
-        except CallFault:
-            # The placeholders of the calls it left running are in no stored
-            # conversation: nothing could take their results.
+        except BaseException:
+            # The call fails for it, or this was stopped, and nothing tries again: what
+            # could not be stored is dropped. The placeholders among it are in no stored
+            # conversation, so nothing could take the results of the calls they stand for.
+            dropped = self._conversations.log.give_up(self._gem_id)
             unstored = {
-                added.item["call_id"]
-                for added in conversation.added[self._kept :]
-                if "call_id" in added.item and added.mark == "placeholder"
+                entry.data["item"]["call_id"]
+                for entry in dropped
+                if entry.kind == "tool.result" and entry.data.get("mark") == "placeholder"
             }
             calls = [call for call in conversation.left_running if call.call_id in unstored]
             self._conversations.gem(self._key).late.forget(calls)
@@ -166,20 +173,11 @@ class OpenCall:
             self._conversations.gem(self._key).late.forget(conversation.left_running)
 
     async def _store(self) -> None:
-        """Store what the conversation has settled and is not stored yet, in order."""
-        conversation = self._open()
-        async with self._storing:
-            # A line of ours waits for the first item that follows it.
-            ready = settled(conversation.added)
-            if ready <= self._kept:
-                return
-            try:
-                self._stored = await self._conversations.add(
-                    self._gem_id, self._stored, conversation.added[self._kept : ready], "call"
-                )
-            except Exception as exc:
-                raise CallFault("the conversation could not be stored", exc) from exc
-            self._kept = ready
+        """Wait until what the conversation has added so far is stored."""
+        try:
+            await self._conversations.log.stored(self._gem_id)
+        except Exception as exc:
+            raise CallFault("the conversation could not be stored", exc) from exc
 
     def _open(self) -> VoiceConversation:
         if self._conversation is None:
@@ -276,27 +274,26 @@ class CallEntityClass:
                 stored = await self._conversations.load(gem_id)
             except Exception as exc:
                 raise CallFault("the conversation could not be read", exc) from exc
-            if kept.turn.open:
-                # A written turn left open has been sent to the model: the call follows it.
-                added = [*mode_line("chat", stored.mode), *kept.turn.added()]
-                try:
-                    stored = await self._conversations.add(gem_id, stored, added, "chat")
-                except Exception as exc:
-                    raise CallFault("the conversation could not be stored", exc) from exc
-                # Closed only now that it is stored. Until then it is still open: if the
-                # call does not open after all, the next message joins it.
-                kept.turn.close()
-            # Nothing is awaited after this, so a caller that cancels the opening either
-            # gets the call back, to close, or none was made.
-            conversation = line.open(
-                darbar=darbar,
-                history=stored.items,
-                last_mode=stored.mode,
-                late=kept.late,
-                connected=connected,
-            )
+            # What happens in the call is written down in the gem's log.
+            record = self._conversations.recording(gem_id, "call")
+            record.call_opened()
+            try:
+                # Nothing is awaited after this, so a caller that cancels the opening
+                # either gets the call back, to close, or none was made.
+                conversation = line.open(
+                    darbar=darbar,
+                    history=stored.items,
+                    last_mode=stored.mode,
+                    late=kept.late,
+                    connected=connected,
+                    record=record,
+                )
+            except BaseException:
+                # It did not open after all: the log does not leave it open.
+                record.call_closed()
+                raise
         except BaseException:
             call.let_go()
             raise
-        call.begin(conversation, stored)
+        call.begin(conversation, record)
         return call
