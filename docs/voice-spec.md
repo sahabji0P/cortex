@@ -3,7 +3,8 @@
 What a call does, and what the model is sent while it lasts. Written on 17 November 2026
 from the code on `main`, and brought up to date on 18 November 2026, when a call became
 part of the gem's one stored conversation, and on 20 November 2026, when everything
-began to join the history the moment it is final. The picture that goes with it is
+began to join the history the moment it is final, and when the date left the
+instructions for a line in the conversation. The picture that goes with it is
 [`voice-context.excalidraw`](voice-context.excalidraw).
 
 This describes the code as it is. It proposes nothing. Where the project's notes have
@@ -289,9 +290,10 @@ words in the call (and with a tool result before it, if the written part ended i
 - **Nothing changes after being sent.** (Enforced) Everything is added the moment it is
   final, before the request that carries it. Nothing is ever rewritten: no result is
   cleared.
-- **The instructions and the tool list are the same for the whole call.** (Enforced) The
-  date is the last line of the instructions, so everything before it is the same in
-  every call with the same gem and Darbar text, on any day.
+- **The instructions and the tool list are the same for the whole call.** (Enforced)
+  Nothing in the instructions changes by itself: they are the same in every call and
+  every written reply with the same gem, Darbar text and model, on any day. The date and
+  the time are a line in the history (see below), so a new day only adds to its end.
 - **Switching thinking on costs a cache miss**, according to the README's live runs. This
   is the "little thinking while a search has no result yet" above, and the reason it is
   not done on Anthropic.
@@ -322,8 +324,10 @@ words in the call (and with a tool result before it, if the written part ended i
 Sent at the start of every request, as printed from the code. They are the same in a
 call and in writing, and whichever tools are offered. They come in two parts: the Darbar
 text, the same for every gem, and the gem's own name and instructions. What the model
-needs of its own and the date follow. The parts in braces come from the Darbar setting
-and the gem's config.
+needs of its own follows. The date and the time are not here: a line in the history
+gives them (see
+[What the server writes into the history](#what-the-server-writes-into-the-history)).
+The parts in braces come from the Darbar setting and the gem's config.
 
 ```text
 {the Darbar text}
@@ -333,8 +337,6 @@ You are {the gem's name}.
 {the gem's own instructions}
 
 {for an Anthropic model, the line about <note> tags}
-
-Today is {date}.
 ```
 
 The Darbar text is the one the user has set, read once when the call opens. Until they
@@ -402,8 +404,9 @@ Everything in the history that neither the user nor the model wrote (all Enforce
 
 | What | Shape | When | Text |
 | --- | --- | --- | --- |
-| Call-start line | Note, after the stored conversation | A call whose stored conversation ends in writing, or is empty | "The user has called you. From here on the conversation is spoken." |
+| Call-start line | Note, after the stored conversation | Every call, as it opens (also straight after another call) | "The user has called you. From here on the conversation is spoken." |
 | Call-ended line | Note, written by chat | The first written turn after a call | "The call has ended. From here on the conversation is written." |
+| Time line | Note, right after the call-start line, before a greeting | Every call as it opens. In writing, before a message when none has been written, the last is over ten minutes old, or the date has changed in the user's zone | "It is {weekday}, {day} {month} {year}, {h:mm} {am/pm} in {time zone}." in the zone the app sent on `call.start` or `chat.send`; with none, "It is ... {h:mm} {am/pm} UTC. The user's time zone is not known." |
 | Greeting note | Note, after the stored conversation and the call-start line | The call opens with the assistant speaking first | "The call has just connected and the user has not said anything yet. Greet them in one short sentence and ask what you can do for them." |
 | Lost stub | A call written by the server, then its result | A placeholder whose search was lost to a restart, when the call opens | "This call was lost before it finished, and its result will not arrive. Make it again if it is still needed." |
 | Cut mark | The end of a reply's text | A reply was cut part-way | "…" |

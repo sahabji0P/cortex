@@ -19,6 +19,7 @@ dependencies = [
     "anthropic>=2.8.0",
     "mcp>=2.3.0",
     "jsonschema>=4.26.0",
+    "tzdata>=2026.6",
 ]
 
 [project.optional-dependencies]

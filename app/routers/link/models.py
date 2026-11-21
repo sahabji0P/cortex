@@ -1,6 +1,8 @@
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, BeforeValidator, Field
+
+from app.entities.history import zone_named
 
 # The whole stored conversation is sent to the model with every message, for good. A
 # limit keeps one stray paste from riding along in every request after it.
@@ -13,6 +15,17 @@ def _not_blank(value: str) -> str:
     if not value.strip():
         raise ValueError("A message cannot be blank")
     return value
+
+
+def _zone_or_none(value: object) -> str | None:
+    # The user's time zone is never a reason to refuse a frame: a name that cannot be
+    # read, or anything else sent in its place, counts as none sent.
+    zone = zone_named(value)
+    return None if zone is None else zone.key
+
+
+# An IANA name such as "Asia/Kolkata", or None. With none, the time is given in UTC.
+type _TimeZone = Annotated[str | None, BeforeValidator(_zone_or_none)]
 
 
 class LinkModels:
@@ -31,6 +44,8 @@ class LinkModels:
                 text: Annotated[
                     str, Field(max_length=_MESSAGE_MAX_LENGTH), AfterValidator(_not_blank)
                 ]
+                # The user's time zone, for the line that gives the time before the message.
+                time_zone: _TimeZone = None
 
             class CallStart(BaseModel):
                 """Open a call with a gem. Anything else in the frame is ignored.
@@ -38,11 +53,14 @@ class LinkModels:
                 `gem` is the id of the gem to talk to. Its config says which model
                 answers. `first` says who says the first words: sent, it wins over the
                 gem's for this call; left out, or sent as null, it leaves the gem's.
+                `time_zone` is the user's, for the line that gives the time as the call
+                opens.
                 """
 
                 type: Literal["call.start"]
                 gem: str
                 first: Literal["user", "assistant"] | None = None
+                time_zone: _TimeZone = None
 
             class CallPlayback(BaseModel):
                 """How long the app's sound device delays audio before it is heard.

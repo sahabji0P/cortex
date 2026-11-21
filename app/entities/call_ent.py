@@ -39,6 +39,7 @@ from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import Recording
+from app.entities.history import TimeTold
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass, VoiceEvent, VoiceLine
 
@@ -202,11 +203,14 @@ class CallEntityClass:
         # The tool servers gems can use. Without it, no gem is offered a connection's tools.
         self._connections = connections
 
-    async def open(self, gem: str, *, speaks_first: bool | None = None) -> OpenCall:
+    async def open(
+        self, gem: str, *, speaks_first: bool | None = None, time_zone: str | None = None
+    ) -> OpenCall:
         """Open a call with a gem. The caller owns the call and must `close()` it.
 
         `gem` is the gem's id. Its config says which model answers. `speaks_first` wins
-        over the gem's when it is given; left out, it is the gem's to say.
+        over the gem's when it is given; left out, it is the gem's to say. `time_zone` is
+        the user's, as the app sent it: the call's line that gives the time is in it.
 
         Raises `CallRefused` for a gem that is not there (or an id that is not an id),
         for a gem already in a call, and for a model whose provider has no key. Anything
@@ -245,13 +249,18 @@ class CallEntityClass:
             # A speech service is unreachable or not configured.
             raise CallFault("speech services unavailable", exc) from exc
         try:
-            return await self._take(config.id, line, darbar, connected)
+            return await self._take(config.id, line, darbar, connected, time_zone)
         except BaseException:
             await line.close()
             raise
 
     async def _take(
-        self, gem_id: ObjectId, line: VoiceLine, darbar: str | None, connected: Sequence[Tool]
+        self,
+        gem_id: ObjectId,
+        line: VoiceLine,
+        darbar: str | None,
+        connected: Sequence[Tool],
+        time_zone: str | None,
     ) -> OpenCall:
         """Take hold of the gem, and open the call on its stored conversation.
 
@@ -287,6 +296,7 @@ class CallEntityClass:
                     late=kept.late,
                     connected=connected,
                     record=record,
+                    time_told=TimeTold(time_zone),
                 )
             except BaseException:
                 # It did not open after all: the log does not leave it open.

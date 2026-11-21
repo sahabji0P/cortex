@@ -159,7 +159,9 @@ class LinkServiceV1Class:
                         await send(LinkModels.V1.Output.Error(text=_reason(exc)))
                         continue
                     turns = [turn for turn in turns if not turn.over.is_set()]
-                    turns.append(self.chat.send(asked.gem, asked.text, send))
+                    turns.append(
+                        self.chat.send(asked.gem, asked.text, send, time_zone=asked.time_zone)
+                    )
                 elif kind == "call.start":
                     if busy():
                         # The running call carries on.
@@ -380,7 +382,9 @@ class _Call:
         if self._hung_up.is_set():
             return None
         first = None if start.first is None else start.first == "assistant"
-        opening = asyncio.create_task(self._calls.open(start.gem, speaks_first=first))
+        opening = asyncio.create_task(
+            self._calls.open(start.gem, speaks_first=first, time_zone=start.time_zone)
+        )
         hung_up = asyncio.create_task(self._hung_up.wait())
         try:
             await asyncio.wait({opening, hung_up}, return_when=asyncio.FIRST_COMPLETED)

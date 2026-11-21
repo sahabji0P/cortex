@@ -90,6 +90,8 @@ class Stored:
     items: list[Item]
     # "chat" for an empty conversation: it counts as written.
     mode: Mode = "chat"
+    # When the last line of ours that gave the time was written, if one was.
+    last_time: datetime | None = None
 
 
 class GemConversation:
@@ -214,7 +216,8 @@ class ConversationEntityClass:
         await self.log.written(gem_id)
         found = await self._store.load(gem_id)
         mode = found[-1].data.mode if found else "chat"
-        stored = Stored([entry.data.item for entry in found], mode)
+        last_time = next((e.at for e in reversed(found) if e.data.source == "time-line"), None)
+        stored = Stored([entry.data.item for entry in found], mode, last_time)
         lost = self._lost(str(gem_id), found, told)
         return await self.add(gem_id, stored, stubs(lost, "lost-call"), stored.mode)
 
@@ -235,7 +238,9 @@ class ConversationEntityClass:
         for one in added:
             record.remember(one)
         await self.stored(gem_id)
-        return Stored([*stored.items, *(one.item for one in added)], mode)
+        times = [one.at for one in added if one.source == "time-line"]
+        last_time = times[-1] if times else stored.last_time
+        return Stored([*stored.items, *(one.item for one in added)], mode, last_time)
 
     async def stored(self, gem_id: ObjectId) -> None:
         """Wait until what the gem remembers so far is stored.

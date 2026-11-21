@@ -8,7 +8,7 @@ reads shows up as a failing test.
 import asyncio
 import json
 from collections.abc import Iterable, MutableMapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -43,6 +43,7 @@ from tests.test_voice_conversation import (
     _starts,
 )
 from tests.test_voice_gem import _DARBAR
+from tests.time_lines import TIME_LINE, is_time_line
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -69,19 +70,17 @@ def _a_gem(**fields: object) -> GemConfig:
 
 
 def _told(name: str, own: str, darbar: str = _DARBAR) -> str:
-    today = datetime.now(UTC).strftime("%A, %d %B %Y")
-    return f"{darbar}You are {name}.\n\n{own}\n\nToday is {today}.\n"
+    return f"{darbar}You are {name}.\n\n{own}\n\n"
 
 
 def test_a_gem_in_writing_is_told_what_it_is_told_in_a_call() -> None:
     # One instruction text for a gem: nothing in it depends on how the gem is reached.
-    told = instructions(gem=_a_gem(), model_needs="- A need of the model's.\n", now=_NOW)
+    told = instructions(gem=_a_gem(), model_needs="- A need of the model's.\n")
 
     assert told == (
         _DARBAR
         + "You are Gem One.\n\nYou look after the user's personal finances.\n\n"
         + "- A need of the model's.\n\n"
-        + "Today is Tuesday, 17 November 2026.\n"
     )
 
 
@@ -297,8 +296,9 @@ class _LLM:
 
     A round's `asyncio.Event` pauses the stream there until the test sets it. Every
     request starts with the whole of the one before it for the same conversation (told
-    apart by its first message), which is the rule the history keeps: the one thing
-    that may change is the user's open turn, the last item, which can gain a line.
+    apart by its first message after the line that gives the time, which every one
+    starts with), which is the rule the history keeps: the one thing that may change is
+    the user's open turn, the last item, which can gain a line.
     """
 
     configured = True
@@ -312,7 +312,7 @@ class _LLM:
 
     async def stream_response(self, **request: Any) -> Any:
         sent = [dict(item) for item in request["input"]]
-        same = [r for r in self.requests if r["input"][:1] == sent[:1]]
+        same = [r for r in self.requests if _first(r["input"]) == _first(sent)]
         if same:
             _assert_only_grew(same[-1]["input"], sent)
         self.requests.append({**request, "input": sent})
@@ -326,6 +326,11 @@ class _LLM:
                     yield step
 
         return stream()
+
+
+def _first(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The first item of a request that is not the line that gives the time."""
+    return [item for item in items if not is_time_line(item.get("content"))][:1]
 
 
 class _NoKey:
@@ -497,6 +502,7 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
         {"type": "chat.done", "gem": str(setup.gem.id), "text": "Hi there."},
     ]
     assert await setup.stored() == [
+        TIME_LINE,
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "Hi there."},
     ]
@@ -508,6 +514,80 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     # Search, and as in a call, a way to stop one that carries on in the background.
     assert _tool_names(request) == ["web_search", "cancel_tool_call"]
     await _close(socket, linked)
+
+
+async def _nowhere(event: Any) -> None:
+    pass  # the frames of a reply, which these tests do not read
+
+
+async def test_a_message_gets_the_time_again_once_the_last_line_is_over_ten_minutes_old() -> None:
+    setup = await _chat(
+        [_delta("One."), _completed()],
+        [_delta("Two."), _completed()],
+        [_delta("Three."), _completed()],
+    )
+    gem = str(setup.gem.id)
+
+    await setup.chat.send(gem, "one", _nowhere, time_zone="Asia/Kolkata").over.wait()
+    # A minute later: the line before the first message still holds.
+    await setup.chat.send(gem, "two", _nowhere, time_zone="Asia/Kolkata").over.wait()
+    # The line is made eleven minutes old, as if the user came back later.
+    for entry in setup.docdb.collections[_name(LogEntry)]:
+        if entry["data"].get("source") == "time-line":
+            entry["at"] -= timedelta(minutes=11)
+    await setup.chat.send(gem, "three", _nowhere, time_zone="Asia/Kolkata").over.wait()
+
+    stored = await setup.stored()
+    assert stored == [
+        TIME_LINE,
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "One."},
+        {"role": "user", "content": "two"},
+        {"role": "assistant", "content": "Two."},
+        TIME_LINE,
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "Three."},
+    ]
+    # In the zone the app sent.
+    assert stored[0]["content"].endswith(" in Asia/Kolkata.")
+    # The model is sent the line as it is stored.
+    assert setup.llm.requests[-1]["input"] == stored[:-1]
+
+
+@pytest.mark.parametrize(
+    ("time_zone", "ends"),
+    [
+        ("Asia/Kolkata", " in Asia/Kolkata."),
+        # Anything that is not a zone is no reason to refuse the message.
+        (5, " UTC. The user's time zone is not known."),
+        (None, " UTC. The user's time zone is not known."),
+    ],
+)
+async def test_chat_send_carries_the_users_time_zone(time_zone: object, ends: str) -> None:
+    setup = await _chat([_delta("Hi."), _completed()])
+    socket, linked = await _open(setup.service())
+
+    socket.raw(
+        json.dumps(
+            {"type": "chat.send", "gem": str(setup.gem.id), "text": "hi", "time_zone": time_zone}
+        )
+    )
+    await socket.until("chat.done")
+
+    first = (await setup.stored())[0]
+    assert first == TIME_LINE
+    assert first["content"].endswith(ends)
+    await _close(socket, linked)
+
+
+async def test_a_zone_that_cannot_be_read_gives_the_time_in_utc() -> None:
+    setup = await _chat([_delta("Hi."), _completed()])
+
+    await setup.chat.send(str(setup.gem.id), "hi", _nowhere, time_zone="Mars/Olympus").over.wait()
+
+    first = (await setup.stored())[0]
+    assert first == TIME_LINE
+    assert first["content"].endswith(" UTC. The user's time zone is not known.")
 
 
 async def test_the_next_message_is_sent_the_stored_conversation() -> None:
@@ -531,7 +611,14 @@ async def test_the_next_message_is_sent_the_stored_conversation() -> None:
     ]
     stored = await setup.store.load(setup.gem.id)
     # Each is the kind of entry it is, and they are read back in the order of their numbers.
-    assert [item.kind for item in stored] == ["user.said", "gem.said", "user.said", "gem.said"]
+    # The second message comes seconds after the first: the time is given before the first only.
+    assert [item.kind for item in stored] == [
+        "note.written",
+        "user.said",
+        "gem.said",
+        "user.said",
+        "gem.said",
+    ]
     assert [item.seq for item in stored] == sorted(item.seq for item in stored)
     await _close(socket, linked)
 
@@ -554,12 +641,13 @@ async def test_a_new_message_cuts_the_reply_being_written() -> None:
         ("chat.done", "Sure."),
     ]
     assert await setup.stored() == [
+        TIME_LINE,
         {"role": "user", "content": "a story"},
         {"role": "assistant", "content": "Once upon a time…"},
         {"role": "user", "content": "actually, the weather"},
         {"role": "assistant", "content": "Sure."},
     ]
-    assert setup.llm.requests[1]["input"] == (await setup.stored())[:3]
+    assert setup.llm.requests[1]["input"] == (await setup.stored())[:4]
     await _close(socket, linked)
 
 
@@ -603,7 +691,9 @@ async def test_messages_faster_than_the_reply_are_each_cut_in_turn() -> None:
     assert len(setup.llm.requests) == 2
     # No reply got through to the middle message. It is stored as it was sent, and the
     # last one follows it: the reply answers both.
-    assert [item["content"] for item in await setup.stored()] == [
+    stored = await setup.stored()
+    assert stored[0] == TIME_LINE
+    assert [item["content"] for item in stored[1:]] == [
         "a story",
         "Once upon…",
         "no wait",
@@ -627,12 +717,14 @@ async def test_a_message_sent_before_any_of_the_reply_got_through_follows_the_fi
     # The model was asked about the first message, and is then asked about both: the
     # second follows the first, and nothing it was sent before has changed.
     first, second = setup.llm.requests
-    assert first["input"] == [{"role": "user", "content": "a story"}]
+    assert first["input"] == [TIME_LINE, {"role": "user", "content": "a story"}]
     assert second["input"] == [
+        TIME_LINE,
         {"role": "user", "content": "a story"},
         {"role": "user", "content": "no, the weather"},
     ]
     assert await setup.stored() == [
+        TIME_LINE,
         {"role": "user", "content": "a story"},
         {"role": "user", "content": "no, the weather"},
         {"role": "assistant", "content": "Sunny."},
@@ -675,15 +767,16 @@ async def test_a_tool_call_is_shown_its_result_sent_back_and_both_stored() -> No
         ("chat.done", "Let me look. Sunny."),
     ]
     assert setup.search.queries == ["Pune weather"]
-    result = setup.llm.requests[1]["input"][3]
+    result = setup.llm.requests[1]["input"][4]
     assert result["type"] == "function_call_output"
     assert "Norris won in Las Vegas." in result["output"]
     stored = await setup.stored()
-    assert stored[:5] == [
-        *setup.llm.requests[1]["input"][:4],
+    assert stored[0] == TIME_LINE
+    assert stored[:6] == [
+        *setup.llm.requests[1]["input"][:5],
         {"role": "assistant", "content": "Sunny."},
     ]
-    assert setup.llm.requests[2]["input"] == [*stored[:5], {"role": "user", "content": "thanks"}]
+    assert setup.llm.requests[2]["input"] == [*stored[:6], {"role": "user", "content": "thanks"}]
     assert await setup.shown() == [
         ("user", "weather?"),
         ("gem", "Let me look."),
@@ -717,7 +810,9 @@ async def test_a_tool_still_running_at_a_cut_is_stored_with_the_placeholder() ->
         ("chat.done", "Okay."),
     ]
     stored = await setup.stored()
+    assert stored[0] == TIME_LINE
     assert [item.get("role") or item["type"] for item in stored] == [
+        "developer",
         "user",
         "assistant",
         "function_call",
@@ -725,8 +820,8 @@ async def test_a_tool_still_running_at_a_cut_is_stored_with_the_placeholder() ->
         "user",
         "assistant",
     ]
-    assert stored[3]["output"].startswith("Still running in the background, under call_id call_1.")
-    assert setup.llm.requests[1]["input"] == stored[:5]
+    assert stored[4]["output"].startswith("Still running in the background, under call_id call_1.")
+    assert setup.llm.requests[1]["input"] == stored[:6]
     await _close(socket, linked)
 
 
@@ -767,6 +862,7 @@ async def test_a_reply_that_fails_part_way_keeps_what_was_sent() -> None:
 
     assert socket.chat() == [("chat.text", "Half "), ("chat.error", "reply failed: boom")]
     assert await setup.stored() == [
+        TIME_LINE,
         {"role": "user", "content": "go"},
         {"role": "assistant", "content": "Half…"},
     ]
@@ -792,7 +888,9 @@ async def test_a_reply_that_cannot_be_stored_ends_in_chat_error() -> None:
     setup.docdb.breaks_after = None
     socket.send(setup.gem.id, "hello again")
     await socket.until("chat.done")
+    # The line that gave the time was not stored either, so the next message gets one.
     assert await setup.stored() == [
+        TIME_LINE,
         {"role": "user", "content": "hello again"},
         {"role": "assistant", "content": "Hi again."},
     ]
@@ -827,7 +925,7 @@ async def test_a_frame_that_cannot_be_read_gets_error_and_the_socket_stays_open(
     assert socket.frames[1]["type"] == "error"
     assert socket.frames[1]["text"]
     assert not linked.done()
-    assert setup.llm.requests[0]["input"] == [{"role": "user", "content": "hello"}]
+    assert setup.llm.requests[0]["input"] == [TIME_LINE, {"role": "user", "content": "hello"}]
     await _close(socket, linked)
 
 
@@ -842,6 +940,7 @@ async def test_a_socket_that_closes_cuts_its_reply_which_is_stored() -> None:
 
     # Stored by the time the socket's handler is done.
     assert await setup.stored() == [
+        TIME_LINE,
         {"role": "user", "content": "a story"},
         {"role": "assistant", "content": "Once upon…"},
     ]
@@ -868,7 +967,9 @@ async def test_a_message_sent_while_the_store_is_slow_waits_for_it() -> None:
         ("chat.text", "Again."),
         ("chat.done", "Again."),
     ]
-    assert [item["content"] for item in await setup.stored()] == [
+    stored = await setup.stored()
+    assert stored[0] == TIME_LINE
+    assert [item["content"] for item in stored[1:]] == [
         "hello",
         "Hi.",
         "hello again",
@@ -899,7 +1000,8 @@ async def test_a_changed_gem_applies_from_the_next_message() -> None:
     assert _tool_names(first) == ["web_search", "cancel_tool_call"]
     assert _tool_names(second) == []
     # The conversation carries on as it was stored.
-    assert second["input"][:2] == [
+    assert second["input"][:3] == [
+        TIME_LINE,
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "Hi."},
     ]
@@ -1036,7 +1138,8 @@ async def test_a_gem_that_lost_its_search_still_declares_it_while_its_history_ho
     asked = setup.llm.requests[2]
     # A provider refuses calls of a tool it is not told of, so it is still told of it.
     assert _tool_names(asked) == ["web_search"]
-    assert [item.get("type") for item in asked["input"][2:4]] == [
+    assert asked["input"][0] == TIME_LINE
+    assert [item.get("type") for item in asked["input"][3:5]] == [
         "function_call",
         "function_call_output",
     ]
@@ -1072,6 +1175,7 @@ async def test_a_write_that_stops_part_way_leaves_nothing_half_stored() -> None:
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
     assert await setup.stored() == [
+        TIME_LINE,
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "Hi."},
     ]
@@ -1250,7 +1354,9 @@ async def test_a_message_that_cuts_a_reply_while_a_search_runs_leaves_the_search
     ]
     assert searches.cancelled == [] and searches.finished == []
     stored = await grows.check()
+    assert stored[0] == TIME_LINE
     assert _kinds(stored) == [
+        "developer",
         "user",
         "assistant",
         "function_call",
@@ -1258,13 +1364,13 @@ async def test_a_message_that_cuts_a_reply_while_a_search_runs_leaves_the_search
         "user",
         "assistant",
     ]
-    assert stored[3] == {
+    assert stored[4] == {
         "type": "function_call_output",
         "call_id": "call_1",
         "output": _placeholder("call_1"),
     }
     # The new message is answered first, from a history that ends that way.
-    assert setup.llm.requests[1]["input"] == stored[:5]
+    assert setup.llm.requests[1]["input"] == stored[:6]
     assert _thinks(setup) == [False, True]
     await _close(socket, linked)
     searches.gates[_WEATHER].set()
@@ -1290,8 +1396,8 @@ async def test_a_finished_search_is_stored_after_the_conversation_and_told_unask
     ]
     assert socket.frames[-3] == {"type": "chat.result", "gem": str(setup.gem.id), "text": _WEATHER}
     stored = await grows.check()
-    assert _kinds(stored[6:]) == ["function_call", "function_call_output", "assistant"]
-    stub, result, told = stored[6:]
+    assert _kinds(stored[7:]) == ["function_call", "function_call_output", "assistant"]
+    stub, result, told = stored[7:]
     assert _stub_of(stub) == "call_1"
     assert stub["name"] == "web_search"
     assert result == {
@@ -1301,7 +1407,7 @@ async def test_a_finished_search_is_stored_after_the_conversation_and_told_unask
     }
     assert told == {"role": "assistant", "content": "It is sunny in Pune."}
     # The reply about it is asked for with no new message: the history ends in the result.
-    assert setup.llm.requests[2]["input"] == stored[:8]
+    assert setup.llm.requests[2]["input"] == stored[:9]
     assert _thinks(setup) == [False, True, False]
     _a_valid_chain(stored)
     # Neither the placeholder's call nor the stub is shown twice: the stub is not shown.
@@ -1354,15 +1460,15 @@ async def test_a_result_that_comes_while_a_reply_is_written_waits_for_it() -> No
         ("chat.done", "And it is sunny in Pune."),
     ]
     stored = await grows.check()
-    assert _kinds(stored[4:]) == [
+    assert _kinds(stored[5:]) == [
         "user",
         "assistant",
         "function_call",
         "function_call_output",
         "assistant",
     ]
-    assert _stub_of(stored[6]) == "call_1"
-    assert setup.llm.requests[2]["input"] == stored[:8]
+    assert _stub_of(stored[7]) == "call_1"
+    assert setup.llm.requests[2]["input"] == stored[:9]
     await _close(socket, linked)
 
 
@@ -1396,16 +1502,16 @@ async def test_two_late_results_are_told_in_one_reply() -> None:
         ("chat.done", "Pune is sunny and Delhi is hazy."),
     ]
     stored = await grows.check()
-    assert _kinds(stored[8:]) == [
+    assert _kinds(stored[9:]) == [
         "function_call",
         "function_call_output",
         "function_call",
         "function_call_output",
         "assistant",
     ]
-    assert [_stub_of(stored[8]), _stub_of(stored[10])] == ["call_2", "call_1"]
+    assert [_stub_of(stored[9]), _stub_of(stored[11])] == ["call_2", "call_1"]
     assert len(setup.llm.requests) == 3
-    assert setup.llm.requests[2]["input"] == stored[:12]
+    assert setup.llm.requests[2]["input"] == stored[:13]
     _a_valid_chain(stored)
     await _close(socket, linked)
 
@@ -1419,12 +1525,12 @@ async def test_with_the_latest_sender_gone_the_result_is_only_stored() -> None:
     await _close(socket, linked)
 
     searches.gates[_WEATHER].set()
-    stored = await _until_stored(setup, 8)
+    stored = await _until_stored(setup, 9)
     await _settle()
 
     await grows.check()
-    assert _kinds(stored[6:]) == ["function_call", "function_call_output"]
-    assert _stub_of(stored[6]) == "call_1"
+    assert _kinds(stored[7:]) == ["function_call", "function_call_output"]
+    assert _stub_of(stored[7]) == "call_1"
     # No reply was written: nobody was there to read it.
     assert len(setup.llm.requests) == 2
 
@@ -1450,15 +1556,22 @@ async def test_a_socket_that_closes_while_a_search_runs_leaves_it_running() -> N
     await _close(socket, linked)
 
     stored = await grows.check()
-    assert _kinds(stored) == ["user", "assistant", "function_call", "function_call_output"]
-    assert stored[3]["output"] == _placeholder("call_1")
+    assert stored[0] == TIME_LINE
+    assert _kinds(stored) == [
+        "developer",
+        "user",
+        "assistant",
+        "function_call",
+        "function_call_output",
+    ]
+    assert stored[4]["output"] == _placeholder("call_1")
     assert searches.cancelled == []
 
     searches.gates[_WEATHER].set()
-    stored = await _until_stored(setup, 6)
+    stored = await _until_stored(setup, 7)
     await grows.check()
-    assert _stub_of(stored[4]) == "call_1"
-    assert stored[5]["output"] == searches.found(_WEATHER)
+    assert _stub_of(stored[5]) == "call_1"
+    assert stored[6]["output"] == searches.found(_WEATHER)
     assert len(setup.llm.requests) == 1
 
 
@@ -1489,16 +1602,16 @@ async def test_a_new_message_cuts_the_reply_about_a_late_result() -> None:
         ("chat.done", "You are welcome."),
     ]
     stored = await grows.check()
-    assert _kinds(stored[6:]) == [
+    assert _kinds(stored[7:]) == [
         "function_call",
         "function_call_output",
         "assistant",
         "user",
         "assistant",
     ]
-    assert stored[8] == {"role": "assistant", "content": "It is sunny…"}
+    assert stored[9] == {"role": "assistant", "content": "It is sunny…"}
     # The new message waited until the cut reply was stored.
-    assert setup.llm.requests[3]["input"] == stored[:10]
+    assert setup.llm.requests[3]["input"] == stored[:11]
     await _close(socket, linked)
 
 
@@ -1529,8 +1642,8 @@ async def test_a_message_that_comes_while_the_result_is_stored_is_answered_with_
         ("chat.text", "Hello. And it is sunny."),
         ("chat.done", "Hello. And it is sunny."),
     ]
-    assert _kinds(stored[6:]) == ["function_call", "function_call_output", "user", "assistant"]
-    assert setup.llm.requests[2]["input"] == stored[:9]
+    assert _kinds(stored[7:]) == ["function_call", "function_call_output", "user", "assistant"]
+    assert setup.llm.requests[2]["input"] == stored[:10]
     await _close(socket, linked)
 
 
@@ -1569,7 +1682,7 @@ async def test_a_message_that_cuts_a_reply_while_a_result_waits_is_answered_with
     # The stub and the result are stored ahead of the message, and the model was sent
     # them so, with nothing left without a result: no thinking.
     stored = await grows.check()
-    assert _kinds(stored[4:]) == [
+    assert _kinds(stored[5:]) == [
         "user",
         "assistant",
         "function_call",
@@ -1577,11 +1690,11 @@ async def test_a_message_that_cuts_a_reply_while_a_result_waits_is_answered_with
         "user",
         "assistant",
     ]
-    assert stored[5] == {"role": "assistant", "content": "Once upon…"}
-    assert _stub_of(stored[6]) == "call_1"
-    assert stored[7]["output"] == searches.found(_WEATHER)
-    assert stored[8] == {"role": "user", "content": "stop, the weather?"}
-    assert setup.llm.requests[2]["input"] == stored[:9]
+    assert stored[6] == {"role": "assistant", "content": "Once upon…"}
+    assert _stub_of(stored[7]) == "call_1"
+    assert stored[8]["output"] == searches.found(_WEATHER)
+    assert stored[9] == {"role": "user", "content": "stop, the weather?"}
+    assert setup.llm.requests[2]["input"] == stored[:10]
     assert _thinks(setup) == [False, True, False]
     _a_valid_chain(stored)
 
@@ -1617,7 +1730,9 @@ async def test_a_message_left_open_is_closed_ahead_of_a_result_told_with_the_nex
     await _settle()
 
     stored = await grows.check()
+    assert stored[0] == TIME_LINE
     assert _kinds(stored) == [
+        "developer",
         "user",
         "assistant",
         "function_call",
@@ -1628,10 +1743,10 @@ async def test_a_message_left_open_is_closed_ahead_of_a_result_told_with_the_nex
         "user",
         "assistant",
     ]
-    assert stored[4] == {"role": "user", "content": "hello"}
-    assert _stub_of(stored[5]) == "call_1"
-    assert stored[7] == {"role": "user", "content": "anyone there?"}
-    assert setup.llm.requests[2]["input"] == stored[:8]
+    assert stored[5] == {"role": "user", "content": "hello"}
+    assert _stub_of(stored[6]) == "call_1"
+    assert stored[8] == {"role": "user", "content": "anyone there?"}
+    assert setup.llm.requests[2]["input"] == stored[:9]
     assert len(setup.llm.requests) == 3
     _a_valid_chain(stored)
     await _close(socket, linked)
@@ -1653,7 +1768,7 @@ async def test_cancel_tool_call_stops_a_search_still_running() -> None:
     await _settle()
     assert searches.cancelled == [_WEATHER]
     stored = await grows.check()
-    assert stored[5:7] == [
+    assert stored[6:8] == [
         {
             "type": "function_call",
             "call_id": "call_9",
@@ -1701,7 +1816,7 @@ async def test_cancel_tool_call_drops_a_result_that_has_not_been_told() -> None:
     await _settle()
 
     stored = await grows.check()
-    assert stored[6] == {
+    assert stored[7] == {
         "type": "function_call_output",
         "call_id": "call_9",
         "output": "Cancelled.",
@@ -1722,7 +1837,7 @@ async def test_cancel_tool_call_with_nothing_running_says_so(named: str) -> None
     await _cut_while_searching(setup, socket)
     searches.gates[_WEATHER].set()
     await socket.until("chat.done", 2)
-    stub_id = (await setup.stored())[6]["call_id"]
+    stub_id = (await setup.stored())[7]["call_id"]
     target = stub_id if named == "stub" else named
     cancel = _cancel_call("call_9", target)
     setup.llm.then([_starts(cancel), _completed(cancel)], _said("It had already come."))
@@ -1782,18 +1897,18 @@ async def test_a_search_lost_to_a_restart_is_closed_once_before_the_next_message
     await socket.until("chat.done")
 
     stored = await grows.check()
-    assert _kinds(stored[6:]) == ["function_call", "function_call_output", "user", "assistant"]
-    assert _stub_of(stored[6]) == "call_1"
-    assert stored[6]["name"] == "web_search"
-    assert stored[7] == {
+    assert _kinds(stored[7:]) == ["function_call", "function_call_output", "user", "assistant"]
+    assert _stub_of(stored[7]) == "call_1"
+    assert stored[7]["name"] == "web_search"
+    assert stored[8] == {
         "type": "function_call_output",
-        "call_id": stored[6]["call_id"],
+        "call_id": stored[7]["call_id"],
         "output": _LOST,
     }
     assert setup.llm.requests[2]["input"] == [
         *before,
-        stored[6],
         stored[7],
+        stored[8],
         {"role": "user", "content": "so, the weather?"},
     ]
     # Nothing is pending any more, and the stub is not shown.
@@ -1834,22 +1949,22 @@ async def test_a_result_that_could_not_be_stored_is_closed_as_lost_before_the_ne
     searches.gates["Pune weather"].set()
     await _settle()
     setup.docdb.breaks_after = None
-    assert len(await grows.check()) == 8
+    assert len(await grows.check()) == 9
 
     searches.gates["Delhi weather"].set()
     await socket.until("chat.done", 2)
 
     stored = await grows.check()
-    assert _kinds(stored[8:]) == [
+    assert _kinds(stored[9:]) == [
         "function_call",
         "function_call_output",
         "function_call",
         "function_call_output",
         "assistant",
     ]
-    assert _stub_of(stored[8]) == "call_1" and stored[9]["output"] == _LOST
-    assert _stub_of(stored[10]) == "call_2"
-    assert stored[11]["output"] == searches.found("Delhi weather")
+    assert _stub_of(stored[9]) == "call_1" and stored[10]["output"] == _LOST
+    assert _stub_of(stored[11]) == "call_2"
+    assert stored[12]["output"] == searches.found("Delhi weather")
     assert [frame for frame in socket.chat() if frame[0] == "chat.result"] == [
         ("chat.result", "Delhi weather")
     ]
@@ -1956,7 +2071,7 @@ async def test_a_reply_about_a_result_that_fails_to_begin_ends_in_chat_error(
         ("chat.error", "no reply could be made: the database went away"),
     ]
     # The result is stored all the same.
-    assert _stub_of((await setup.stored())[6]) == "call_1"
+    assert _stub_of((await setup.stored())[7]) == "call_1"
     await _close(socket, linked)
 
 
@@ -2055,7 +2170,9 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
     await socket.until("chat.done", 3)
 
     stored = await setup.stored()
+    assert stored[0] == TIME_LINE
     assert _kinds(stored) == [
+        "developer",
         "user",
         "assistant",
         "function_call",
@@ -2073,9 +2190,9 @@ async def test_placeholder_stub_and_result_make_a_valid_anthropic_history() -> N
         "user",
         "assistant",
     ]
-    assert stored[3]["output"] == _placeholder("toolu_1")
-    assert _stub_of(stored[6]) == "toolu_1"
-    assert _stub_of(stored[12]) == "toolu_2" and stored[13]["output"] == _LOST
+    assert stored[4]["output"] == _placeholder("toolu_1")
+    assert _stub_of(stored[7]) == "toolu_1"
+    assert _stub_of(stored[13]) == "toolu_2" and stored[14]["output"] == _LOST
     _a_valid_chain(stored)
     for request in claude.requests:
         _a_valid_anthropic_request(request["messages"])
@@ -2174,7 +2291,7 @@ async def test_a_search_cancelled_in_the_instant_it_finishes_is_not_told() -> No
     assert "chat.result" not in [type_ for type_, _ in socket.chat()]
     stored = await grows.check()
     _a_valid_chain(stored)
-    assert stored[6] == {
+    assert stored[7] == {
         "type": "function_call_output",
         "call_id": "call_9",
         "output": "Cancelled.",
@@ -2225,8 +2342,8 @@ async def test_a_search_left_running_is_kept_track_of_even_if_the_next_step_fail
     stored = await grows.check()
     _a_valid_chain(stored)
     assert not any(item.get("output") == _LOST for item in stored)
-    assert _stub_of(stored[6]) == "call_1"
-    assert stored[7]["output"] == searches.found(_WEATHER)
+    assert _stub_of(stored[7]) == "call_1"
+    assert stored[8]["output"] == searches.found(_WEATHER)
     assert socket.chat()[-3:] == [
         ("chat.result", _WEATHER),
         ("chat.text", "Also, it is sunny."),
@@ -2253,10 +2370,10 @@ async def test_a_reply_about_a_late_result_is_cut_when_its_client_goes() -> None
     await socket.until("chat.text", 3)
 
     await _close(socket, linked)
-    stored = await _until_stored(setup, 9)
+    stored = await _until_stored(setup, 10)
 
     await grows.check()
-    assert stored[8] == {"role": "assistant", "content": "It is…"}
+    assert stored[9] == {"role": "assistant", "content": "It is…"}
     # The gem is free again, though the reply was never let finish.
     assert not held.is_set()
     other, other_linked = await _open(setup.again().service())
@@ -2326,13 +2443,14 @@ async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_store
 
     # No reply got through, yet the message was sent: it is stored as it stands, and
     # nothing of it is kept in memory. That client is not written to again.
-    assert await setup.stored() == [{"role": "user", "content": "hello"}]
+    assert await setup.stored() == [TIME_LINE, {"role": "user", "content": "hello"}]
     assert setup.conversations._kept == {}
     assert setup.chat._latest == {}
     other, other_linked = await _open(setup.service())
     other.send(setup.gem.id, "are you there?")
     await other.until("chat.done")
     assert await setup.stored() == [
+        TIME_LINE,
         {"role": "user", "content": "hello"},
         {"role": "user", "content": "are you there?"},
         {"role": "assistant", "content": "Hi."},

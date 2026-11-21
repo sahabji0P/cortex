@@ -67,11 +67,13 @@ from app.entities.gem_log import Recording, TurnRecord
 from app.entities.history import (
     Added,
     Mode,
+    TimeTold,
     added_reply,
     line,
     mode_line,
     of_turn,
     said,
+    time_line,
     told,
 )
 from app.entities.instructions import instruction_layers, joined
@@ -180,9 +182,11 @@ class VoiceConversation:
         connected: Sequence[Tool] = (),
         clock: Clock = time.monotonic,
         record: Recording | None = None,
+        time_told: TimeTold | None = None,
     ) -> None:
         # `record` is where what happens in the call is written down (see `gem_log.py`).
-        # Left out, nothing is.
+        # Left out, nothing is. `time_told` holds the user's time zone, for the line that
+        # gives the time after the call's opening line; left out, no such line is written.
         self._record = Recording(mode="call") if record is None else record
         # `history` is the gem's conversation as it is stored, and `last_mode` the mode
         # of its last item ("chat" if it is empty). `late` holds the gem's tool calls
@@ -269,6 +273,8 @@ class VoiceConversation:
         # The instructions say a line in the conversation marks when a call starts. Every
         # call opens with it, whatever the conversation held before.
         self._add(*mode_line("call", last_mode))
+        if time_told is not None:
+            self._add(time_line(time_told.zone))
         self._listening = asyncio.create_task(self._listen())
         if speaks_first:
             # Otherwise nothing is said until the user has spoken.
@@ -657,12 +663,13 @@ class VoiceLine:
         late: LateResults | None = None,
         connected: Sequence[Tool] = (),
         record: Recording | None = None,
+        time_told: TimeTold | None = None,
     ) -> VoiceConversation:
         """Start listening. The conversation owns the line from here, and the caller owns it.
 
         `darbar` is the Darbar text the gem is told first, or None for the built-in one;
         it is kept for the whole conversation. `history`, `last_mode`, `late`,
-        `connected` and `record` are as `VoiceConversation` takes them.
+        `connected`, `record` and `time_told` are as `VoiceConversation` takes them.
         """
         self._opened = True
         return VoiceConversation(
@@ -679,6 +686,7 @@ class VoiceLine:
             late=late,
             connected=connected,
             record=record,
+            time_told=time_told,
         )
 
     async def close(self) -> None:

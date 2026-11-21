@@ -18,11 +18,12 @@ from bson import ObjectId
 from app.entities.call_ent import CallEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GEM_CONFIG_VERSION
-from app.entities.history import Added
+from app.entities.history import Added, TimeTold
 from app.entities.voice_ent import VoiceEvent
 from app.routers.link.service import LinkServiceV1Class
 from tests.test_chat import _Chat, _chat, _said, _stored_items
 from tests.test_voice_conversation import _completed, _delta
+from tests.time_lines import TIME_LINE
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -105,6 +106,8 @@ class _Voice:
         self.finishes_anyway = False
         self.fails: Exception | None = None
         self.hung_up = 0
+        # The time zone each conversation was opened with, for its line that gives the time.
+        self.zones: list[str | None] = []
 
     async def connect(self, gem: object, *, speaks_first: bool | None = None) -> "_Line":
         self.asked.append((speaks_first, gem, None))
@@ -126,7 +129,16 @@ class _Line:
         self._voice = voice
         self._asked = asked
 
-    def open(self, *, darbar: str | None = None, record: Any = None, **_: object) -> _Conversation:
+    def open(
+        self,
+        *,
+        darbar: str | None = None,
+        record: Any = None,
+        time_told: TimeTold | None = None,
+        **_: object,
+    ) -> _Conversation:
+        if time_told is not None:
+            self._voice.zones.append(time_told.zone)
         speaks_first, gem, _ = self._voice.asked[self._asked]
         self._voice.asked[self._asked] = (speaks_first, gem, darbar)
         conversation = _Conversation(record)
@@ -425,6 +437,25 @@ async def test_a_call_opens_with_its_gem_its_darbar_text_and_who_speaks_first_if
     assert asked is first
     assert cast("Any", gem).id == setup.gem.id
     assert darbar is not None and darbar.startswith("The user keeps a few assistants")
+    await _close(socket, linked)
+
+
+@pytest.mark.parametrize(
+    ("time_zone", "zone"),
+    [
+        ("Asia/Kolkata", "Asia/Kolkata"),
+        # A zone that cannot be read, or anything else, is no reason to refuse the call:
+        # it counts as none, and the time is given in UTC.
+        ("Mars/Olympus", None),
+        (5, None),
+        (None, None),
+    ],
+)
+async def test_a_call_opens_with_the_zone_the_app_sent(time_zone: object, zone: str | None) -> None:
+    setup = await _setup()
+    socket, linked = await _in_call(setup, time_zone=time_zone)
+
+    assert setup.voice.zones == [zone]
     await _close(socket, linked)
 
 
@@ -875,6 +906,7 @@ async def test_a_call_start_cuts_a_reply_being_written_and_opens_once_it_is_stor
     assert socket.frame("chat.cut")["text"] == "Once upon…"
     assert stored_by_then == [
         [
+            TIME_LINE,
             {"role": "user", "content": "a story"},
             {"role": "assistant", "content": "Once upon…"},
         ]

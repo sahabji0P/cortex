@@ -31,7 +31,7 @@ a `type`. Binary frames are a call's audio.
 
 | `type` | Fields | Meaning |
 | --- | --- | --- |
-| `chat.send` | `gem` (a gem's id), `text` | A message to that gem. If a reply to that gem is still being written, that reply is cut first (see `chat.cut`). If the gem is in a call, it gets `chat.error` |
+| `chat.send` | `gem` (a gem's id), `text`, `time_zone` (optional) | A message to that gem. `time_zone` is the user's, an IANA name such as `Asia/Kolkata` (see [The time](#the-time)). If a reply to that gem is still being written, that reply is cut first (see `chat.cut`). If the gem is in a call, it gets `chat.error` |
 | `log.watch`, `log.unwatch` | `gem` (a gem's id, or left out) | Start, or stop, being sent a gem's log as it is written down (see [A gem's log](#a-gems-log)) |
 
 ### The backend sends
@@ -117,7 +117,7 @@ text frames like the rest.
 
 | Frame | Fields | Meaning |
 | --- | --- | --- |
-| `call.start` (JSON) | `gem` (a gem's id), `first` (optional, `user` or `assistant`) | Open a call with that gem. A call is always with a gem: its config says who answers, with which model and tools, and whether it greets the user. `first: "assistant"` has the call open with a greeting, `"user"` has it wait for the user to speak. A `first` that is sent wins over the gem's; one left out, or sent as null, leaves the gem's. Any other field is ignored. A reply being written to that gem is cut (see `chat.cut`), and the call opens once it is kept |
+| `call.start` (JSON) | `gem` (a gem's id), `first` (optional, `user` or `assistant`), `time_zone` (optional) | Open a call with that gem. `time_zone` is the user's, as on `chat.send` (see [The time](#the-time)). A call is always with a gem: its config says who answers, with which model and tools, and whether it greets the user. `first: "assistant"` has the call open with a greeting, `"user"` has it wait for the user to speak. A `first` that is sent wins over the gem's; one left out, or sent as null, leaves the gem's. Any other field is ignored. A reply being written to that gem is cut (see `chat.cut`), and the call opens once it is kept |
 | binary | raw 16-bit mono PCM at 16 kHz, about 100 ms a frame | Mic audio for the open call (see [Audio](#audio)). Audio sent after `call.start` and before `call.ready` is kept and fed in order once the call is open: none is lost. A binary frame when no call is open or opening is dropped without an answer |
 | `call.playback` (JSON) | `delay` (seconds, >= 0) | How long the sound device holds audio before it is heard (see [Audio](#audio)) |
 | `call.end` (JSON) | none | Hang up |
@@ -270,9 +270,9 @@ produces before a tool call (its text, the call and the result) is added when it
 back to the model. The rest of a reply is added when it is settled: as it was heard, a
 reply cut off ending in "…". A line of ours is added when it is written. A call starts
 from the conversation as it is kept, and all it added is kept by the time its last
-frame is sent. A call in which nothing was said leaves the line that opened it. The gem
-is told when a call starts and when the conversation goes back to writing, by a line
-the app does not see.
+frame is sent. A call in which nothing was said leaves the lines that opened it. The gem
+is told when a call starts and when the conversation goes back to writing, and the date
+and the time (see [The time](#the-time)), by lines the app does not see as messages.
 
 A search cut off while it runs is kept with a result saying it is still running, and
 carries on in the background. When it comes back, its real result is added after
@@ -353,7 +353,7 @@ model is ever sent anything else from the log. Each has the same fields:
 | --- | --- |
 | `item` | The thing remembered, exactly as a model is sent it: `{"role": "user" \| "assistant" \| "developer", "content": text}`, `{"type": "function_call", "call_id", "name", "arguments"}` or `{"type": "function_call_output", "call_id", "output"}` |
 | `mode` | `call` or `chat`: whether it was added in a call or in writing |
-| `source` | Who wrote it: `user`, `gem` (its text, or a tool call it made), `tool` (a tool's result), `placeholder` (the result we gave a call that went on in the background), `background-result` (the stub call we wrote to carry the result of a call that went on in the background, and that result), `lost-call` (the same, for a call lost to a restart), or which line of ours it is: `call-line` (a call started), `chat-line` (the conversation is written again), `greeting` (the gem is asked to speak first), `no-words` (the user made a sound with no words) |
+| `source` | Who wrote it: `user`, `gem` (its text, or a tool call it made), `tool` (a tool's result), `placeholder` (the result we gave a call that went on in the background), `background-result` (the stub call we wrote to carry the result of a call that went on in the background, and that result), `lost-call` (the same, for a call lost to a restart), or which line of ours it is: `call-line` (a call started), `chat-line` (the conversation is written again), `greeting` (the gem is asked to speak first), `no-words` (the user made a sound with no words), `time-line` (the date and the time, see [The time](#the-time)) |
 | `shown` | On a tool call of the gem's only: what its `chat.tool` or `call.tool.call` frame said. Left out when it said nothing |
 | `mark` | On a tool's result only: `placeholder`, or `cancelled` (the answer of a `cancel_tool_call` that stopped a call). Left out otherwise |
 | `delivers` | On a stub call of ours and its result only: the `call_id` of the call whose result they carry. Left out otherwise |
@@ -361,7 +361,7 @@ model is ever sent anything else from the log. Each has the same fields:
 | `kind` | Its `item` | Its `turn` |
 | --- | --- | --- |
 | `user.said` | What the user said or wrote, as one `user` message. Added the moment it is said or sent | The turn it opened |
-| `note.written` | A line of ours, as a `developer` message. Added the moment it is written | `call-line` and `chat-line`: none. `greeting` and `no-words`: the turn they ask a reply of |
+| `note.written` | A line of ours, as a `developer` message. Added the moment it is written | `call-line`, `chat-line` and `time-line`: none. `greeting` and `no-words`: the turn they ask a reply of |
 | `gem.said` | The gem's own text, as an `assistant` message: what was delivered of it, as heard in a call or as sent in writing, ending in "…" if it was cut. Text said before a tool call is added, whole, when it is sent back to the model with the result; the rest when the reply is settled | The turn of the reply |
 | `tool.called` | A tool call: the gem's own, or a stub of ours | The gem's own: the turn of the reply. A stub: see [The life of a tool call](#the-life-of-a-tool-call) |
 | `tool.result` | A call's result, as the gem was given it: the result itself, the placeholder of a call that went on in the background, or what a stub carries | As its call |
@@ -428,14 +428,39 @@ The way in is read again for every request, so switching between the API key and
 proxy writes a `settings.changed` with `model` just before the next request, with that
 request's turn, in a call too. So does a change whose entry could not be written: the
 next request says all three parts again.
-`instructions` is the four layers in order, each `{"name", "text"}`: `darbar`, `gem`,
-`model`, `date`. Joined, they are the instructions as sent. `tools` is every tool the
+`instructions` is the three layers in order, each `{"name", "text"}`: `darbar`, `gem`,
+`model`. Joined, they are the instructions as sent. Nothing in them changes by itself:
+a new day is no change (the date is a line, see [The time](#the-time)). An entry written
+before this may still have a fourth layer, `date`. `tools` is every tool the
 model is told of, each `{"name", "description", "parameters", "connection", "deferred"}`,
 with `parameters` the tool's schema as JSON text, laid out the same way every time. To
 show what changed, compare a part with the same part in the `settings.changed` before
 it. The first reply or call of a gem writes all three. One is written even when no
 request follows: a call in which nothing is said leaves `call.opened`,
-`settings.changed`, the call's first line (`note.written`) and `call.closed`.
+`settings.changed`, the call's first lines (`note.written`) and `call.closed`.
+
+### The time
+
+The date and the time are not in the instructions, which stay the same from day to day
+so a prompt cache holds. A line of ours gives them: a `note.written` whose `source` is
+`time-line`, with no turn, as in
+
+    It is Friday, 20 November 2026, 7:46 pm in Asia/Kolkata.
+
+in the `time_zone` the app sent on `chat.send` or `call.start`. With none, or a name that
+cannot be read (anything that is not an IANA name this backend knows), it is in UTC and
+says so: `It is Friday, 20 November 2026, 2:16 pm UTC. The user's time zone is not
+known.` A zone that cannot be read never refuses a frame. One is written:
+
+- in a call, as it opens, straight after the call's opening line, before a greeting;
+- in writing, before a message, when none has been written yet, the last is more than
+  ten minutes old, or the date has changed since in the user's zone. It is the last thing
+  before the reply's `turn.opened`: after the `settings.changed` the reply writes, after
+  the `chat-line` that follows a call, and after late results told with the message. A
+  reply with no message (a late result told) gets none.
+
+Like every line of ours, it is only ever added, and it is not a message of the
+conversation (`GET /v1/gems/{id}/chat` does not show it).
 
 ### The life of a tool call
 

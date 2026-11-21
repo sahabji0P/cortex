@@ -23,12 +23,20 @@ counts as written. Nothing is written when a call ends: the line is written when
 next turn needs it, and a call that follows a call is marked by its own opening line.
 A line of ours is final when it is written, like everything else, so it is stored then:
 a call in which nothing was said leaves the line that opened it.
+
+Another line of ours gives the date and the time, in the user's time zone as the app
+sends it, or in UTC (`time_line`). It is not in the instructions, which stay the same
+from day to day so a prompt cache holds. It goes after the line that opens a call, and
+in writing before a message when none has been written yet, the last is more than ten
+minutes old, or the date has changed since (`time_due`). A reply with no message gets
+none.
 """
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from app.entities.late_results import LateResult, delivers
 from app.entities.loop import ResultMark, ToolCall
@@ -38,6 +46,7 @@ __all__ = [
     "Added",
     "Mode",
     "Source",
+    "TimeTold",
     "added_reply",
     "line",
     "mode_line",
@@ -45,7 +54,10 @@ __all__ = [
     "said",
     "shown",
     "stubs",
+    "time_due",
+    "time_line",
     "told",
+    "zone_named",
 ]
 
 # How the conversation is held: spoken in a call, or written.
@@ -64,6 +76,7 @@ type Mode = Literal["call", "chat"]
 # - `call-line`, `chat-line`  our line that says a call started, or ended
 # - `greeting`     our line that asks the gem to speak first in a call
 # - `no-words`     our line that says the user made a sound with no words in it
+# - `time-line`    our line that gives the date and the time
 type Source = Literal[
     "user",
     "gem",
@@ -75,6 +88,7 @@ type Source = Literal[
     "chat-line",
     "greeting",
     "no-words",
+    "time-line",
 ]
 
 # The line of ours that goes before the first turn in each mode, after a turn in the
@@ -85,6 +99,23 @@ _MODE_LINES: dict[Mode, str] = {
     "call": "The user has called you. From here on the conversation is spoken.",
     "chat": "The call has ended. From here on the conversation is written.",
 }
+
+
+# A line that gives the time is written again in writing once the last is older than this.
+TIME_LINE_GAP = timedelta(minutes=10)
+
+
+@dataclass(frozen=True, slots=True)
+class TimeTold:
+    """What a conversation needs to give the date and the time.
+
+    `zone` is the user's time zone as the app sent it, an IANA name such as
+    `Asia/Kolkata`, or None. `last` is when the last line that gave the time was
+    written, or None if none was.
+    """
+
+    zone: str | None = None
+    last: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,12 +148,61 @@ def said(text: str, at: datetime | None = None, turn: int | None = None) -> Adde
     return Added({"role": "user", "content": text}, at or datetime.now(UTC), turn=turn)
 
 
-def line(text: str, source: Source) -> Added:
+def line(text: str, source: Source, at: datetime | None = None) -> Added:
     """A line of ours: an item that records what happened, in the history's own voice.
 
-    `source` says which line it is.
+    `source` says which line it is. `at` is when it was written, if not now.
     """
-    return Added({"role": "developer", "content": text}, datetime.now(UTC), source=source)
+    return Added({"role": "developer", "content": text}, at or datetime.now(UTC), source=source)
+
+
+def zone_named(name: object) -> ZoneInfo | None:
+    """The time zone an IANA name stands for, or None if it is not one that can be read.
+
+    Whatever is sent is taken: a name that cannot be read counts as none sent.
+    """
+    if not isinstance(name, str) or not name or len(name) > 64:
+        return None
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return None  # not a name, or one this machine has no zone for
+
+
+def time_line(zone: str | None, at: datetime | None = None) -> Added:
+    """The line of ours that gives the date and the time at `at` (now if not given).
+
+    In `zone` if it can be read, or else in UTC, saying the user's zone is not known.
+    THE OWNER APPROVED THIS WORDING ON 2026-11-20.
+    """
+    at = at or datetime.now(UTC)
+    tz = zone_named(zone)
+    if tz is None:
+        text = f"It is {_when(at.astimezone(UTC))} UTC. The user's time zone is not known."
+    else:
+        text = f"It is {_when(at.astimezone(tz))} in {tz.key}."
+    return line(text, "time-line", at)
+
+
+def time_due(time: TimeTold, at: datetime) -> bool:
+    """Whether a message sent at `at` needs a line that gives the time before it.
+
+    It does when none has been written, the last is more than ten minutes old, or the
+    date has changed since, in the user's time zone.
+    """
+    if time.last is None:
+        return True
+    if at - time.last > TIME_LINE_GAP:
+        return True
+    tz = zone_named(time.zone) or UTC
+    return time.last.astimezone(tz).date() != at.astimezone(tz).date()
+
+
+def _when(at: datetime) -> str:
+    """A time as the line says it: "Friday, 20 November 2026, 7:46 pm"."""
+    hour = at.hour % 12 or 12
+    half = "am" if at.hour < 12 else "pm"
+    return f"{at:%A}, {at.day} {at:%B} {at.year}, {hour}:{at.minute:02d} {half}"
 
 
 def mode_line(mode: Mode, before: Mode) -> list[Added]:

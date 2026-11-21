@@ -53,7 +53,7 @@ from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass, Stored, Writer, gem_key
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.history import mode_line, shown, told
+from app.entities.history import TimeTold, mode_line, shown, told
 from app.entities.instructions import instruction_layers, joined
 from app.entities.late_results import LateResult
 from app.entities.model import LLM, ModelName, is_openai, model_for
@@ -159,8 +159,13 @@ class ChatEntityClass:
         # A gem's late results are told here, in writing.
         conversations.tell_results_with(self._tell_when_quiet)
 
-    def send(self, gem_id: str, text: str, deliver: Deliver) -> ChatTurn:
+    def send(
+        self, gem_id: str, text: str, deliver: Deliver, *, time_zone: str | None = None
+    ) -> ChatTurn:
         """Send a message to a gem. Its reply's frames go to `deliver`, as it is written.
+
+        `time_zone` is the user's, as the app sent it: the line that gives the time
+        before the message, when one is due, is in it (see `history.py`).
 
         Returns at once. The reply ends with exactly one of `chat.done`, `chat.cut` or
         `chat.error`, and is stored before that frame is sent. `ChatTurn.over` is set
@@ -192,7 +197,7 @@ class ChatEntityClass:
         if previous is not None:
             previous.cut()
         turn.task = asyncio.create_task(
-            self._answer(turn, key, previous, gem_id, text, at, deliver)
+            self._answer(turn, key, previous, gem_id, text, at, deliver, time_zone)
         )
         return turn
 
@@ -205,6 +210,7 @@ class ChatEntityClass:
         text: str,
         at: datetime,
         deliver: Deliver,
+        time_zone: str | None,
     ) -> None:
         tell = _teller(gem_id, deliver)
         try:
@@ -229,7 +235,9 @@ class ChatEntityClass:
             kept = self._conversations.gem(key)
             results = [] if turn.was_cut else kept.late.take()
             history = await self._load(ready.gem.id, results)
-            await self._write(turn, key, ready, history, text, at, gem_id, deliver)
+            await self._write(
+                turn, key, ready, history, text, at, gem_id, deliver, time_zone=time_zone
+            )
         except Exception as exc:
             # Anything else, such as the store being out of reach before the reply began.
             await tell("chat.error", f"no reply could be made: {exc}")
@@ -268,6 +276,8 @@ class ChatEntityClass:
         at: datetime,
         gem_id: str,
         deliver: Deliver,
+        *,
+        time_zone: str | None = None,
     ) -> None:
         """Write one reply from `history`, deliver it, store it, and send its last frame.
 
@@ -306,6 +316,7 @@ class ChatEntityClass:
             last_mode=history.mode,
             late=late,
             record=record,
+            time_told=TimeTold(time_zone, history.last_time),
         )
         turn.begin(conversation)
         ended, failure = await _read(conversation, text, at, gem_id, deliver)
