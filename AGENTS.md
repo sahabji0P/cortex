@@ -2,7 +2,7 @@
 
 Read `README.md` first: what Cortex is, how to run it, and where each document is. Then
 `docs/architecture.md`, for how the code is layered, the loop, the one conversation a gem
-has, the rules for what it remembers, and the log.
+has, and the rules for what it remembers, and `docs/observability.md` for its log.
 
 ## This backend has a front end
 
@@ -112,7 +112,8 @@ Each fact has one home. Write it there, and link to it from anywhere else: never
 | Document | Owns |
 | --- | --- |
 | `README.md` | What Cortex is, how to run it, the settings, the routes in one line each, and the index of the docs. Kept short: no behaviour in detail |
-| `docs/architecture.md` | The layers and what each file holds, the loop, one conversation, what a gem remembers, and the log |
+| `docs/architecture.md` | The layers and what each file holds, the loop, one conversation, and what a gem remembers |
+| `docs/observability.md` | A gem's log: what it records and answers, what it promises, how to read it, what it does not show yet. Its kinds and fields are the contract's |
 | `docs/gems.md` | A gem's config and its versions, the instructions and how they are put together, the Darbar text, the gem routes |
 | `docs/models.md` | The models, how the providers differ, the ChatGPT proxy, and cost |
 | `docs/connections.md` | How the backend keeps, checks and runs connections, and signs in to them |
@@ -136,7 +137,7 @@ Split it into small commits, one for each step a reader would follow:
 - A test goes with the code it tests. A test file that needs every layer at once is a
   commit of its own, after the last layer.
 - The docs are split by what they are: the contract and this file, the README and the
-  topic documents (architecture, gems, models, connections) and the spec, the notes.
+  topic documents (architecture, observability, gems, models, connections) and the spec, the notes.
 - Each commit passes `uv run pytest` and `uv run ruff check app tests` by itself. Check
   that at each commit, not only at the last one.
 - A commit that changes the contract says "Contract change:" in its message, and what.
