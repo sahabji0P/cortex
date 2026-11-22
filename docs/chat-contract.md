@@ -629,7 +629,7 @@ does.
 
 | Route | Does |
 | --- | --- |
-| `POST /v1/connections` | Adds one (201). Body: `name`, `url`, and optionally `headers`, `gems`, `enabled`, `deferred`. The server is asked for its tools before anything is kept: this can take 20 seconds to reach it, and up to 20 more for each page of tools it lists |
+| `POST /v1/connections` | Adds one (201). Body: `name`, `url`, and optionally `headers`, `gems`, `enabled`, `deferred`. The server is asked for its tools before anything is kept: this can take up to 20 seconds to reach it, and up to 20 more for each page of tools it lists |
 | `GET /v1/connections` | Every connection, in the order they were added |
 | `GET /v1/connections/{id}` | One connection |
 | `PATCH /v1/connections/{id}` | Changes only the fields sent: `name`, `url`, `headers`, `enabled`, `deferred`, `gems`, `tool_gems`. None may be null |
