@@ -1,11 +1,8 @@
 # Cortex voice: behaviour spec
 
-What a call does, and what the model is sent while it lasts. Written on 17 November 2026
-from the code on `main`, and brought up to date on 18 November 2026, when a call became
-part of the gem's one stored conversation, and on 20 November 2026, when everything
-began to join the history the moment it is final, and when the date left the
-instructions for a line in the conversation. The picture that goes with it is
-[`voice-context.excalidraw`](voice-context.excalidraw).
+What a call does, and what the model is sent while it lasts. The picture that goes with
+it is [`voice-context.excalidraw`](voice-context.excalidraw). How a call fits with
+writing, in one conversation, is in [the architecture](architecture.md).
 
 This describes the code as it is. It proposes nothing. Where the project's notes have
 decided something the code does not do yet, that is said in [Known gaps](#known-gaps).
@@ -19,9 +16,9 @@ Each behaviour carries one of two tags.
 | Enforced | The server's code does it. What goes into the history is also unit-tested | It happens every time |
 | Instructed | The model is asked to do it in its instructions | It happens when the model follows them. No test checks it |
 
-The README records live runs with real models, all from before pull request 7. That
-pull request (16 November 2026) changed three Instructed behaviours, and the repo holds
-no record of a live run since. They are listed under [Known gaps](#known-gaps).
+What was measured with real models is under
+[Measured in live runs](#measured-in-live-runs). Instructed behaviours with no recorded
+live run are listed under [Known gaps](#known-gaps).
 
 Quoted text is the code's own wording. `[...]` marks where it is shortened here. A "…"
 inside a quote is the real cut mark, never a shortening.
@@ -61,7 +58,7 @@ mic ─▶ speech to text ─▶ conversation ─▶ model ─▶ text to speech
   call.
 - **The tools are the gem's.** (Enforced) `web_search`, when the gem's tools name it and
   a search key is set, and the tools of the connections open to the gem, as they were
-  when the call opened (see Connections in the README). With any of them comes
+  when the call opened (see [Connections](connections.md)). With any of them comes
   `cancel_tool_call`. Otherwise the model has no tools. A connection's tool is run like
   a search: left running at an interruption, its result told late.
 - **A tool closed to the gem during the call is refused.** (Enforced) The tool list does
@@ -101,7 +98,10 @@ Speech reaches the model as text only.
 3. **A stray fragment is dropped.** (Enforced) One or two words, in a writing system this
    user has not spoken in during the call, that follow a finished sentence within 3
    seconds, are treated as noise and never reach the model. The same applies to such a
-   fragment run on to the end of a sentence.
+   fragment run on to the end of a sentence. This works only when the recognizer writes
+   the noise in another script: when it writes the same sound in Latin letters, nothing
+   marks it as noise. The limits are kept tight on purpose, because a real word dropped
+   as noise means the user is talked over.
 4. **A turn with no words.** (Enforced) See [A turn with no words](#a-turn-with-no-words).
 
 ## Output path and interruption
@@ -138,7 +138,7 @@ In this order (all Enforced):
 1. Audio stops being sent, and the last word heard is worked out.
 2. A tool call that is still running is left running. Its call gets a placeholder result.
 3. The reply is stored as it was heard.
-4. The model call and the speech are cancelled. The client is sent an `interrupt` event
+4. The model call and the speech are cancelled. The client is sent `call.interrupt`
    and drops the audio it has queued.
 
 ### What happens when the user stops speaking
@@ -294,9 +294,9 @@ words in the call (and with a tool result before it, if the written part ended i
   Nothing in the instructions changes by itself: they are the same in every call and
   every written reply with the same gem, Darbar text and model, on any day. The date and
   the time are a line in the history (see below), so a new day only adds to its end.
-- **Switching thinking on costs a cache miss**, according to the README's live runs. This
-  is the "little thinking while a search has no result yet" above, and the reason it is
-  not done on Anthropic.
+- **Switching thinking on costs a cache miss**, on the first request made with it (see
+  [Measured in live runs](#measured-in-live-runs)). This is the "little thinking while a
+  search has no result yet" above, and the reason it is not done on Anthropic.
 - **What the call adds is stored.** (Enforced) Each item the call adds to the history
   is stored after the gem's conversation, in order, the moment it is added: our lines,
   the user's words, the replies as heard, tool calls and results, and background
@@ -311,8 +311,8 @@ words in the call (and with a tool result before it, if the written part ended i
 - **What happens in a call is written down, and changes nothing of it.** (Enforced) The
   call's opening and close, each reply's turn, each request with how many items it was
   sent, its tokens and its cost, and each tool call from its start to its end are
-  written to the gem's log as they happen, beside what the gem remembers (see the
-  README, "A gem's log").
+  written to the gem's log as they happen, beside what the gem remembers (see
+  [Observability](observability.md)).
   The model is sent the same with the log as without it: a test sends a scripted reply
   both ways and compares the requests. Writing an entry never waits on the database, so
   it adds nothing to the wait for a reply's first word. A reply's turn closes in the log
@@ -419,8 +419,6 @@ The server speaks nothing for the model.
 
 ## Design rules
 
-Three rules this build started from.
-
 1. **Append by default.** Finalise each turn before the next request. Treat any rewrite
    of old turns as a deliberate cache break, done in a batch.
 2. **The history equals what the user heard.** Keep the heard words and the cut mark.
@@ -428,12 +426,42 @@ Three rules this build started from.
 3. **Every tool call gets a valid result.** A placeholder on interruption, then a call
    written by the server plus the real result when it lands.
 
-A fourth, added on 16 November 2026:
-
 4. **Ask the model, do not act for it.** How the model should behave goes in its
-   instructions, in plain words. The server no longer speaks for it, no longer adds a
-   note telling it how to react to an interruption, and no longer adds a note about what
-   the user did not hear.
+   instructions, in plain words. The server does not speak for it, and adds no note
+   telling it how to react to an interruption or what the user did not hear.
+
+## Measured in live runs
+
+With real models, real speech services where a call needs them, and the check scripts
+(`scripts/voice_pipeline_check.py`, `scripts/deferred_tools_check.py`). These are
+measurements, not guarantees. All but scenario 17 and the deferred tools were run before
+16 November 2026 (pull request 7), which changed three Instructed behaviours: see
+[Known gaps](#known-gaps).
+
+- **Nothing is held back on the way out.** Over ten real turns the first audio came
+  0.11 s after the model's first word, and the model's first word (1.1 s) was nearly all
+  of the wait. Opening the speech connection takes about 0.12 s; it is opened when the
+  call starts and again each time the user starts speaking, so it is there before the
+  reply.
+- **What was heard.** The stored text of a cut reply was within two words of the audio
+  really played, and never past it. The sound device's delay was about 40 ms on laptop
+  speakers and a few tenths of a second on Bluetooth.
+- **A little thinking while a search runs** (OpenAI). The first word came after 1.4 s at
+  the median and 2.6 s for the slowest tenth, against 0.9 s and 1.1 s without thinking.
+  Without it, the model started the same search a second time in a third to a half of
+  the runs where the user only said "hello?"; with it, about one run in twenty. The
+  switch costs one prompt-cache miss, on the first request made with thinking on; the
+  request after the switch back was served from the cache again.
+- **No thinking needed on Anthropic.** Asked "hello?" over a running search, Haiku 5.5
+  and Opus 5.5 each started no second search in 20 runs of 20.
+- **A result told with the user's turn** (scenario 17): see
+  [Known gaps](#known-gaps).
+- **A sentence split in two** by speech recognition: the second half came in the first
+  two to three seconds after the first ended.
+- **Anthropic accepts every request shape** the conversation makes, on Haiku 5.5, Opus
+  5.5 and Sonnet 5.5, and the pipeline check passes on Haiku 5.5 and Opus 5.5.
+- **Deferred tools keep the cache.** On both providers each request after a tool search
+  read the whole of the request before it from the cache.
 
 ## Known gaps
 
