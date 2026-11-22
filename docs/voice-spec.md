@@ -312,7 +312,7 @@ words in the call (and with a tool result before it, if the written part ended i
   call's opening and close, each reply's turn, each request with how many items it was
   sent, its tokens and its cost, and each tool call from its start to its end are
   written to the gem's log as they happen, beside what the gem remembers (see
-  [the log](architecture.md#the-log)).
+  [Observability](observability.md)).
   The model is sent the same with the log as without it: a test sends a scripted reply
   both ways and compares the requests. Writing an entry never waits on the database, so
   it adds nothing to the wait for a reply's first word. A reply's turn closes in the log

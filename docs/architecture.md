@@ -1,7 +1,7 @@
 # Architecture
 
 How the backend is built: its layers, the loop every reply runs, the one conversation a
-gem has, what it remembers, and the log. For what the app sends and receives, see
+gem has, and what it remembers. For what the app sends and receives, see
 [the contract](chat-contract.md). For a call in full detail, see
 [the voice spec](voice-spec.md).
 
@@ -178,42 +178,7 @@ delivers (`delivers`). The fields are in
 
 ## The log
 
-Everything that happens with a gem is written down in one list, in the order it
-happens: the gem's log. Every entry has one shape: its number (`seq`), when it was
-written (`at`), its `kind`, the `turn` it belongs to, and its own fields. Each thing is
-written once, as the kind of entry it is, at the moment it is final.
-
-- **What the gem remembers** is five kinds: `user.said`, `note.written`, `gem.said`,
-  `tool.called` and `tool.result`. The gem's conversation is those entries in order.
-  They are what a model is sent, and nothing else in the log ever is.
-- **What happened** is every other kind: a call opened and closed, a turn opened and
-  closed, each request to the model with its tokens and [cost](models.md#cost), each
-  tool call from its start to its end, and each change of model, instructions or tools.
-
-**The log is the base for anything that looks at what a gem did.** A new thing a gem
-does is a new kind of entry, written through
-[`gem_log.py`](../app/entities/gem_log.py), never a store of its own. The loop offers
-hooks to whoever records a reply ([`loop.py`](../app/entities/loop.py)): with a record
-or without one, the model is sent the same.
-
-- **A request holds a count only.** It was sent every remembered entry before it, in
-  order, and `count` says how many, so an entry lost before it shows.
-- **A change is written before what it applies to.** What a reply or a call is made
-  with (the model and the way to its provider, each layer of the instructions, and
-  every tool as the model is told of it) is compared with what was last written down,
-  and only the part that differs is written, in full. The way to the provider is
-  compared again at each request, since it can change in the middle of a call. Comparing
-  what is used, not when a setting is edited, also catches what nobody edited, such as a
-  connection whose tools were read again.
-- **Writing it down costs a reply nothing.** Each entry is numbered in one place for
-  each gem, told at once to any socket that watches the gem (`log.watch`), and written
-  to the database behind the reply's back. A write of what happened that fails is
-  logged and dropped: it fails no reply. What the gem remembers is held and written
-  again, in order, and a reply's last frame and a call's end wait until it is stored.
-
-What it does not show yet: thinking a provider does not hand over, whatever the ChatGPT
-proxy does on its own side, the requests a provider's library retries by itself (up to
-twice, unseen), and speech-to-text and speech.
-
-Every kind of entry, its fields, and the routes and frames that read the log are in
-[the contract](chat-contract.md#a-gems-log).
+Everything that happens with a gem is written down in one list, in order: what it
+remembers, and every turn, request, tool call and change in between. What the gem
+remembers is those entries. The log is the base for anything that looks at what a gem
+did, and has a page of its own: [Observability](observability.md).

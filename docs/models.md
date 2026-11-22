@@ -112,4 +112,4 @@ which is kept by hand and dated.
 - **To change a price**, change it in the table and move `PRICED` on.
 
 A request's tokens and cost are written to the gem's log
-([architecture](architecture.md#the-log)). Speech and search are not costed yet.
+([Observability](observability.md)). Speech and search are not costed yet.
