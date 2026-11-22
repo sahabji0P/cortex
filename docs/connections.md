@@ -62,6 +62,11 @@ the ones the user was shown: a server cannot reword a tool, or add one, behind t
 user's back. Opening a reply costs no request to the server, and the tool list does not
 move between requests.
 
+- **If the server does not answer** (a 502), the copy stays as it was. So does a
+  refresh of a server that now asks for a sign-in: the connection then needs one.
+- **Only the fields sent are written** by a change, so a change made while a server is
+  being asked is not undone by it.
+
 What it does not cover: a new tool that a refresh brings in is open to whoever the
 connection is open to, so look at what a refresh lists. A limit is kept for a tool the
 server stops listing, so one that comes back comes back as closed as it was left.
@@ -176,11 +181,10 @@ user why a call did not run.
 A 403 is not a sign-in: it fails the call, and changes nothing. A sign-in server that
 cannot be reached leaves the pass as it is.
 
-**What a client is told** is `sign_in`: null for a connection that does not sign in, or
-its `state` (`"signed_in"` or `"sign_in_needed"`), `expires_at` (when the pass runs out,
-or null when that is not known: unknown, not never), and `renews` (whether it is renewed
-without the user). A pass past its time that cannot be renewed reads as
-`"sign_in_needed"`, worked out when it is read.
+**What a client is told** is `sign_in`, its state, when the pass runs out and whether it
+renews (see [the contract](chat-contract.md#signing-in-through-the-browser)). A pass
+past its time that cannot be renewed reads as `"sign_in_needed"`, worked out when it is
+read.
 
 **Secrets stay here.** The pass, the refresh token, the registration and the PKCE secret
 never go to a client, a frame, the model or a log. They are kept in the database as

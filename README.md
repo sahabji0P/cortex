@@ -66,11 +66,12 @@ You need [uv](https://docs.astral.sh/uv/), Docker (for MongoDB and Redis), a
 ```bash
 docker compose up -d          # MongoDB and Redis
 uv sync --extra dev
-cp .env.example .env          # then set CARTESIA_API_KEY and OPENAI_API_KEY (or ANTHROPIC_API_KEY)
+cp .env.example .env          # then set CARTESIA_API_KEY and OPENAI_API_KEY
 uv run uvicorn app.main:app --reload
 ```
 
-The backend listens on `http://127.0.0.1:8000`. `GET /health` answers when it is up.
+To use an Anthropic model by default instead, set `ANTHROPIC_API_KEY` and `VOICE_MODEL`
+(say, `Haiku 5.5`). The backend listens on `http://127.0.0.1:8000`. `GET /health` answers when it is up.
 Then run the [desktop app](https://github.com/sahabji0P/cortex-desktop) against it.
 
 ## Configuration
@@ -105,7 +106,7 @@ Never commit credentials.
 | `/v1/connections` | The MCP tool servers, who may use them, and their sign-ins |
 | `/v1/providers/openai` | How OpenAI is reached: the API key or the proxy, and the proxy's accounts |
 | `GET /v1/voice/models` | The models a gem can use, and whether each one's key is set |
-| `/v1/users` | Register and log in. Not used by the app yet |
+| `/v1/users` | Register and log in. The app does not use it |
 | `GET /health` | Whether the backend is up |
 
 Every frame and field the app relies on is in [the contract](docs/chat-contract.md).

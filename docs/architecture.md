@@ -17,7 +17,7 @@ config ← core ← adapters ← entities ← routers ← main
 - **`core`** holds what every layer may use: errors, password and token helpers, and how
   times are kept and sent.
 - **`adapters`** are one file per outside service, and the only place an SDK is called.
-  Every adapter is async.
+  Every call to the outside is async.
 - **`entities`** hold the logic. They reach the outside only through adapters.
 - **`routers`** are the HTTP and WebSocket endpoints, one folder each, with a
   `controller.py` (the routes), `models.py` (what goes in and out) and `service.py`.

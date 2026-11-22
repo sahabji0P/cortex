@@ -98,10 +98,9 @@ change, in [`app/entities/darbar_ent.py`](../app/entities/darbar_ent.py).
 | `DELETE /v1/gems/{gem_id}` | deletes it (204), with its conversation and its log. It is taken out of every connection that names it |
 | `GET /v1/gems/{gem_id}/chat` | its conversation so far, calls included |
 | `GET /v1/gems/{gem_id}/log` | its log (see [Architecture](architecture.md#the-log)) |
-| `GET /v1/darbar` | the Darbar text: `{"text": "...", "is_default": true}`. `is_default` says whether it is the built-in text |
-| `PUT /v1/darbar` | sets it. Body `{"text": "..."}`, at most 4,000 characters; may be empty. Answers like `GET` |
-| `DELETE /v1/darbar` | goes back to the built-in text. Answers like `GET` |
 
-Ids go out as strings, and a missing or malformed id is a 404. There is no sign-in on
+The Darbar text is read and set at `/v1/darbar` (see
+[the contract](chat-contract.md#the-darbar-text-v1darbar)). Ids go out as strings, and a
+missing or malformed id is a 404. There is no sign-in on
 any of these: this backend has one user for now. What the app reads from them is in
 [the contract](chat-contract.md).
