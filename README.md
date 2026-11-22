@@ -23,7 +23,7 @@ It is a personal project and an experiment. It runs on your own Mac, for one use
   can interrupt at any time, and the gem remembers only what you actually heard.
 - **Written chat** with the same gem, over the same socket, from the same stored
   conversation.
-- **Observability built in.** Every gem has a log of everything it did: each turn,
+- **Observability built in.** Every gem has a log of what it did: each turn,
   each request with exactly what it was sent, its tokens, cost and timing, each tool
   call from start to end, and each change of model, instructions or tools. Read it over
   HTTP or watch it live. The app draws it as the gem's trajectory.
@@ -94,6 +94,8 @@ seq turn kind               of note
 - **Live**: send `log.watch` on the socket and each entry arrives as it is written.
 - **Free for the reply**: writing the log never holds a reply up and never fails one,
   and the model is sent the same with it or without it.
+- **Not yet in it**: speech-to-text, speech and search, with their cost, and the retries
+  a provider's library makes on its own.
 
 [Observability](docs/observability.md) has the whole trace, the promises the log keeps,
 and how to read it.
