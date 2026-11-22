@@ -1,291 +1,174 @@
-# Cortex
+<p align="center">
+  <img src="assets/logo.png" alt="Cortex" width="120">
+</p>
 
-Cortex is a personal experimentation backend. Its current experiment is a spoken conversation built as a cascade: speech-to-text, then a model, then text-to-speech, with interruption handling and a web search tool. A gem can also be written to (see [Chat](#chat)). Called or written to, a gem has one conversation, and it is kept (see [One conversation](#one-conversation)).
+<h1 align="center">Cortex</h1>
 
-## The voice cascade
+<p align="center">
+  The backend for a set of personal assistants, called gems, that you can call or write to.
+</p>
+
+---
+
+Cortex holds the user's gems. A gem has a name, instructions, a model and tools. You can
+talk to it in a live voice call or write to it in a chat. Either way it is **one
+conversation**, stored, and it carries on from where it left off. The desktop app,
+[cortex-desktop](https://github.com/sahabji0P/cortex-desktop), is the client.
+
+It is a personal project and an experiment. It runs on your own Mac, for one user.
+
+## Features
+
+- **Voice calls as a cascade.** Speech-to-text, then a model, then text-to-speech. You
+  can interrupt at any time, and the gem remembers only what you actually heard.
+- **Written chat** with the same gem, over the same socket, from the same stored
+  conversation.
+- **Six models from two providers.** OpenAI (6 Luna, 6.1 Terra, 6.1 Sol) and Anthropic
+  (Haiku 5.5, Sonnet 5.5, Opus 5.5). OpenAI can also be reached through a ChatGPT login
+  by a proxy.
+- **Tools.** Web search, and the tools of any [MCP](https://modelcontextprotocol.io)
+  server you connect, with browser sign-in (OAuth) and per-gem permissions. A tool call
+  carries on in the background when a reply is cut, and its result is told later.
+- **A log of everything.** Every turn, request, token count, cost and tool call of a
+  gem, in one ordered list that the app can read or watch live.
+
+## How it works
 
 ```text
 mic audio ──▶ speech-to-text ──▶ model ──▶ text-to-speech ──▶ speech audio
-              Cartesia ink-2     OpenAI or Cartesia Sonic
+              Cartesia ink-2     OpenAI or  Cartesia Sonic
                    │             Anthropic
                    │                │
-                   │                └─ may call web_search (Parallel) before answering
+                   │                └─ may call tools (web search, MCP) before answering
                    └─ also detects turns:
                       turn.end    the user finished a sentence → start a reply
-                      turn.start  the user began speaking     → cancel the reply in progress
+                      turn.start  the user began speaking     → cut the reply in progress
 ```
 
-- **Replying.** When a turn ends, its transcript goes to the model. The model's text is pushed to text-to-speech as it streams, and the audio is forwarded to the client as it is produced. Nothing is held back on the way: over ten real turns the first audio came 0.11 s after the model's first word, and the model's first word (1.1 s) was nearly all of the wait.
-- **The speech connection is opened early.** One is opened when the call starts and again each time the user starts speaking, so it is there before the reply. Opening takes about 0.12 s and used to run while the model was thinking, so this only matters when opening is slow.
-- **Who speaks first.** The user, unless the gem or the app asks otherwise: a gem that speaks first, or `first` set to `assistant` in `call.start`, has the gem greet the user as soon as the call opens.
-- **Interrupting.** When the user starts speaking, the server cancels the model call and the speech stream, then sends an `interrupt` event. The client must stop playback and drop audio it has not played yet: speech is generated several times faster than it plays, so the client always holds some.
-- **Searching.** With `PARALLEL_API_KEY` set, the model gets a `web_search` tool, unless the gem's `tools` leave it out. Without the key the tool is not offered and everything else works. One reply may search as many times as the model needs: there is no limit.
-- **More tools.** A gem is also offered the tools of the tool servers the user has connected and opened to it (see [Connections](#connections)). They are run like a search: by the same loop, in a call and in writing, and a call still running at a cut carries on.
+The app keeps one WebSocket open to `/v1/link`. Calls and written chat both go over it.
+In writing there is no speech: the same loop runs, and the reply is streamed as text.
+Plain HTTP routes save and load gems, connections and settings.
 
-### Which model answers
+Three rules hold for what a gem remembers, in a call and in writing:
 
-A conversation is held with one model from start to end, chosen when it opens:
+1. **It holds what was delivered**: what the user heard, or was sent, not what the
+   model generated. A cut reply is kept as far as it got, ending in "…".
+2. **Every tool call keeps a valid result**, even when the reply that made it is cut.
+3. **Nothing the model was sent is changed afterwards**, so a prompt cache stays valid.
 
-| Model | Provider | Thinks before it speaks | Needs |
-| --- | --- | --- | --- |
-| `6 Luna` (the default) | OpenAI | no | `OPENAI_API_KEY` |
-| `6.1 Terra` | OpenAI | no | `OPENAI_API_KEY` |
-| `6.1 Sol` | OpenAI | a little: it cannot be turned off | `OPENAI_API_KEY` |
-| `Haiku 5.5` | Anthropic | no | `ANTHROPIC_API_KEY` |
-| `Opus 5.5` | Anthropic | a little: it cannot be turned off | `ANTHROPIC_API_KEY` |
-| `Sonnet 5.5` | Anthropic | no | `ANTHROPIC_API_KEY` |
+[Architecture](docs/architecture.md) explains these in full.
 
-A conversation is always held with the gem's model. `VOICE_MODEL` sets the model for a gem that names none. `GET /v1/voice/models` lists them, with whether each one's key is set. A call with a gem whose model's provider has no key gets `call.refused`, with the reason in words.
+## Getting started
 
-OpenAI can also be reached through a proxy that speaks its API, such as [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) signed in with a ChatGPT account, so the ChatGPT plan pays instead of the API key. Set `OPENAI_PROXY_URL` (for CLIProxyAPI on this Mac, `http://127.0.0.1:8317/v1`) and `OPENAI_PROXY_KEY` (one of the proxy's own keys). With the proxy and `OPENAI_API_KEY` both set, the user picks one in the app: `GET /v1/providers/openai` says which is in use and which are set up, and `PUT` with `{"via": "api"}` or `{"via": "proxy"}` switches it from the next request on, for calls in progress too. The choice is kept across restarts; until one is made, the API key is used. A way that is not set up gets 409. The plan's models must include the gem's, and its usage limits apply to calls.
-
-The proxy's ChatGPT account can be changed from the app too, when `OPENAI_PROXY_MANAGEMENT_KEY` is set to CLIProxyAPI's management key (`remote-management.secret-key` in its config). `GET /v1/providers/openai` then lists the proxy's accounts, each with its plan and whether the proxy can still use it. `POST /v1/providers/openai/sign-in` starts a sign-in and gives the address to open in the browser, which comes back to the proxy, not to this backend. `GET /v1/providers/openai/sign-in/{state}` says `wait`, `ok` or `error`. When it is `ok`, the account just signed in replaces the proxy's other ChatGPT logins, so it is the one every request uses. No login ever reaches this backend's database or the app.
-
-Everything below is the same for either provider. The conversation keeps one history, and only the last step differs: OpenAI is sent it as it stands, and for Anthropic it is translated into alternating user and assistant messages on every request. These things differ on an Anthropic model:
-
-- **Thinking is fixed for the conversation.** It is off on Haiku 5.5, on Sonnet 5.5 it is set to the nearest that model allows, and Opus 5.5 is asked for as little as it will do. What a model writes as thinking is never sent back to it, because the history is cut down to what the user heard. The switch to a little thinking while a search is pending (rule 2 below) is not made, and is not needed: asked "hello?" over a running search, Haiku 5.5 and Opus 5.5 each started no second search in 20 runs of 20.
-- **Notes from the server travel in a user message**, wrapped in `<note>` tags that the instructions explain. The Messages API has no place for them where they fall, which is after a reply of the model's own.
-- **Caching is asked for on every request.** Conversations shorter than the provider's minimum are not cached at all.
-
-Fable 5.2 is not offered: its thinking cannot be turned off, which is a wait before every reply. Opus 5.5 has the same limit and is offered anyway, for comparing.
-
-One smaller difference: two searches made in one round are sent back to an Anthropic model as two rounds, one after the other.
-
-The Anthropic models are reached through the Claude API directly, with a key from platform.claude.com, never through a cloud provider. They have been run live: every request shape the conversation makes is accepted by Haiku 5.5, Opus 5.5 and Sonnet 5.5, and the real-model check below passes on Haiku 5.5 and Opus 5.5.
-
-### What the model remembers
-
-The history is what the model is sent on every request. A call starts from the gem's stored conversation and adds to it as each thing becomes final (see [One conversation](#one-conversation)). Nothing is stored at the provider. The history follows three rules, the same in a call and in writing.
-
-1. **It holds what the user heard, not what was generated.** A reply joins the history only once it has been heard in full or cut off, except what it said before a tool call, which joins whole when it is sent back to the model with the result. A reply that is cut off is stored as the words that were heard, ending in "…", and the rest is never sent back. How much was heard comes from Cartesia's word timings and a server-side copy of the client's playback schedule, shifted by the sound-device delay the client reports (about 40 ms on laptop speakers, a few tenths of a second on Bluetooth). In live runs the stored text was within two words of the audio really played, and never past it. Nothing is added about the unheard part, however long it was: the "…" and the model's instructions say that the user did not hear the rest.
-2. **Every tool call keeps a valid result.** An interruption does not stop a tool call, in a call or in chat, and the same code does it in both ([`app/entities/late_results.py`](app/entities/late_results.py)). Its call gets a placeholder result and the call carries on. When the real result comes in, it is added as a call written by the server (a stub that names the original call) followed by the result. If nobody is speaking, it is added at the next quiet moment, and the model tells the user about it in a reply of its own, without being asked. A quiet moment is when the reply in progress has finished playing, so a result that lands during a long reply waits for it. If the user's turn ends while a result is waiting (it came back while they spoke, or while a reply they cut was playing), the result is added ahead of their words, and one reply answers them and tells it; a cancel of that call then finds nothing running. Run live 20 times on each of 6 Luna and Haiku 5.5, with a search's result landing while the user asked something unrelated, the gem answered the question in every run and never searched again, but told the result in that same reply in only 14 of 20 runs on 6 Luna and 9 of 20 on Haiku 5.5. In the others the server asks for nothing more: the result is in the history, and whether the gem brings it up later was not measured. If a noise cuts the reply about the result off before a word of it is heard, the same request is made again. If the user speaks over it instead, they are answered, and telling them of the result is left to the model: its instructions ask it to answer first and then tell them. The model can stop a running call with `cancel_tool_call`. A cancel made in the instant the call finishes still drops its result, since the model was told "Cancelled.". While a search has no result in the history yet, the model is asked to think a little before it speaks; otherwise it does not think at all. The first word of those replies came after 1.4 s at the median and 2.6 s for the slowest tenth, against 0.9 s and 1.1 s without thinking. Asked without thinking, it started the same search a second time in a third to a half of measured runs where the user only said "hello?"; with it, about one run in twenty. The switch also costs one prompt-cache miss, on the first request made with thinking on; the request after the switch back was served from the cache again.
-3. **Nothing the model has been sent is changed afterwards.** Everything joins the history the moment it is final, before the request that carries it, so each request starts with the whole of the one before it, and the instructions and tool list are identical every time, so a prompt cache stays valid. One consequence: what the model said before a search is kept in full even if the user cut it off part-way, because the model was already sent it. Nothing is cleared: every search result stays whole, as in chat.
-
-What the user says joins the history the moment they have said it, as an item of its own. Words said before any reply to them has been heard are one more user item after it, and the next reply answers both. Speech recognition sometimes splits one sentence in two this way, and the model reads the halves together. In live runs the second half came in the first two to three seconds after the first ended.
-
-A one or two word fragment in a writing system the user has not spoken in during the conversation, starting within three seconds of the end of their sentence, is dropped as noise. So is one the recognizer has run on to the end of the sentence itself. This only works when the recognizer writes the noise in another script: it sometimes writes the same sound in Latin letters, and then nothing marks it as noise. A turn with no usable words puts back whatever it interrupted: an unanswered question is answered again, and a reply that was being heard is resumed. For the second, the history gets one line saying that the sound had no words in it, and the model's instructions tell it to carry on from where it stopped. The limits on the filter matter, because a real word dropped as noise means the user is talked over.
-
-The conversation is in [`app/entities/voice_ent.py`](app/entities/voice_ent.py). Speaking, and working out what was heard, is in [`app/entities/voice_speech.py`](app/entities/voice_speech.py). What the model is told is put together in [`app/entities/instructions.py`](app/entities/instructions.py). What differs between the providers is in [`app/entities/model.py`](app/entities/model.py), and the web search tool, and the rule for which tools a gem is offered, are in [`app/entities/tools.py`](app/entities/tools.py). Neither is particular to a call.
-
-### The loop, and the surface a reply is delivered on
-
-Making a reply is not particular to a call either. The loop in [`app/entities/loop.py`](app/entities/loop.py) runs one: a model round, then the tool calls it made, then their results back to the model in the next round, until a round only says something. Every gem, however it is reached, is to run this one loop. What differs is its config and the surface its reply is delivered on. A surface takes the reply's text and can say how much of it got through by a given moment. In a call the surface is speech, and what got through is what was heard. The history holds what was delivered, by the rules above, on any surface.
-
-[`app/entities/written_ent.py`](app/entities/written_ent.py) is a second surface, writing. One message in, its reply streamed out as text, one reply at a time; or a reply with no new message, written from the history as it stands. It is given the history to start from and hands back what it added. What was delivered is what the reader was handed: if the reply is cut or the reader stops part-way, the history keeps that text ending in "…". A tool still running is not stopped: as in a call, it gets the placeholder as its result, and is held by the conversation's `LateResults` until whoever holds the conversation tells its result. Chat is built on it.
-
-## Chat
-
-A gem can be written to as well as called. The app keeps one WebSocket open to `/v1/link`, and chat goes over it, as do calls (see [Calls](#calls)); the frames are in [`docs/chat-contract.md`](docs/chat-contract.md), which is the contract with the app. In short: the app sends `chat.send` with a gem's id and the text, and gets back `chat.text` and `chat.tool` frames as the reply is written, then one of `chat.done`, `chat.cut` or `chat.error`. A search that carries on after a cut is told later, in a reply that starts with `chat.result`. A frame that cannot be read gets `error`, and the socket stays open.
-
-**The database is the truth, not the connection.** Every message is answered from what is stored: the gem's config and the Darbar text are loaded as they are now, its conversation so far is loaded (a call's turns included), the instructions are built, one reply is made by the loop, and what the user wrote and what was delivered of the reply are added to the stored conversation as each becomes final: the message when the reply begins, and the reply as it goes. All of it is stored before the reply's last frame is sent. Little about a gem's conversation is kept in memory between messages: the reply in progress, and the searches still running. So a changed gem applies from the next message, two windows on one gem cannot drift apart, and a dropped connection loses nothing: a socket that closes cuts its replies, and they are stored as cut.
-
-The stored conversation is the history the model is sent, item by item, only ever added to, each item an entry of the gem's log with when it was added. It follows the same rules as a call's: it holds what was delivered, every tool call has a result, and each request starts with the whole of the one before it. A reply cut while it was being written is stored as what was sent, ending in "…". Nothing is made up to mark a cut: a reply cut before any of it was sent leaves no reply, as in a call, and one cut while a tool ran keeps the text before it whole.
-
-**A message is stored as it was sent, whatever becomes of its reply.** A message whose reply was cut or failed before any of it was delivered stays a user message of its own: the next message to the gem follows it, and the reply to that one answers both, as words do in a call. The rule is one, for a call and for writing, in [`app/entities/history.py`](app/entities/history.py).
-
-**A search carries on after a cut, as in a call.** Its call is stored with the call's placeholder as its result, and the new message is answered. When the search finishes, at the next moment no reply is being written to that gem, a stub call and the real result are added to the stored conversation, in the call's shape, and the gem tells the user what it found in a reply of its own, with no new message. If a message is waiting to be answered then (it cut the reply during which the search came back), the stub and the result are stored ahead of it instead, by the same code as a call, and the reply to it tells the result, with no `chat.result` before it. That reply goes to the socket that sent the latest message to the gem, after a `chat.result` frame; if that socket is gone, the result is only stored, and the gem's instructions tell it to bring the result up when it next answers. A result that comes in while a reply is being written waits for it to be stored, and several waiting are told in one reply. That reply is a turn like any other: a new message cuts it. The gem can stop a running search with `cancel_tool_call`, and while a search has no result in the conversation yet it is asked to think a little first. Which call a stub delivers is stored beside it (`delivers`), so nobody has to read it from the stub's arguments. A placeholder, and the answer of a `cancel_tool_call` that stopped a call, are stored with a `mark` that says so, and are found by it, never by their wording. The calls themselves run in the process's memory, so a restart loses them; before the next reply, a placeholder whose call is gone gets a stub with a result saying the call was lost and will not arrive (its wording is not settled). It is all in [`app/entities/chat_ent.py`](app/entities/chat_ent.py), with the code for calls that outlive their reply, which it shares with a call, in [`app/entities/late_results.py`](app/entities/late_results.py).
-
-`GET /v1/gems/{gem_id}/chat` returns the gem's conversation for showing on screen, a call's turns included: `user`, `gem` and `tool` messages, oldest first, each with `at`. Stub calls, `cancel_tool_call` calls and our own lines are not shown; a reply about a background result is a `gem` message. It does not say which messages were spoken. Deleting a gem deletes its conversation, and a background result of a deleted gem is dropped.
-
-Two first rules, to be tried out rather than settled:
-
-- **The whole stored conversation is sent to the model every time.** Nothing is trimmed or summed up, and old search results are not cleared, as in a call. The context therefore grows with every message, and quickly when searches are used. A message is at most 20,000 characters, so one stray paste cannot ride along in every request after it.
-- **A new message cuts the reply still being written to that gem**, like speaking over someone in a call. The reply is stored as what was sent plus "…", its socket gets `chat.cut`, and then the new message is answered. This holds across every socket of the process: one reply at a time for each gem.
-
-While the gem is in a call, a message to it gets `chat.error` with "the gem is in a call", and nothing is stored.
-
-A gem in writing is offered `web_search` when its `tools` name it and the search key is set, and the tools of the connections open to it (see [Connections](#connections)), as in a call. With any of them comes `cancel_tool_call`.
-
-## Try it
+You need [uv](https://docs.astral.sh/uv/), Docker (for MongoDB and Redis), a
+[Cartesia](https://cartesia.ai) key for speech, and a key for the model's provider.
 
 ```bash
-docker compose up -d                      # MongoDB and Redis
+docker compose up -d          # MongoDB and Redis
 uv sync --extra dev
-cp .env.example .env                      # then set CARTESIA_API_KEY and the model's key (OPENAI_API_KEY by default)
+cp .env.example .env          # then set CARTESIA_API_KEY and OPENAI_API_KEY (or ANTHROPIC_API_KEY)
 uv run uvicorn app.main:app --reload
 ```
 
-The desktop app is the client: it keeps one socket open to `/v1/link` and holds its chats and calls over it (see [`AGENTS.md`](AGENTS.md)).
+The backend listens on `http://127.0.0.1:8000`. `GET /health` answers when it is up.
+Then run the [desktop app](https://github.com/sahabji0P/cortex-desktop) against it.
 
-## Calls
+## Configuration
 
-A call goes over the standing socket, `WS /v1/link`, which carries chat too. The app sends `call.start`, mic audio as binary frames, `call.playback` and `call.end`. It gets `call.ready`, speech as binary frames, the call's events with `call.` put before their type (a reply comes as words timed to its audio, not as text), and one last frame: `call.ended`, `call.refused` or `call.failed`. The socket stays open through all of it.
+Settings are read from the environment, or from `.env`, by
+[`app/config.py`](app/config.py). [`.env.example`](.env.example) lists them all.
 
-A call is always with a gem (see [Gems](#gems)): `call.start` names it, and may say who speaks first. The gem's model answers. A `first` that is sent wins over the gem's for that call, and one that is left out leaves the gem's. A `call.start` with no gem or a value that is not offered, a gem that is not there or an id that is not an id, a gem already in a call, or a gem whose model's provider has no key, gets `call.refused` with the reason in words. A gem whose stored config cannot be read, as when a newer cortex wrote it, gets `call.failed`, and so does a call whose conversation cannot be read or stored. Opening a call, and storing what it adds, is in [`app/entities/call_ent.py`](app/entities/call_ent.py).
+| Setting | Needed for | Default |
+| --- | --- | --- |
+| `CARTESIA_API_KEY` | calls: speech-to-text and text-to-speech | none |
+| `OPENAI_API_KEY` | the OpenAI models | none |
+| `ANTHROPIC_API_KEY` | the Anthropic models (a Claude API key, from platform.claude.com) | none |
+| `PARALLEL_API_KEY` | the `web_search` tool. Without it the tool is not offered | none |
+| `VOICE_MODEL` | the model of a gem that names none | `6 Luna` |
+| `OPENAI_PROXY_URL`, `OPENAI_PROXY_KEY` | OpenAI through a proxy on a ChatGPT login ([Models](docs/models.md#openai-through-a-chatgpt-login)) | none |
+| `OPENAI_PROXY_MANAGEMENT_KEY` | changing the proxy's ChatGPT account from the app | none |
+| `BACKEND_URL` | where the browser comes back to after a connection's sign-in | `http://127.0.0.1:8000` |
+| `MONGODB_URL`, `MONGODB_DB_NAME` | the database | `mongodb://localhost:27017`, `cortex` |
+| `REDIS_URL` | Redis, connected at start-up. Only the user login (`/v1/users`) writes to it | `redis://localhost:6379` |
+| `ENVIRONMENT`, `DEBUG` | `local`, `staging` or `production`; `DEBUG` opens the API to any web origin | `local`, `true` |
+| `SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `JWT_ALGORITHM` | the user login (`/v1/users`) | see `.env.example` |
 
-## One conversation
+Never commit credentials.
 
-A gem has one conversation, whether the user calls it or writes to it. A call starts from the gem's conversation as it is stored, as a written reply does, and a written reply after a call is made from everything the call added. The only difference between the two is the speech: a call has speech-to-text and text-to-speech around the same loop, and writing has none.
+## API at a glance
 
-- **A call stores what it adds, as it goes.** Our own lines, what the user says, the gem's replies as they were heard, tool calls and their results, and background results are stored in order after what was there, each the moment it is final, by the same code chat stores with. A reply that can still be cut is never stored. Everything the call added is stored by the time its last frame is sent; if it cannot be, the call fails with `call.failed` and "the conversation could not be stored". The Darbar text is read once when a call opens, and for every message in writing.
-- **A line says when a call starts and when it ends.** Before the first turn of every call: "The user has called you. From here on the conversation is spoken." Before the first written turn after a call: "The call has ended. From here on the conversation is written." Nothing is written when a call ends: the line is written when the next turn needs it. A line is stored when it is written, so a call in which nothing was said leaves the line that opened it. A call straight after another call is marked by its own opening line.
-- **A line gives the date and the time.** It is not in the instructions, so they stay the same from day to day and a prompt cache holds. "It is Friday, 20 November 2026, 7:46 pm in Asia/Kolkata.", in the `time_zone` the app sends on `chat.send` and `call.start`; with none, or one that cannot be read, in UTC, adding "The user's time zone is not known." A call writes one right after its opening line. In writing one goes before a message when none has been written yet, the last is more than ten minutes old, or the date has changed in the user's zone; a reply with no message gets none. It is stored like the other lines, with `source` `time-line`.
-- **Every stored item says its mode**, `call` or `chat`, and who wrote it (`source`): the user, the gem, a tool, or one of our own lines and stubs. Each item is an entry of the gem's log, of the kind it is (`user.said`, `note.written`, `gem.said`, `tool.called` or `tool.result`), in the `GemLog` collection (see [A gem's log](#a-gems-log)). Conversations stored in the older `ChatItems` collection are not read.
-- **One writer at a time.** A call holds the gem from when speech is connected until what it added is stored. Meanwhile a message to the gem gets `chat.error` ("the gem is in a call"), and another `call.start` for it, from any socket, gets `call.refused` with the same words. A `call.start` while a reply is being written to the gem cuts that reply, as a new message does, and the call opens once it is stored. A message whose reply never got through is already stored, so the call follows it.
-- **One set of background calls.** A search left running by a written reply whose result comes in during a call is told in the call. One still running when a call ends carries on, and its result is told in writing, to the client of the latest message, or only stored if there is none. A background result is never written about to a gem in a call.
-- **Calls lost to a restart are closed** with the lost stub before a call's first reply, as before a written one.
-
-What is kept in memory of each gem's conversation (the writer, and the calls still running in the background) is in [`app/entities/conversation_ent.py`](app/entities/conversation_ent.py).
-
-The frames, what each of the call's events means, the rules a call keeps to, and how a client must play its audio are in [`docs/chat-contract.md`](docs/chat-contract.md).
-
-`GET /v1/voice/models` returns one object per model: `name` (what to send), `provider`, `label` (what to show), `available` (its key is set), `default` (used when none is named) and `listed` (whether a picker should offer it).
-
-## A gem's log
-
-Everything that happens with a gem is written down in one list, in the order it happens: the gem's log. Every entry has one shape: its number (`seq`), when it was written (`at`), its `kind`, the `turn` it belongs to, and its own fields. Each thing is written once, as the kind of entry it is, at the moment it is final.
-
-- **What the gem remembers** is five kinds: `user.said`, `note.written`, `gem.said`, `tool.called` and `tool.result`. Each holds one item exactly as a model is sent it, and the gem's conversation is those entries in order. They are what a model is sent, and nothing else in the log ever is.
-- **What happened** is every other kind: a call opened and closed, a turn opened and closed, each request to the model, each tool call, and each change of model, instructions or tools.
-
-Everything the gem remembers is added the moment it is final, before the request that carries it, so the log's order is the order the model was sent things in. What the model produced and what the gem remembers of it are two facts, and both are there: a request's end holds all the model produced, and the turn's `gem.said` what was delivered. A reply that is cut or fails can leave nothing remembered at all, yet it made requests and cost money.
-
-- **A request holds a count only.** It was sent every remembered entry before it in the log, in order, and `count` says how many, so an entry lost before it shows.
-- **A request ends with what it cost.** Both providers report the tokens they charged for with every reply: read in full, read from a cache, written to a cache, and output. No provider reports a cost, so it is worked out from the price table in [`app/entities/prices.py`](app/entities/prices.py), which is kept by hand and dated. A model with no price there has no cost, and a request cut while the model was still producing has no tokens read (the count is read from a reply that finished): both are kept as unknown, never as nothing. Prices are there for all six models, read from OpenAI's and Anthropic's public price pages on the date the table carries. Where a provider charges a long request more (OpenAI above 272K tokens sent, Haiku 5.5 above 100,000), the whole request is costed at the higher prices.
-- **A change is written before what it applies to.** The instructions and the tools are the first thing a model is sent, so a change of them comes first in the log too: before a written reply's turn opens, and in a call right after it opens, before anything the call remembers. The model and the way to its provider, the four layers of the instructions, and every tool as the model is told of it are compared with what was last written down, and only the part that differs is written, in full. The way to the provider is compared again at each request, since it can change in the middle of a call. Comparing what a reply or call is made with, not when a setting is edited, also catches what nobody edited, such as a connection whose tools were read again.
-- **A tool call can be read from start to end**, by its `call_id`, each entry naming the turn that made it. One that ends within its reply is started, then done, with how long it ran. One still running when its reply is over goes to the background: started, backgrounded, done, and then delivered by a stub call and its result (`delivers`), cancelled, or closed as lost after a restart. Its result is the one thing the log holds twice: where it ended, and where the gem is told it.
-- **Writing it down costs a reply nothing.** Each entry is numbered in one place for each gem, told at once to any socket that watches the gem (`log.watch`), and written to the database behind the reply's back. A write of what happened that fails is logged and dropped: it fails no reply. What the gem remembers is held and written again, in order, and a reply's last frame and a call's end wait until it is stored. If it cannot be, the reply ends in `chat.error` or the call in `call.failed`, and it is dropped, never stored later. If the process stops, the last moment of what happened can be lost.
-
-What it does not show: thinking a provider does not hand over, whatever the ChatGPT proxy does on its own side, and the requests a provider's library retries by itself (a failed request is retried up to twice without a trace; making those visible is next). Speech-to-text and speech are not in the log yet either.
-
-`GET /v1/gems/{id}/log` reads the log back in pages, `GET /v1/gems/{id}/log/{seq}` one entry, and `GET /v1/gems/{id}/log/{seq}/sent` everything a request was sent, read from the remembered entries before it. Every kind of entry and its fields are in [`docs/chat-contract.md`](docs/chat-contract.md). It is written down in [`app/entities/gem_log.py`](app/entities/gem_log.py), through hooks the loop offers to whoever records a reply ([`app/entities/loop.py`](app/entities/loop.py)): with a record or without one, the model is sent the same.
-
-## Gems
-
-A gem is one of the user's assistants. Each has one config, kept in the `Gems` collection but treated like a config file. It is the one home of a gem: what a call or a chat acts on, and what the app shows of it:
-
-| Field | Meaning |
+| Route | What it is |
 | --- | --- |
-| `version` | the version of the config's shape, 3 today. Every stored config carries it |
-| `name` | what the gem is called: required, trimmed, at most 100 characters |
-| `description` | one line on what the gem is for, shown under its name. The model is not told it. May be empty; at most 200 characters |
-| `image` | the gem's picture, as one value the backend does not read: today the app's built-in face and colour, later perhaps the address of a picture. Null for none; at most 500 characters |
-| `instructions` | plain text saying who the gem is and how it behaves. A gem made with none, or blank ones, is given the default instructions: how to talk in a call and how to write. After that they are stored as they are sent, so blank means the user removed them. At most 20,000 characters |
-| `model` | a `name` from `GET /v1/voice/models`, or null for the configured default. A stored name that is no longer offered is read as null |
-| `speaks_first` | whether the gem greets the user when a call connects. Default false |
-| `tools` | the names of the built-in tools it may use, no name twice. Default `["web_search"]`, the only one there is today. Any other name is refused when a gem is made or changed. A connection's tools are not named here: who may use them is said on the connection (see [Connections](#connections)) |
-| `voice` | the voice its replies are spoken in, as the app names it. Null for none chosen; at most 100 characters. Kept, but a call does not use it yet |
-| `speech_speed` | how fast it is spoken, 0.5 to 2.0. Default 1.0. Kept, but a call does not use it yet |
+| `WS /v1/link` | The standing socket: written chat, calls and their audio, and the log as it is written |
+| `/v1/gems` | The gems and their configs, a gem's conversation (`/chat`) and its log (`/log`) |
+| `/v1/darbar` | The Darbar text, which every gem is told first |
+| `/v1/connections` | The MCP tool servers, who may use them, and their sign-ins |
+| `/v1/providers/openai` | How OpenAI is reached: the API key or the proxy, and the proxy's accounts |
+| `GET /v1/voice/models` | The models a gem can use, and whether each one's key is set |
+| `/v1/users` | Register and log in. Not used by the app yet |
+| `GET /health` | Whether the backend is up |
 
-Something new (skills, say) is added by raising the version and writing one step that brings older configs up to the new shape. Version 2 added `description`, `image`, `voice` and `speech_speed`; a version 1 config reads with nothing chosen for them. Version 3 made the rules for a call and for writing part of a gem's instructions, where the code used to add them: an older config's instructions read as its own text, a blank line, then the default instructions (or the defaults alone if it had none). An older config is stored in the new shape the next time it is changed, whatever the change (`upgrade_gem_document` in [`app/entities/gem_ent.py`](app/entities/gem_ent.py)). A config from a newer version than the code knows is refused. One with no version is read as version 1, the first shape. A stored config that names a tool which has since gone still loads: a call just does not offer that tool.
+Every frame and field the app relies on is in [the contract](docs/chat-contract.md).
+FastAPI also serves its own schema at `/docs` while the backend runs.
 
-Every call is held with a gem, named by its id as `gem` in `call.start`. Its model answers, it greets the user if it speaks first, and it is offered web search only if its `tools` name `web_search` and the search key is set, and with it the tools of the connections open to it. Cortex is the name of the project, which holds the gems, not of an assistant.
+## Documentation
 
-What a gem is told is one text, the same in a call and in writing, whichever tools it is offered. It is put together in [`app/entities/instructions.py`](app/entities/instructions.py), from what changes least to what changes most: the Darbar text, then "You are {name}." and the gem's own instructions, then what the model itself needs (the line about `<note>` tags on an Anthropic model). The order keeps the start of every request the same for as long as possible, which is what a prompt cache needs, and nothing in it changes by itself: the date and the time are a line in the conversation (see [One conversation](#one-conversation)). The Darbar text is the environment, the same for every gem: what a call and writing are, what a reply ending in "…" means, and what a late tool result is. The gem's own instructions say how it talks in a call and how it writes, by default (see `instructions` above). Whether the conversation is spoken or written is said by a line in the `developer` role where it changes: `The user has called you. From here on the conversation is spoken.` before a call's first turn after writing, and `The call has ended. From here on the conversation is written.` before the first written turn after a call (see [One conversation](#one-conversation)).
-
-The Darbar text is a setting the user can change. Until they do, it is a built-in text (`DEFAULT_DARBAR`): a draft the owner has yet to read. A text the user writes takes its place whole, so a gem told an empty or custom one is not told what the built-in one says. It is kept as one document in the `Darbar` collection, at most 4,000 characters, and an empty one means gems are told nothing there. A call reads it once, when it opens, and keeps that text to its end, so a change reaches the next call, never one already open. A written reply reads it each time, so a change applies from the next message. It is in [`app/entities/darbar_ent.py`](app/entities/darbar_ent.py).
-
-| Route | Does |
+| Document | What it covers |
 | --- | --- |
-| `POST /v1/gems` | makes a gem (201) |
-| `GET /v1/gems` | lists them in the order they were made. Changing a gem does not move it |
-| `GET /v1/gems/{gem_id}` | one gem |
-| `PATCH /v1/gems/{gem_id}` | changes only the fields sent. Only `model`, `image` and `voice` may be null |
-| `DELETE /v1/gems/{gem_id}` | deletes it (204), and its conversation. It is taken out of every connection that names it |
-| `GET /v1/gems/{gem_id}/chat` | its conversation so far, calls included (see [Chat](#chat)) |
-| `GET /v1/darbar` | the Darbar text: `{"text": "...", "is_default": true}`. `is_default` says whether it is the built-in text |
-| `PUT /v1/darbar` | sets it. Body `{"text": "..."}`, at most 4,000 characters; may be empty. Answers like `GET` |
-| `DELETE /v1/darbar` | goes back to the built-in text. Answers like `GET` |
+| [docs/architecture.md](docs/architecture.md) | How the code is layered, the loop, one conversation, what a gem remembers, and the log |
+| [docs/gems.md](docs/gems.md) | A gem's config, its versions, and what a gem is told (the Darbar text and its instructions) |
+| [docs/models.md](docs/models.md) | The models, how the two providers differ, the ChatGPT proxy, and cost |
+| [docs/connections.md](docs/connections.md) | MCP tool servers: permissions, the copy of their tools, deferred tools, and browser sign-in |
+| [docs/chat-contract.md](docs/chat-contract.md) | The contract with the app: every route, frame and field, and the rules for a call's audio |
+| [docs/voice-spec.md](docs/voice-spec.md) | What a call does and what the model is sent, rule by rule, with what was measured live and the known gaps. [voice-context.excalidraw](docs/voice-context.excalidraw) is the same as a picture |
+| [docs/darbar-notes.md](docs/darbar-notes.md) | The plan: the project's words, what is decided, what comes next, what is put off |
+| [AGENTS.md](AGENTS.md) | Rules for working on this repo: what the app mirrors, which doc owns what, how to commit |
 
-Ids go out as strings, and a missing or malformed id is a 404. There is no sign-in on any of these: this backend has one user for now. How the app uses them is in [`docs/chat-contract.md`](docs/chat-contract.md).
+## Project layout
 
-## Connections
-
-A connection is a tool server the user has added: an [MCP](https://modelcontextprotocol.io) server reached by its address, over Streamable HTTP. Its tools are offered to the gems it is open to, next to web search, in a call and in writing. They are kept in the `Connections` collection, one document each:
-
-| Field | Meaning |
-| --- | --- |
-| `name` | what the user calls it: required, trimmed, at most 100 characters |
-| `key` | the start of its tools' names as the model is told them: `{key}__{tool}`. Made from the name when the connection is added (`Issue Tracker` gives `issue_tracker`), at most 20 characters, never the same for two, and never changed after, since the stored conversations name the tools by it |
-| `url` | the server's address, `http://` or `https://`, with no user name or password in it. At most 2,000 characters |
-| `headers` | sent with every request to the server, such as `Authorization: Bearer ...`. At most 20. Kept as they are given, and never sent back to a client: a client is told their names only |
-| `oauth` | for a connection that signs in through the browser: how its server is signed in to, as the server's metadata says (the sign-in server, its addresses, the scope asked for). Null for one that does not sign in |
-| `oauth_client` | this backend's registration as a client of the sign-in server, with its secret if it was given one, and the address the browser was registered to come back to |
-| `oauth_tokens` | the pass: what lets us in, what renews it, and when it runs out (null when the sign-in server did not say). Null when a sign-in is needed |
-| `enabled` | off, no gem is offered its tools, and who it was open to is kept. Default on |
-| `deferred` | on, its tools are not sent with every request: a gem finds and loads them with `tool_search` when it needs one (see below). Off, all of them are sent in full with every request. Default on, also for a connection stored before there was the flag |
-| `gems` | the gems it is open to: `"all"`, or a list of gem ids. **A new connection is open to none** until the user says which |
-| `tools` | a copy of the tools the server listed when it was last asked: each one's name, title, description and schema |
-| limits | for one tool, the gems it is open to. A limit only narrows: the tool is offered to a gem when the connection is open to the gem and the limit names it too. A limit that names no gem turns the tool off for everyone. A tool with no limit is open to whoever the connection is |
-
-**Who may use what is said on the connection, not on the gem.** That is the whole permission layer for now: which gems, per connection and per tool. There is no "ask first" yet (see [`docs/darbar-notes.md`](docs/darbar-notes.md)). It is checked twice:
-
-- **When a reply or a call starts**, it decides which tools the gem is told of. A written reply reads it every time, so a change applies from the next message. A call reads it once, when it opens, because the tool list is the start of every request and has to stay the same for the prompt cache.
-- **When a tool is called**, the connection is read again. A call of a tool that has been closed to the gem since (or whose connection is off or gone) is answered with "This tool is not available to you now.", and a changed address or header is the one used. So closing a tool to a gem holds from that moment, even in a call that is already open.
-
-**A gem is offered the copy, never the server's list of the moment.** The copy is made when the connection is added, again when its address or headers change, and when the user asks (`POST .../refresh`). So the descriptions a model reads are the ones the user was shown: a server cannot reword a tool, or add one, behind the user's back. It also means opening a reply costs no request to the server, and the tool list does not move between requests. What it does not cover: a new tool that a refresh brings in is open to whoever the connection is open to, so look at what a refresh lists. A limit is kept for a tool the server stops listing, so one that comes back comes back as closed as it was left.
-
-**What a call does.** The model's arguments go to the server as they are (the tool's schema is the server's, so it is sent to the model with `strict` off, and the arguments are the model's best effort). The result comes back as text: text parts as they are, a link as its name and address, a picture or a sound as a line saying it is not shown. A result longer than 20,000 characters is cut there, with a line saying how long it was: a result is kept whole in the conversation and sent with every request after it. A tool that fails comes back as "The tool failed: ...", and a server that cannot be reached, answers 401, or takes more than 60 seconds as "`{tool}` failed: ...", so the gem can say so. One client is kept open for each server and shared by every call to it.
-
-**What is left out of the copy**, and counted in `tools_left_out`: a tool with no name or a name listed twice (or one the model would be told by the same name as another), one whose schema is not an object's, is not a valid JSON schema, has `anyOf`, `oneOf`, `allOf`, `enum` or `not` at its top, names an argument with letters a provider refuses, or is longer than 20,000 characters, and everything after the first 128. One tool a provider refuses fails the whole request, so a doubtful one is left out rather than tried. Across all its connections a gem is offered at most 100 tools: the ones after that are passed over, and a line is logged. Every tool a gem is offered is sent with every request (unless its connection is deferred, below), so a connection with many tools costs context and, in a call, time before the first word: open a connection to the gems that need it, and turn off the tools they do not.
-
-**Deferred tools.** A connection with `deferred` on keeps its tools out of the start of every request. A gem offered at least one deferred tool is also offered one tool of ours, `tool_search`, never deferred. Its description says that more tools are behind it and lists each deferred connection by name with how many tools it has. Cortex runs the search itself: it scores each deferred tool by how many of the query's words are in its name, description and argument names, and returns the best eight, by name. Each provider's own deferred loading then loads them, and a loaded tool's definition lands at the end of the context, where the search was:
-
-- **Anthropic.** Every deferred tool stays in `tools`, with `defer_loading: true`, on every request; the model is not shown one until it is loaded. The search's result is sent as a `tool_result` of `tool_reference` blocks, one per tool found. Deferred tools are left out of the start of the prompt, and no cache mark is ever put on one (the API refuses that).
-- **OpenAI.** The request's tools are the ones not deferred plus `tool_search` in client mode. The search comes back as a `tool_search_call`, and is answered with a `tool_search_output` that holds the full definitions of the tools found. Deferred tools are not in the request's tools at all.
-
-The search is an ordinary call and result in the one history, known by its name, `tool_search` (no connection's tool can have it: theirs have `__`). Only the translation for OpenAI turns it into that provider's search items. So the history works on either provider, and a loaded tool stays loaded for the rest of the conversation. The request's tools and instructions are identical from first to last, so the cache holds: on both providers each request after a search read the whole of the request before it from the cache (`scripts/deferred_tools_check.py`). What it costs: one extra model round before a tool's first use, and in a call that is a wait before the first word. Turning `deferred` on or off applies from the next reply or call, like any change to a connection. A conversation that called a connection's tools before it was deferred is still accepted by both providers, with no search before those calls. A tool a search loaded and that is no longer offered stays declared, deferred, as not available: a reference to a tool that is not declared is refused.
-
-**Signing in through the browser.** A server can let us in by a fixed header, or by a sign-in in the user's browser (the [MCP authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization), OAuth). Add a connection with only its address: if its server answers 401 and publishes how to sign in, the connection is kept (201), with no tools, needing a sign-in. A sign-in is tried only for a connection with no `Authorization` header of its own; one whose header is refused, or whose server publishes nothing, is still a 502. Then:
-
-1. `POST /v1/connections/{id}/sign-in` asks the server again with no pass, follows its 401 to its protected resource metadata and from there to its sign-in server, registers this backend there as a client (dynamic client registration) unless it already is, and answers with the address to open in the browser. The sign-in is an authorization code with PKCE (S256). What is needed to finish it is held in memory under a random `state`, for 10 minutes, and used once: a restart loses it, and the user begins again.
-2. The browser comes back to `GET /v1/connections/sign-in/callback`, **on this backend**, at the address set by `BACKEND_URL` (default `http://127.0.0.1:8000`). That works because the backend runs on the user's own Mac, where the browser is; it has to be rethought when the backend is deployed or runs on another machine. The code is swapped for a pass, `iss` is checked when the sign-in server says it sends it, the pass is kept, and the server is asked for its tools as a refresh does. The browser is shown a short page: signed in, go back to Cortex, or what went wrong. Every socket of the app is told `connection.changed`.
-
-A registration made with another `BACKEND_URL`, or with another sign-in server, is not used: the next sign-in registers again. A refresh token is asked for wherever the metadata allows (the `refresh_token` grant, and `offline_access` when it is one of the scopes). **A pass that runs out is renewed without the user** when there is a refresh token: in the minute before it runs out, or when the server answers 401, and the request is made once more. One renewal at a time for a connection. A pass that cannot be renewed (no refresh token, or the sign-in server refuses it) is dropped the moment the server refuses it, or when it is used past its time: the connection then needs a sign-in, every socket is told `connection.changed`, and the gem's call is answered "This tool needs the user to sign in to {name} again." within seconds. A tool call never waits on a browser. A 403 is not a sign-in: it fails the call as before, and changes nothing. A sign-in server that cannot be reached leaves the pass as it is. A connection that needs a sign-in still offers the tools it has, so a call's tool list does not change, and the gem can tell the user why a call did not run.
-
-What a client is told is `sign_in`: null for a connection that does not sign in, or its `state` (`"signed_in"` or `"sign_in_needed"`), `expires_at` (when the pass runs out, or null when that is not known: unknown, not never), and `renews` (whether it is renewed without the user). A pass past its time that cannot be renewed reads as `"sign_in_needed"`, worked out when it is read. **The pass, the refresh token, the registration and the PKCE secret never go to a client, a frame, the model or a log.** They are kept in the database as given, like the headers. Two connections to the same address each sign in on their own. A new `url` drops the sign-in (the pass and the registration) and the copy of the tools, and signs in again if the new server asks; giving an `Authorization` header of the user's own drops it too. Deleting a connection drops everything.
-
-**A tool that has gone stays declared.** A conversation may hold calls of a tool the gem is no longer offered: its connection was deleted, turned off or closed to the gem. A provider refuses a history with calls of a tool it is not told of, so such a tool is still declared, with the description "This tool is not available to you now." and an empty schema, and a call of it is answered with the same words.
-
-| Route | Does |
-| --- | --- |
-| `POST /v1/connections` | adds one (201): `name`, `url`, and optionally `headers` (an object of name to value), `gems`, `enabled` and `deferred`. The server is asked for its tools now; if it does not answer, nothing is kept and the answer is a 502 that says why |
-| `GET /v1/connections` | lists them in the order they were added |
-| `GET /v1/connections/{id}` | one connection |
-| `PATCH /v1/connections/{id}` | changes only the fields sent: `name`, `url`, `headers` (replaces every header), `enabled`, `deferred`, `gems`, and `tool_gems`, an object of a tool's name to the gem ids it is limited to, or to null to lift its limit. A new address or new headers asks the server for its tools again, and changes nothing if it does not answer (502). A gem or a tool that is not there is a 422. Only the fields sent are written, so a change made while a server is being asked is not undone by it |
-| `POST /v1/connections/{id}/refresh` | asks the server for its tools again and keeps what it lists now. A 502 if it does not answer, and the copy stays as it was. A server that asks for a sign-in leaves the copy as it was, and the connection needs a sign-in |
-| `POST /v1/connections/{id}/sign-in` | begins a sign-in: `{"url": "..."}`, the address to open in the browser, good once for 10 minutes. A 422 for a connection with its own `Authorization` header, or whose server lets us in without one. A 502 if the server's sign-in cannot be found or used |
-| `GET /v1/connections/sign-in/callback` | where the browser comes back to, with `code` and `state` (and `iss`, or `error`). It answers the browser with a small page, never JSON. Not for the app |
-| `DELETE /v1/connections/{id}` | deletes it (204) |
-
-Not built, on purpose:
-
-- **Servers started as a local command (stdio), and the older SSE transport.** These routes have no sign-in, and the API is open to any web page while `DEBUG` is on. A route that starts a command would let whoever can reach it run one on this machine. It can come with the sign-in.
-- **Sign-ins this backend cannot do.** A sign-in server that does not let a client register itself (no registration endpoint), one that takes no code with PKCE (S256), one whose metadata names another server, client ID metadata documents, and scopes asked for later (a 403 step-up). The browser always comes back to this backend on the user's Mac; deployed, that has to change.
-- **Being told before a pass runs out.** Nothing runs on a timer. The app shows a badge from `sign_in`; there is no notification.
-- **A vault.** The headers, passes and registrations are kept in the database as they are given. They are never sent to a client or to the model.
-
-It is in [`app/entities/connection_ent.py`](app/entities/connection_ent.py), and the server is reached through the MCP SDK in [`app/adapters/mcp_adp.py`](app/adapters/mcp_adp.py).
-
-## Layout
-
-Imports only go one way: `config ← core ← adapters ← entities ← routers ← main`.
+Imports go one way only: `config ← core ← adapters ← entities ← routers ← main`.
 
 ```text
 app/
-  adapters/    one file per outside service; the only place an SDK is called
-               openai_adp · anthropic_adp · cartesia_stt_adp · cartesia_tts_adp · parallel_adp · mcp_adp · docdb_adp · redis_adp
-  entities/    the logic: loop (making one reply, on any surface), voice_ent and voice_speech (the cascade), written_ent (a written conversation), late_results (tool calls that outlive their reply, held until their results are told: one copy for a call and for chat), history (the rules for what joins a history and when: the user's words, the mode lines, what is kept beside an item), conversation_ent (what is kept in memory of each gem's one conversation, and loading and adding to it), conversation_store (each gem's log in the database: entries of one shape, what the gem remembers and what happened), gem_log (what happens with each gem, numbered and written down as it happens), prices (what a model call cost, from its tokens), chat_ent (written chat with the gems, made from what is stored), call_ent (opening a call, and storing what it adds), model (either provider's model, for any conversation), instructions (what the model is told, in layers), tools (the tools a model may call, each a small object, and which a gem can be given), connection_ent (the tool servers gems can use, which gem may use which, and signing in to them), gem_ent (a gem's config), darbar_ent (the Darbar text every gem is told first), user_ent
-  routers/     HTTP and WebSocket endpoints: voice (the model list), gems, darbar, connections, link (the standing socket, which carries chat and calls), user
+  config.py     settings, read from the environment
+  core/         errors, password and token helpers, times
+  adapters/     one file per outside service, and the only place an SDK is called
+  entities/     the logic: the loop, calls, chat, gems, connections, the log
+  routers/      HTTP and WebSocket endpoints, one folder each
+  main.py       the FastAPI app
+tests/          the test suite, with stand-ins for every outside service
+scripts/        checks run by hand against real models
+docs/           the documents above
 ```
 
-Also still present from earlier experiments: user registration and login (`/v1/users`), kept because a login will be needed.
+[Architecture](docs/architecture.md#where-the-code-is) says what each file holds.
 
 ## Development
 
 ```bash
-uv run pytest
-uv run ruff check app tests
-uv run pyright
+uv run pytest                 # the test suite: no keys or services needed
+uv run ruff check app tests   # lint
+uv run pyright                # types
 ```
 
-To check the model and the pipeline together without any audio, with the real OpenAI model and the real web search:
+Two checks run against real models and cost money. They need the model's key in `.env`:
 
 ```bash
-uv run python -m scripts.voice_pipeline_check              # the default model, 6 Luna
-uv run python -m scripts.voice_pipeline_check "Opus 5.5"   # or any other model's name
+uv run python -m scripts.voice_pipeline_check "6 Luna"   # a call's model and pipeline, with real web search (needs PARALLEL_API_KEY)
+uv run python -m scripts.deferred_tools_check "6 Luna"   # deferred tools: the search, the loading, and the prompt cache
 ```
 
-It fakes speech so each scenario can say how much of a reply was heard, and prints PASS or CHECK for 27 behaviours: context, search, cut replies, late search results (one landing while the user speaks among them), cancelling, noise, a sentence split in two, many searches, another language, service failure and spoken style. A scenario that does not finish is shown as CHECK and the rest still run.
+The first fakes speech, so each scenario can say how much of a reply was heard, and
+prints PASS or CHECK for each behaviour: context, search, cut replies, late results,
+cancelling, noise, a sentence split in two, another language, failures and spoken style.
 
-Configuration is read from the environment by `app/config.py`. `.env.example` lists every setting. Never commit credentials.
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) first. In short:
+
+- The app mirrors this backend's routes and frames by hand. A change to a route, a frame
+  or a field is a change to the contract: update [the contract](docs/chat-contract.md)
+  and say so in the pull request.
+- Commit in small steps, from the bottom layer up. Each commit passes `uv run pytest`
+  and `uv run ruff check app tests` on its own.
+- The repository is public: no transcripts, records or real instructions in commits.
