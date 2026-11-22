@@ -1,7 +1,8 @@
 # Notes for agents working on Cortex
 
-Read `README.md` first. It explains the voice cascade, the rules for what the model
-remembers, how to run the backend, and how the code is layered.
+Read `README.md` first: what Cortex is, how to run it, and where each document is. Then
+`docs/architecture.md`, for how the code is layered, the loop, the one conversation a gem
+has, the rules for what it remembers, and the log.
 
 ## This backend has a front end
 
@@ -100,9 +101,28 @@ When something new comes up or is put off, add one line there. Keep it to simple
 no long paragraphs.
 
 `docs/voice-spec.md` says in plain words what a call does and what the model is sent:
-the pipeline, interruption, tool calls, the instructions in full, and the known gaps.
-`docs/voice-context.excalidraw` is the same thing as a picture. When how a call behaves
-changes, change both.
+the pipeline, interruption, tool calls, the instructions in full, what was measured live,
+and the known gaps. `docs/voice-context.excalidraw` is the same thing as a picture. When
+how a call behaves changes, change both.
+
+## Which document owns what
+
+Each fact has one home. Write it there, and link to it from anywhere else: never copy it.
+
+| Document | Owns |
+| --- | --- |
+| `README.md` | What Cortex is, how to run it, the settings, the routes in one line each, and the index of the docs. Kept short: no behaviour in detail |
+| `docs/architecture.md` | The layers and what each file holds, the loop, one conversation, what a gem remembers, and the log |
+| `docs/gems.md` | A gem's config and its versions, the instructions and how they are put together, the Darbar text, the gem routes |
+| `docs/models.md` | The models, how the providers differ, the ChatGPT proxy, and cost |
+| `docs/connections.md` | How the backend keeps, checks and runs connections, and signs in to them |
+| `docs/chat-contract.md` | Every route, frame and field the app relies on. The app's code cites it by name, and its sections "Connections" and "A gem's log" by heading: keep those names |
+| `docs/voice-spec.md` | A call in full, the texts the model is told, live measurements, known gaps |
+| `docs/darbar-notes.md` | The plan, in short lines. The app's repo links to it by name |
+
+When code changes what a document says, change the document in the same piece of work.
+When something is removed, remove what the docs say about it, and every link to it.
+Say what is, not what used to be: the history is in git.
 
 ## Commits
 
@@ -114,7 +134,7 @@ Split it into small commits, one for each step a reader would follow:
 - A test goes with the code it tests. A test file that needs every layer at once is a
   commit of its own, after the last layer.
 - The docs are split by what they are: the contract and this file, the README and the
-  spec, the notes.
+  topic documents (architecture, gems, models, connections) and the spec, the notes.
 - Each commit passes `uv run pytest` and `uv run ruff check app tests` by itself. Check
   that at each commit, not only at the last one.
 - A commit that changes the contract says "Contract change:" in its message, and what.

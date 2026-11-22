@@ -9,7 +9,7 @@ The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
 ## Plain HTTP
 
 - Gems: `/v1/gems`, and a gem's conversation, calls included, `GET /v1/gems/{gem_id}/chat`. A
-  gem's fields are in the README. Its config is version 3. A gem made with
+  gem's fields are in [Gems](gems.md#a-gems-config). Its config is version 3. A gem made with
   `instructions` blank or left out is given the default instructions, which come back in
   the answer; a change stores `instructions` as sent, so blank means none.
 - A gem's log, everything that happened with it: `GET /v1/gems/{gem_id}/log` (see
@@ -18,6 +18,10 @@ The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
 - Connections, the tool servers gems can use, and which gem may use which:
   `/v1/connections` (see [Connections](#connections-v1connections)).
 - The models a call can be held with: `GET /v1/voice/models`.
+- How OpenAI is reached, with the API key or through the ChatGPT proxy, and the proxy's
+  account: `GET` and `PUT /v1/providers/openai`, `POST /v1/providers/openai/sign-in`
+  and `GET /v1/providers/openai/sign-in/{state}` (see
+  [Models](models.md#openai-through-a-chatgpt-login)).
 
 Plain HTTP is for saving and loading things. The standing socket is for what is live.
 
@@ -170,8 +174,8 @@ The events from `call.user.partial` to `call.error` are the conversation's
   `call.failed`.
 - A client that stops reading its frames for ten seconds counts as gone: the socket is
   closed on it, which ends its call and cuts its replies.
-- Calls changed nothing about the shape of chat frames (`chat.send` and the `chat.*`
-  frames back). A call and chat are one conversation with the gem (see
+- Chat frames (`chat.send` and the `chat.*` frames back) are the same whether or not a
+  call is open. A call and chat are one conversation with the gem (see
   [What a gem remembers](#what-a-gem-remembers)): while a call holds a gem, a
   `chat.send` to it gets `chat.error`, and a `call.start` cuts a reply being written to
   it. A call holds the gem from when its speech services are connected until what it
@@ -213,8 +217,8 @@ they are part of the contract, not advice.
 
 In a call the app is not sent the reply's text as the gem writes it: that runs seconds
 ahead of the audio. It is sent each word with the place in the audio where it is spoken,
-so it can show the word at the moment it is heard. Written chat is as it was: `chat.text`
-carries the text as it is written.
+so it can show the word at the moment it is heard. In writing, `chat.text` carries the
+text as it is written.
 
 1. **A word.** `call.assistant.word` carries one word in `text`, as the speech service
    timed it: the reply's text split at its spaces, punctuation kept with its word. Show
@@ -247,7 +251,7 @@ carries the text as it is written.
    before the words said ahead of it have been heard.
 
 The backend works out what was heard at a cut from the same word timings (each word's
-end) and its copy of the playback schedule, as before. The words sent to the app do not
+end) and its copy of the playback schedule. The words sent to the app do not
 replace that: they are the same timings, shown.
 
 After the app hangs up, frames of that call, audio included, may still arrive until its
@@ -625,7 +629,7 @@ does.
 
 | Route | Does |
 | --- | --- |
-| `POST /v1/connections` | Adds one (201). Body: `name`, `url`, and optionally `headers`, `gems`, `enabled`, `deferred`. The server is asked for its tools before anything is kept: this can take up to 20 seconds |
+| `POST /v1/connections` | Adds one (201). Body: `name`, `url`, and optionally `headers`, `gems`, `enabled`, `deferred`. The server is asked for its tools before anything is kept: this can take 20 seconds to reach it, and up to 20 more for each page of tools it lists |
 | `GET /v1/connections` | Every connection, in the order they were added |
 | `GET /v1/connections/{id}` | One connection |
 | `PATCH /v1/connections/{id}` | Changes only the fields sent: `name`, `url`, `headers`, `enabled`, `deferred`, `gems`, `tool_gems`. None may be null |
