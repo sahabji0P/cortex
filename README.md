@@ -23,14 +23,16 @@ It is a personal project and an experiment. It runs on your own Mac, for one use
   can interrupt at any time, and the gem remembers only what you actually heard.
 - **Written chat** with the same gem, over the same socket, from the same stored
   conversation.
+- **Observability built in.** Every gem has a log of everything it did: each turn,
+  each request with exactly what it was sent, its tokens, cost and timing, each tool
+  call from start to end, and each change of model, instructions or tools. Read it over
+  HTTP or watch it live. The app draws it as the gem's trajectory.
 - **Six models from two providers.** OpenAI (6 Luna, 6.1 Terra, 6.1 Sol) and Anthropic
   (Haiku 5.5, Sonnet 5.5, Opus 5.5). OpenAI can also be reached through a ChatGPT login
   by a proxy.
 - **Tools.** Web search, and the tools of any [MCP](https://modelcontextprotocol.io)
   server you connect, with browser sign-in (OAuth) and per-gem permissions. A tool call
   carries on in the background when a reply is cut, and its result is told later.
-- **A log of everything.** Every turn, request, token count, cost and tool call of a
-  gem, in one ordered list that the app can read or watch live.
 
 ## How it works
 
@@ -57,6 +59,44 @@ Three rules hold for what a gem remembers, in a call and in writing:
 3. **Nothing the model was sent is changed afterwards**, so a prompt cache stays valid.
 
 [Architecture](docs/architecture.md) explains these in full.
+
+## Observability
+
+Every gem has a log: everything that happens with it, in one list, in the order it
+happened. It is not a trace kept beside the conversation. The gem's conversation *is*
+the five kinds of entry it remembers, and everything else that happened is written in
+between. So for any request you can see exactly what the model was sent, what it
+produced, what the user actually got, and what it cost.
+
+A message that starts a web search, is cut off by a second message, and has its search
+result told later leaves this (trimmed from the code's own output):
+
+```text
+seq turn kind               of note
+  0  -   settings.changed   model 6 Luna via api; 3 layers of instructions; 2 tools
+  3  1   user.said          "weather?"
+  4  1   request.sent       request 1, sent 2 items
+  5  1   request.done       "Let me look." and web_search {"query": "Pune weather"}
+  6  1   tool.started       call_1, web_search
+  7  1   tool.backgrounded  call_1: the reply was cut, the search carries on
+ 11  1   turn.closed        cut
+ 13  2   user.said          "and the time?"
+ 14  2   request.sent       request 2, sent 6 items, think true: a search is still running
+ 18  1   tool.done          call_1, done in the background, with its result
+ 21  3   turn.opened        by background_result
+ 24  3   gem.said           "It is sunny in Pune."
+```
+
+- **Exactly what was sent**: `GET /v1/gems/{id}/log/{seq}/sent` rebuilds any request,
+  item by item, with its instructions and tools.
+- **Tokens and cost** for every request, from a price table kept in the repo. Unknown is
+  null, never zero.
+- **Live**: send `log.watch` on the socket and each entry arrives as it is written.
+- **Free for the reply**: writing the log never holds a reply up and never fails one,
+  and the model is sent the same with it or without it.
+
+[Observability](docs/observability.md) has the whole trace, the promises the log keeps,
+and how to read it.
 
 ## Getting started
 
@@ -116,7 +156,8 @@ FastAPI also serves its own schema at `/docs` while the backend runs.
 
 | Document | What it covers |
 | --- | --- |
-| [docs/architecture.md](docs/architecture.md) | How the code is layered, the loop, one conversation, what a gem remembers, and the log |
+| [docs/architecture.md](docs/architecture.md) | How the code is layered, the loop, one conversation, and what a gem remembers |
+| [docs/observability.md](docs/observability.md) | A gem's log: what it records, what it answers, what it promises, and how to read or watch it |
 | [docs/gems.md](docs/gems.md) | A gem's config, its versions, and what a gem is told (the Darbar text and its instructions) |
 | [docs/models.md](docs/models.md) | The models, how the two providers differ, the ChatGPT proxy, and cost |
 | [docs/connections.md](docs/connections.md) | MCP tool servers: permissions, the copy of their tools, deferred tools, and browser sign-in |
