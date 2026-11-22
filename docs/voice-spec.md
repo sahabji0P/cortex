@@ -296,7 +296,7 @@ words in the call (and with a tool result before it, if the written part ended i
   the time are a line in the history (see below), so a new day only adds to its end.
 - **Switching thinking on costs a cache miss**, on the first request made with it (see
   [Measured in live runs](#measured-in-live-runs)). This is the "little thinking while a
-  search has no result yet" above.
+  search has no result yet" above, and the reason it is not done on Anthropic.
 - **What the call adds is stored.** (Enforced) Each item the call adds to the history
   is stored after the gem's conversation, in order, the moment it is added: our lines,
   the user's words, the replies as heard, tool calls and results, and background
@@ -434,7 +434,9 @@ The server speaks nothing for the model.
 
 With real models, real speech services where a call needs them, and the check scripts
 (`scripts/voice_pipeline_check.py`, `scripts/deferred_tools_check.py`). These are
-measurements, not guarantees.
+measurements, not guarantees. All but scenario 17 and the deferred tools were run before
+16 November 2026 (pull request 7), which changed three Instructed behaviours: see
+[Known gaps](#known-gaps).
 
 - **Nothing is held back on the way out.** Over ten real turns the first audio came
   0.11 s after the model's first word, and the model's first word (1.1 s) was nearly all
