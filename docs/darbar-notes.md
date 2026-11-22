@@ -37,7 +37,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The instructions do not depend on call or chat, or on the tools offered.
 - A new gem's instructions come filled in with the call and writing style rules. The user may change or remove them.
 - A line says when a call starts and when it ends: before the first turn of every call, and before the first written turn after a call. Written when the next turn needs it.
-- Every stored item says its mode, call or chat. Old items have none and are read as chat.
+- Every stored item says its mode, call or chat.
 - One rule for what the user says, in a call and in writing: it is stored the moment it is said, as a message of its own. Two messages are never joined.
 - One writer for a gem at a time, a call or a written reply. Chat to a gem in a call gets an error.
 - One set of background calls per gem: their results told in the call if one is open, in writing otherwise.
@@ -93,10 +93,8 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The log: the tokens of a reply cut while the model was still producing. Anthropic says what it read at the start of a reply. Whether OpenAI says anything before the end is to be checked.
 - Our lines sent the same way on every model: a user message in a tag, the developer role kept for instructions. The line that explains the tag in the instructions for every model. A change to what the model is sent, so on its own.
 
-- GemConfig on the backend: character, instructions, model, tools, skills, permissions, sandbox.
-- The shared loop, taken out of the call code without changing how a call behaves.
-- A tool registry, then skills.
-- Chat.
+- GemConfig: skills, permissions and sandbox still to add. Instructions, model and tools are built.
+- Skills, on the tool registry (`tools.py`).
 - A sound before the greeting's first word leaves the call silent. Small fix.
 - A reply that begins with "..." can be judged unheard and dropped from memory: the speech service gives its first word without the dots. To be fixed.
 - The code's own names still say late results (`late_results.py`, `LateResults`). The log says background.
@@ -131,8 +129,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Vichar Dhara toggle per gem: keep the thinking and pass it back, or drop it.
 - Config: how you control and customise a gem.
 - Characters: animated raja and rani types, GIF or Rive.
-- Cost: of model requests, in the log. Not yet of speech or search.
-- Old text code (Project, Session, SessionTurn, the Agent SDK pipeline): keep or remove.
+- Cost of speech and search, in the log. Model requests are costed.
 - Which mode each message was in, in the history route's answer: on hold.
 - A reply that plays to its end is stored only when the user next speaks or the call ends.
 - A long conversation is sent whole at the start of every call. Trimming comes with Gyan Kosh.
