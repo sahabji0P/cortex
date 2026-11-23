@@ -89,26 +89,38 @@ need it, and turn off the tools they do not.
 ## The server's icons
 
 An MCP server may state its own icons and its website when a client opens (its
-`serverInfo`). They are read with the tools, from the same open client, and kept with
-the copy: written and replaced with it, and dropped with it when a new address needs a
-sign-in. A connection kept before icons were read has none until it is refreshed. The
-client is kept open, so they are what the server said when it was opened: a new icon at
-the server shows after a restart, or a change of address, headers or pass. Only the backend can read them, as most servers refuse a client that has not
-signed in, so the app gets them from the connection.
+`serverInfo`). They are read with the tools, on the same client and in the same use of
+it, and kept with the copy: written with it, and dropped with it when a new address
+needs a sign-in. A refresh closes the client kept for the server first, so a new one is
+opened and a changed icon is heard. Only the backend can read them, as most servers
+refuse a client that has not signed in, so the app gets them from the connection, in
+the shape [the contract](chat-contract.md#connections) gives.
 
-- **An icon is kept as a `data:` address**, so the app never reaches a host for one. One
-  the server gives as `data:` is kept as it is. One it names by an `https:` address is
-  fetched once, here, with none of the connection's headers and no pass, and no redirect
-  followed. A plain `http:` one is not fetched.
-- **What is kept**: PNG, JPEG, WebP or SVG, judged by what came back (the `data:`
-  address's own type, or the answer's `Content-Type`), not by what the server said it
-  would be. At most 64 KB each, and no more than that is read. The first three that can
-  be kept, of the first eight the server states, in its order.
-- **It never fails a connection.** An icon that cannot be had, or a server that states
-  none, leaves `icons` empty. All of them are fetched at once, within 5 seconds.
+Every icon is checked as the MCP spec asks of whoever uses one (its security
+considerations for icons), and kept as a `data:` address, so the app never reaches a
+host for one:
+
+- **Where it may come from.** A `data:` address, in base64 or percent-encoded. Or an
+  `https:` one on the server's own domain: its host, a domain above it (`example.com`
+  for `mcp.example.com`), or one below it. A domain above a host is its owner's, so no
+  list of public suffixes is needed; one beside it (`cdn.example.com`) is not taken. An
+  address with a user or password in it, by another IP, or plain `http:` is not fetched.
+- **How it is fetched.** With a client of its own, so no cookie goes from one icon to
+  another, and with none of the connection's headers and no pass. No redirect is
+  followed. No more than 64 KB is read. The first eight icons the server states are
+  fetched at once, within 5 seconds, and the first three that can be kept are kept.
+- **What it is.** Told by its first bytes, never by what it says it is: what it was given
+  as (the `data:` address's own type, or the answer's `Content-Type`, or the icon's
+  `mimeType` when those say nothing) only has to agree. `image/jpg` is JPEG.
+- **An SVG** that holds a script, an event handler, a page (`foreignObject`) or a
+  `javascript:` link is not kept. The others are passed on as the server gave them.
+- **What the server says of it** is checked too: a size is kept only as `WxH` or `any`,
+  eight at most, and a website only as an `http` or `https` address.
+- **It never fails a connection.** An icon that cannot be had is left out. One whose host
+  did not answer, or answered 429 or 500 and up, leaves the icons kept before as they
+  were, when no other could be had: a moment's trouble does not take a good icon away.
 - **What it does not cover**: a server can show any picture, another company's logo too.
-  The connection's name and address are what say which server it is. An SVG is passed on
-  as the server gave it, for the app to draw as a picture, never as a page.
+  The connection's name and address are what say which server it is.
 
 ## What a tool call does
 
