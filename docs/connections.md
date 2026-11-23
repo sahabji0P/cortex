@@ -94,7 +94,7 @@ it, and kept with the copy: written with it, and dropped with it when a new addr
 needs a sign-in. A refresh closes the client kept for the server first, so a new one is
 opened and a changed icon is heard. Only the backend can read them, as most servers
 refuse a client that has not signed in, so the app gets them from the connection, in
-the shape [the contract](chat-contract.md#connections) gives.
+the shape [the contract](chat-contract.md#connections-v1connections) gives.
 
 Every icon is checked as the MCP spec asks of whoever uses one (its security
 considerations for icons), and kept as a `data:` address, so the app never reaches a
