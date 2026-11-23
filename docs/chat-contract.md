@@ -700,18 +700,19 @@ A connection, as every route but `DELETE` answers:
 - **`tools` is a copy**, made at `checked_at`. A gem is offered the copy. It changes when
   the connection is added, when its `url` or `headers` change, and on a refresh.
   `tools_left_out` counts tools the server lists that cannot be used here.
-- **`icons` and `website_url` are the server's own** (MCP's `serverInfo`), written with
-  each copy of the tools. A connection added before them has none until it is
-  refreshed. They are what the server said when the backend last opened its client to
-  it, so a change of icon at the server shows after a restart of the backend, or a
-  change of the connection's address, headers or sign-in. Only
-  this backend can read them: most servers refuse a client that is not signed in. Each
-  icon's `src` is a `data:` address, never a link: the backend fetched it, so the app
-  never reaches a host for an icon. It is PNG, JPEG, WebP or SVG, at most 64 KB. `sizes`
-  is as the server said (`"48x48"`, `"any"`), `[]` when it did not; `theme` is the
-  background it is made for, `"light"`, `"dark"`, or null for either. At most three, in
-  the server's order. `icons` is `[]` and `website_url` null when the server stated
-  nothing usable. Neither comes with `connection.changed`: read the connection again.
+- **`icons` and `website_url` are the server's own** (MCP's `serverInfo`), read with the
+  tools: when a connection is added, its address or headers change, a sign-in finishes,
+  and on a refresh. A connection added before they were read has none until then. Only
+  the backend can read them, as most servers refuse a client that is not signed in.
+  - Each icon's `src` is a `data:` address, never a link, so the app never reaches a
+    host for an icon. It is PNG, JPEG, WebP or SVG, judged by its bytes, at most 64 KB.
+    An SVG holds no script, event handler or page, but draw it as a picture only.
+  - `sizes` is what the server said, each `"WxH"` or `"any"`, `[]` when it did not;
+    `theme` is the background it is made for, `"light"`, `"dark"`, or null for either.
+  - At most three, in the server's order. `icons` is `[]` and `website_url` null when the
+    server stated nothing usable, never absent.
+  - Neither comes with `connection.changed`: read the connection again.
+  - How they are fetched and checked: [connections.md](connections.md#the-servers-icons).
 - **`enabled: false`** offers its tools to no gem, and keeps who it was open to.
 - **`deferred: true`** keeps its tools out of every request until the gem searches for
   them (`tool_search`), which loads the ones it needs. `false` sends them all with every request. Default
