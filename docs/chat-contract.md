@@ -706,7 +706,8 @@ A connection, as every route but `DELETE` answers:
   the backend can read them, as most servers refuse a client that is not signed in.
   - Each icon's `src` is a `data:` address, never a link, so the app never reaches a
     host for an icon. It is PNG, JPEG, WebP or SVG, judged by its bytes, at most 64 KB.
-    An SVG holds no script, event handler or page, but draw it as a picture only.
+    An SVG that visibly holds a script, an event handler or a page is refused, but the
+    check is a list of what to look for, not a proof: draw an SVG as a picture only.
   - `sizes` is what the server said, each `"WxH"` or `"any"`, `[]` when it did not;
     `theme` is the background it is made for, `"light"`, `"dark"`, or null for either.
   - At most three, in the server's order. `icons` is `[]` and `website_url` null when the
