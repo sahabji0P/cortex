@@ -49,9 +49,9 @@ from tests.test_voice_conversation import _completed, _delta, _Item, _Search, _s
 _URL = "https://tools.example.com/mcp"
 
 
-def _server(*, extra: bool = False) -> MCPServer:
-    """A tool server: an issue tracker with a few tools."""
-    server = MCPServer("tracker")
+def _server(*, extra: bool = False, icons: list[Icon] | None = None) -> MCPServer:
+    """A tool server: an issue tracker with a few tools, and the icons it states, if any."""
+    server = MCPServer("tracker", icons=icons)
 
     @server.tool(title="Find issues")
     async def find_issues(text: str) -> str:
@@ -609,6 +609,36 @@ async def test_a_refresh_keeps_what_the_server_lists_now_and_the_limits(setup: _
     ]
 
 
+async def test_a_connection_keeps_its_server_s_icons_and_a_refresh_takes_them_again(
+    setup: _Setup,
+) -> None:
+    setup.servers.at[_URL] = _iconed(Icon(src=_PNG_DATA, sizes=["48x48"], theme="dark"))
+    made = await setup.connections.create(name="Tracker", url=_URL)
+
+    assert [(icon.src, icon.sizes, icon.theme) for icon in made.icons] == [
+        (_PNG_DATA, ["48x48"], "dark")
+    ]
+    assert made.website_url == "https://tracker.example.com"
+    assert Connection.model_validate(setup.docdb.collections["Connections"][0]) == made
+
+    # The server no longer says how it shows itself: the next refresh keeps nothing.
+    setup.servers.at[_URL] = _server()
+    await setup.mcp.forget(made.server)
+    refreshed = await setup.connections.refresh(str(made.id))
+    assert (refreshed.icons, refreshed.website_url) == ([], None)
+    assert setup.docdb.collections["Connections"][0]["icons"] == []
+
+
+async def test_a_connection_kept_before_icons_reads_back_with_none(setup: _Setup) -> None:
+    await setup.connections.create(name="Tracker", url=_URL)
+    document = setup.docdb.collections["Connections"][0]
+    del document["icons"], document["website_url"]
+
+    (read,) = await setup.connections.list_all()
+
+    assert (read.icons, read.website_url) == ([], None)
+
+
 async def test_a_limit_outlives_a_tool_that_goes_and_comes_back(setup: _Setup) -> None:
     made = await setup.connections.create(name="Tracker", url=_URL, gems="all")
     setup.servers.at[_URL] = _server(extra=True)
@@ -647,6 +677,9 @@ async def test_tools_that_cannot_be_offered_are_left_out_and_counted(setup: _Set
     class _Lists:
         async def list_tools(self, server: McpServer) -> list[Any]:
             return listed
+
+        async def about(self, server: McpServer) -> McpAbout:
+            return McpAbout()
 
     connections = ConnectionEntityClass(
         docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
@@ -1043,6 +1076,9 @@ class _SlowLists:
             SimpleNamespace(name="close_issue", title=None, description="", input_schema=_OBJECT)
         ]
 
+    async def about(self, server: McpServer) -> McpAbout:
+        return McpAbout()
+
     async def forget(self, server: McpServer) -> None:
         pass
 
@@ -1089,6 +1125,9 @@ async def test_two_tools_the_model_would_be_told_by_one_name_are_not_both_kept(
         async def list_tools(self, server: McpServer) -> list[Any]:
             return listed
 
+        async def about(self, server: McpServer) -> McpAbout:
+            return McpAbout()
+
     connections = ConnectionEntityClass(
         docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
     )
@@ -1127,6 +1166,9 @@ async def test_a_schema_a_provider_would_refuse_is_left_out(
         async def list_tools(self, server: McpServer) -> list[Any]:
             return listed
 
+        async def about(self, server: McpServer) -> McpAbout:
+            return McpAbout()
+
     connections = ConnectionEntityClass(
         docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
     )
@@ -1145,6 +1187,9 @@ async def test_a_gem_is_offered_no_more_tools_than_a_provider_takes(setup: _Setu
     class _Lists:
         async def list_tools(self, server: McpServer) -> list[Any]:
             return listed
+
+        async def about(self, server: McpServer) -> McpAbout:
+            return McpAbout()
 
     connections = ConnectionEntityClass(
         docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
