@@ -629,7 +629,7 @@ does.
 
 | Route | Does |
 | --- | --- |
-| `POST /v1/connections` | Adds one (201). Body: `name`, `url`, and optionally `headers`, `gems`, `enabled`, `deferred`. The server is asked for its tools before anything is kept: this can take up to 20 seconds to reach it, and up to 20 more for each page of tools it lists |
+| `POST /v1/connections` | Adds one (201). Body: `name`, `url`, and optionally `headers`, `gems`, `enabled`, `deferred`. The server is asked for its tools before anything is kept: this can take up to 20 seconds to reach it, up to 20 more for each page of tools it lists, and up to 5 more to fetch its icons |
 | `GET /v1/connections` | Every connection, in the order they were added |
 | `GET /v1/connections/{id}` | One connection |
 | `PATCH /v1/connections/{id}` | Changes only the fields sent: `name`, `url`, `headers`, `enabled`, `deferred`, `gems`, `tool_gems`. None may be null |
@@ -667,6 +667,15 @@ A connection, as every route but `DELETE` answers:
     }
   ],
   "tools_left_out": 0,
+  "icons": [
+    {
+      "src": "data:image/png;base64,iVBORw0KGgo...",
+      "mime_type": "image/png",
+      "sizes": ["48x48"],
+      "theme": "dark"
+    }
+  ],
+  "website_url": "https://tools.example.com",
   "sign_in": null,
   "checked_at": "2026-11-18T09:00:00Z",
   "created_at": "2026-11-18T09:00:00Z",
@@ -691,6 +700,15 @@ A connection, as every route but `DELETE` answers:
 - **`tools` is a copy**, made at `checked_at`. A gem is offered the copy. It changes when
   the connection is added, when its `url` or `headers` change, and on a refresh.
   `tools_left_out` counts tools the server lists that cannot be used here.
+- **`icons` and `website_url` are the server's own**, as it stated them (MCP's
+  `serverInfo`) when its tools were last copied, and they change with the copy. Only
+  this backend can read them: most servers refuse a client that is not signed in. Each
+  icon's `src` is a `data:` address, never a link: the backend fetched it, so the app
+  never reaches a host for an icon. It is PNG, JPEG, WebP or SVG, at most 64 KB. `sizes`
+  is as the server said (`"48x48"`, `"any"`), `[]` when it did not; `theme` is the
+  background it is made for, `"light"`, `"dark"`, or null for either. At most three, in
+  the server's order. `icons` is `[]` and `website_url` null when the server stated
+  nothing usable. Neither comes with `connection.changed`: read the connection again.
 - **`enabled: false`** offers its tools to no gem, and keeps who it was open to.
 - **`deferred: true`** keeps its tools out of every request until the gem searches for
   them (`tool_search`), which loads the ones it needs. `false` sends them all with every request. Default
