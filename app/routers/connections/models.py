@@ -66,6 +66,15 @@ class ConnectionsModels:
                 # Null for no limit: it is open to whoever the connection is.
                 gems: list[str] | None
 
+            class Icon(BaseModel):
+                """One of the server's own icons. `docs/chat-contract.md` says each field."""
+
+                # Always a `data:` address: the picture itself.
+                src: str
+                mime_type: str
+                sizes: list[str]
+                theme: Literal["light", "dark"] | None
+
             class SignIn(BaseModel):
                 """A connection's sign-in, as far as the app needs to show it.
 
@@ -103,6 +112,10 @@ class ConnectionsModels:
                 tools: list["ConnectionsModels.V1.Output.Tool"]
                 # How many tools the server listed that cannot be used here.
                 tools_left_out: int
+                # The server's own icons, and its website, as it stated them when its
+                # tools were last read. Empty and null when it stated nothing usable.
+                icons: list["ConnectionsModels.V1.Output.Icon"]
+                website_url: str | None
                 # Null for a connection that does not sign in: it uses its headers only.
                 sign_in: "ConnectionsModels.V1.Output.SignIn | None"
                 checked_at: datetime

@@ -50,6 +50,13 @@ class ConnectionsServiceV1Class:
                 for tool in connection.tools
             ],
             tools_left_out=connection.tools_left_out,
+            icons=[
+                ConnectionsModels.V1.Output.Icon(
+                    src=icon.src, mime_type=icon.mime_type, sizes=icon.sizes, theme=icon.theme
+                )
+                for icon in connection.icons
+            ],
+            website_url=connection.website_url,
             sign_in=ConnectionsModels.V1.Output.SignIn(
                 state="signed_in" if connection.signed_in() else "sign_in_needed",
                 expires_at=None

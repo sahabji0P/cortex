@@ -59,6 +59,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A pass is renewed by itself when it can. One that cannot is dropped when refused, the app is told, and the gem is told in plain words.
 - A tool call never waits on a browser.
 - Fixed headers stay, for servers that take a key.
+- A connection carries its server's own icons and website, read with its tools. The backend fetches each icon and sends it as data: the app never fetches one. Built.
 - A connection is deferred unless you turn it off: one flag, on by default. Its tools are found with our own `tool_search` and loaded by each provider's deferred loading, at the end of the context, so the cache holds. Built.
 - OpenAI can go through a proxy (CLIProxyAPI on a ChatGPT login) by its own two settings. The API key stays. With both set up, the user switches between them in the app; the choice is kept.
 - Measured 2026-11-19: with a real-sized request (about 3,400 tokens) a reply through the proxy on a free plan starts about 5.4 s in, against 1.6 s with the API key. Why is not known. So the API key is the default.

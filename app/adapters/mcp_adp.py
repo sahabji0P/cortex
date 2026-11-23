@@ -4,6 +4,10 @@ MCP adapter: the tool servers a gem can be connected to, reached over Streamable
 A server is known here only by its address and the headers sent with every request to
 it. Two things are asked of one: which tools it has, and to run a call of one.
 
+A server may also say how it shows itself: its icons and its website, read with its
+tools. An icon it names by address is fetched here, from the server's own domain only,
+and kept as a `data:` address, so the app never reaches a host for one.
+
 A client is kept open for each server and shared by every call to it. The protocol's
 newer versions want a tool listed before it is called, and its older ones open with a
 handshake, so a client made for each call would pay for both every time. The SDK's
@@ -29,6 +33,7 @@ pieces are used: the metadata models, the discovery addresses, PKCE and its chec
 import asyncio
 import base64
 import contextlib
+import ipaddress
 import json
 import logging
 import re
@@ -37,7 +42,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, unquote_to_bytes, urlencode, urlsplit
 
 import httpx2
 from mcp import Client
@@ -60,17 +65,20 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken, ProtectedResourceMetadata
 from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_server_url
 from mcp.shared.exceptions import MCPError
-from mcp.types import CallToolResult, ContentBlock
+from mcp.types import CallToolResult, ContentBlock, Icon, Implementation
 from pydantic import AnyUrl, BaseModel, ValidationError
 
 from app.core.times import UtcDatetime
 
 __all__ = [
+    "McpAbout",
     "McpAdapterClass",
     "McpAuthServer",
     "McpAuthorization",
     "McpChallenge",
     "McpFailure",
+    "McpIcon",
+    "McpListing",
     "McpRegistration",
     "McpResult",
     "McpServer",
@@ -92,6 +100,15 @@ _LIST_PAGES_MAX = 50
 _SIGN_IN_SECONDS = 10.0
 # The name this backend registers under, which a sign-in page may show the user.
 _CLIENT_NAME = "Cortex"
+# A server's icons: how large one may be, how many are kept and looked at, how many sizes
+# one may state, and how long fetching them may take, all of them at once.
+_ICON_MAX_BYTES = 64 * 1024
+_ICONS_KEPT = 3
+_ICONS_LOOKED_AT = 8
+_ICON_SIZES_MAX = 8
+_ICON_SECONDS = 5.0
+# How long a server's website address may be.
+_WEBSITE_MAX_LENGTH = 2_000
 
 _log = logging.getLogger(__name__)
 
@@ -120,6 +137,38 @@ class McpTool:
     title: str | None
     description: str
     input_schema: dict[str, object]  # JSON schema
+
+
+@dataclass(frozen=True, slots=True)
+class McpIcon:
+    """One of a server's icons, held here: `src` is always a `data:` address."""
+
+    src: str
+    mime_type: str
+    sizes: tuple[str, ...] = ()
+    # Which background it is made for. None: either.
+    theme: Literal["light", "dark"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class McpAbout:
+    """How a server shows itself, as far as it says: its icons, and its website.
+
+    `unreached`: an icon it named could not be fetched just now (its host did not answer,
+    or answered with a failure of its own), so `icons` may hold fewer than it has.
+    """
+
+    icons: tuple[McpIcon, ...] = ()
+    website_url: str | None = None
+    unreached: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class McpListing:
+    """What a server answered when it was asked for its tools, and how it shows itself."""
+
+    tools: list[McpTool]
+    about: McpAbout
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,10 +374,12 @@ class McpAdapterClass:
         await asyncio.gather(*(link.close() for link in links))
         await asyncio.gather(*self._closing, return_exceptions=True)
 
-    async def list_tools(self, server: McpServer) -> list[McpTool]:
-        """Every tool the server has now, in the order it lists them.
+    async def list_tools(self, server: McpServer) -> McpListing:
+        """Every tool the server has now, in the order it lists them, and how it shows itself.
 
-        Raises `McpFailure` if it cannot be reached or does not answer.
+        How it shows itself is what it said when the client was opened, read from the
+        same client as the tools (see `_about`). Raises `McpFailure` if it cannot be
+        reached or does not answer. An icon that cannot be had never fails it.
         """
         tools: list[McpTool] = []
         async with self._using(server) as client:
@@ -349,7 +400,8 @@ class McpAdapterClass:
                 cursor = page.next_cursor
                 if cursor is None:
                     break
-        return tools
+            info = client.server_info
+        return McpListing(tools, await _about(info, server.url, self._transport))
 
     async def call_tool(
         self, server: McpServer, name: str, arguments: Mapping[str, object]
@@ -798,6 +850,195 @@ def _resource(url: str, prm: ProtectedResourceMetadata) -> str:
     if check_resource_allowed(requested_resource=resource, configured_resource=named):
         return named
     return resource
+
+
+class _Unreached(Exception):
+    """An icon's host did not answer, or answered with a failure of its own: try again later."""
+
+
+async def _about(
+    info: Implementation | None, server_url: str, transport: httpx2.AsyncBaseTransport | None
+) -> McpAbout:
+    """How a server shows itself, from what it said when its client was opened.
+
+    The first `_ICONS_KEPT` of its icons that can be kept, in its order, out of the first
+    `_ICONS_LOOKED_AT` it states, all fetched at once.
+    """
+    if info is None:
+        return McpAbout()
+    stated = (info.icons or [])[:_ICONS_LOOKED_AT]
+    held = await asyncio.gather(
+        *(_icon(icon, server_url, transport) for icon in stated), return_exceptions=True
+    )
+    for one in held:
+        if isinstance(one, BaseException) and not isinstance(one, Exception):
+            raise one  # a cancellation, not an icon's failure
+        if isinstance(one, Exception) and not isinstance(one, _Unreached):
+            # Not one `_icon` knows of. An icon never fails a listing: it is left out.
+            _log.warning("an icon of %s was left out: %s", server_url, _reason(one))
+    return McpAbout(
+        icons=tuple(one for one in held if isinstance(one, McpIcon))[:_ICONS_KEPT],
+        website_url=_website(info.website_url),
+        unreached=any(isinstance(one, _Unreached) for one in held),
+    )
+
+
+async def _icon(
+    icon: Icon, server_url: str, transport: httpx2.AsyncBaseTransport | None
+) -> McpIcon | None:
+    """An icon a server stated, held as a `data:` address. None if it cannot be kept.
+
+    The MCP spec's rules for an icon's consumer: a `data:` address, or an `https:` one on
+    the server's own domain (see `_same_site`), fetched with no credentials and no
+    redirect. Its kind is told by its bytes, and the kind it was given as (the address's
+    own, the answer's `Content-Type`, or the icon's `mimeType` when those say nothing)
+    must not say otherwise. Raises `_Unreached` when its host did not answer.
+    """
+    if icon.src[:5].lower() == "data:":
+        try:
+            given, data = _data(icon.src)
+        except ValueError:
+            return None
+    elif _same_site(icon.src, server_url):
+        try:
+            async with asyncio.timeout(_ICON_SECONDS):
+                given, data = await _fetch(icon.src, transport)
+        except (httpx2.TransportError, TimeoutError) as exc:
+            raise _Unreached from exc
+        except (httpx2.HTTPError, httpx2.InvalidURL, httpx2.StreamError, ValueError):
+            # An address the client will not take, or an answer it cannot read.
+            return None
+    else:
+        return None
+    kind = _kind(data)
+    if given in _SAYS_NOTHING:
+        given = _mime(icon.mime_type or "")
+    if kind is None or given not in (kind, *_SAYS_NOTHING):
+        return None
+    return McpIcon(
+        src=f"data:{kind};base64,{base64.b64encode(data).decode()}",
+        mime_type=kind,
+        sizes=tuple(size for size in (icon.sizes or ()) if _SIZE.fullmatch(size))[:_ICON_SIZES_MAX],
+        theme=icon.theme,
+    )
+
+
+# What says nothing of a picture's kind.
+_SAYS_NOTHING = ("", "application/octet-stream", "binary/octet-stream")
+# A size as the spec gives it: "48x48", or "any" for a picture that scales.
+_SIZE = re.compile(r"any|[1-9][0-9]{0,4}x[1-9][0-9]{0,4}")
+# What in an SVG would run, or draw a page: such an SVG is not kept.
+_SVG_ACTIVE = re.compile(rb"<script|<foreignobject|javascript:|\bon[a-z]+\s*=", re.IGNORECASE)
+
+
+def _mime(value: str) -> str:
+    """A MIME type as compared here: without its parameters, in lower case, and with
+    `image/jpg`, which the spec names as JPEG too, as `image/jpeg`."""
+    kind = value.split(";", 1)[0].strip().lower()
+    return "image/jpeg" if kind == "image/jpg" else kind
+
+
+def _kind(data: bytes) -> str | None:
+    """The kind of picture these bytes are, by their first bytes. None if not one kept.
+
+    PNG and JPEG, which the spec says a client must take, and WebP and SVG, which it
+    says it should. An SVG that holds a script, an event handler or a page is not kept.
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    start = data.removeprefix(b"\xef\xbb\xbf").lstrip()
+    if start.startswith(b"<") and re.search(rb"<svg[\s>]", start[:2048], re.IGNORECASE):
+        return None if _SVG_ACTIVE.search(data) else "image/svg+xml"
+    return None
+
+
+def _same_site(src: str, server_url: str) -> bool:
+    """Whether an icon's address may be fetched: `https:`, with no user or password, on
+    the server's own host, a domain above it (`example.com` for `mcp.example.com`), or one
+    below it. A domain above a host is its owner's, so no list of public suffixes is
+    needed. An address by IP is the server's own only when it is the same."""
+    try:
+        icon, server = urlsplit(src), urlsplit(server_url)
+        icon_host, server_host = icon.hostname, server.hostname
+    except ValueError:
+        return False
+    if icon.scheme.lower() != "https" or not icon_host or not server_host:
+        return False
+    if icon.username is not None or icon.password is not None:
+        return False
+    if icon_host == server_host:
+        return True
+    if _is_ip(icon_host) or _is_ip(server_host):
+        return False
+    return server_host.endswith(f".{icon_host}") or icon_host.endswith(f".{server_host}")
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _data(src: str) -> tuple[str, bytes]:
+    """The kind a `data:` address gives and its bytes, in base64 or percent-encoded.
+
+    Raises `ValueError` if it is not one, or is too long to be an icon kept here.
+    """
+    head, comma, payload = src[5:].partition(",")
+    if not comma or len(payload) > _ICON_MAX_BYTES * 3:
+        raise ValueError("not a data address an icon is kept from")
+    kind, *params = head.split(";")
+    if any(param.strip().lower() == "base64" for param in params):
+        data = base64.b64decode("".join(payload.split()), validate=True)
+    else:
+        data = unquote_to_bytes(payload)
+    if len(data) > _ICON_MAX_BYTES:
+        raise ValueError("too large")
+    return _mime(kind), data
+
+
+async def _fetch(src: str, transport: httpx2.AsyncBaseTransport | None) -> tuple[str, bytes]:
+    """The kind an icon's address answers with, and its bytes.
+
+    A client of its own for each icon, so no cookie one answer sets goes with another;
+    nothing of the server's is sent. Raises `_Unreached` for an answer of 429 or 500 and
+    more, `ValueError` for any other but a 200, or one longer than `_ICON_MAX_BYTES`: no
+    more than that is read.
+    """
+    async with (
+        httpx2.AsyncClient(
+            transport=transport, timeout=_ICON_SECONDS, follow_redirects=False
+        ) as http,
+        http.stream("GET", src) as answer,
+    ):
+        if answer.status_code == 429 or answer.status_code >= 500:
+            raise _Unreached(f"it answered {answer.status_code}")
+        if answer.status_code != 200:
+            raise ValueError(f"it answered {answer.status_code}")
+        data = bytearray()
+        async for chunk in answer.aiter_bytes():
+            data.extend(chunk)
+            if len(data) > _ICON_MAX_BYTES:
+                raise ValueError("too large")
+    return _mime(answer.headers.get("content-type", "")), bytes(data)
+
+
+def _website(url: str | None) -> str | None:
+    """A server's website, if it is an http or https address of a usable length."""
+    if url is None or len(url) > _WEBSITE_MAX_LENGTH:
+        return None
+    try:
+        parts = urlsplit(url)
+        usable = parts.scheme in ("http", "https") and bool(parts.hostname)
+    except ValueError:
+        return None
+    return url if usable else None
 
 
 def _text(result: CallToolResult) -> str:

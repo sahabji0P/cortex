@@ -24,6 +24,7 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import Icon
 
 from app.adapters.mcp_adp import McpAdapterClass, McpFailure, McpServer
 from app.config import settings
@@ -41,7 +42,7 @@ from app.routers.connections.service import (
 )
 from app.routers.link.service import LinkServiceV1Class
 from tests.test_chat import _chat, _close, _DocDB, _docdb, _open
-from tests.test_connections import _server
+from tests.test_connections import _PNG_DATA, _server
 
 _MCP = "https://signin.example.com/mcp"
 _PRM = "https://signin.example.com/.well-known/oauth-protected-resource/mcp"
@@ -69,7 +70,7 @@ class _SignInWorld:
     def __init__(self, *, auth_methods: list[str] | None = None) -> None:
         security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
         self.tools = _server()
-        self.plain = _server(extra=True)
+        self.plain = _server(extra=True, icons=[Icon(src=_PNG_DATA)])
         self._tools = httpx2.ASGITransport(
             app=self.tools.streamable_http_app(
                 json_response=True, stateless_http=True, transport_security=security
@@ -702,6 +703,7 @@ async def test_a_new_address_drops_the_sign_in(world: _World) -> None:
 
     assert (moved.oauth, moved.oauth_client, moved.oauth_tokens) == (None, None, None)
     assert moved.tools[-1].name == "delete_everything"
+    assert [icon.src for icon in moved.icons] == [_PNG_DATA]
     assert world.stored(made)["oauth_tokens"] is None
     # A sign-in begun for the old address brings nothing to the new one.
     assert not (await world.connections.finish_sign_in(error=None, **begun)).signed_in
@@ -710,6 +712,9 @@ async def test_a_new_address_drops_the_sign_in(world: _World) -> None:
     # Back to a server that asks for a sign-in: it needs one again, from the start.
     back = await world.connections.update(str(made.id), {"url": _MCP})
     assert back.oauth is not None and back.oauth_client is None and back.tools == []
+    # The icons were the other server's too.
+    assert (back.icons, back.website_url) == ([], None)
+    assert world.stored(made)["icons"] == []
     assert not back.signed_in()
 
 

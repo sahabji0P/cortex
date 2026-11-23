@@ -2,8 +2,8 @@
 Connections: the tool servers gems can use, and which gem may use which.
 
 A connection is one MCP server the user has added: where it is, the headers that let
-this backend in, and a copy of the tools it listed when it was last asked. They are
-kept in the `Connections` collection.
+this backend in, and a copy of the tools it listed when it was last asked, with the
+icons it stated then. They are kept in the `Connections` collection.
 
 The copy is what a gem is offered, never the server's list of the moment. So the tools
 a model is told of are the ones the user was shown: a server cannot change a tool's
@@ -74,6 +74,7 @@ from app.adapters.mcp_adp import (
     McpAuthServer,
     McpChallenge,
     McpFailure,
+    McpListing,
     McpRegistration,
     McpServer,
     McpTokens,
@@ -92,6 +93,7 @@ __all__ = [
     "ConnectionEntityClass",
     "ConnectionHeader",
     "ConnectionHeaders",
+    "ConnectionIcon",
     "ConnectionName",
     "ConnectionTool",
     "ConnectionUrl",
@@ -216,6 +218,19 @@ class ConnectionTool(BaseModel):
     input_schema: str
 
 
+class ConnectionIcon(BaseModel):
+    """One of the server's own icons, as it stated it when last asked.
+
+    `src` is a `data:` address: the picture is kept here, so the app never fetches one.
+    """
+
+    src: str
+    mime_type: str
+    sizes: list[str] = Field(default_factory=list[str])
+    # Which background it is made for. None: either.
+    theme: Literal["light", "dark"] | None = None
+
+
 class ToolLimit(BaseModel):
     """The gems one tool is open to, out of those the connection is open to."""
 
@@ -248,6 +263,10 @@ class Connection(BaseModel):
     tools: list[ConnectionTool] = Field(default_factory=list[ConnectionTool])
     # How many tools the server listed that were not kept (see `_kept`).
     tools_left_out: int = 0
+    # How the server shows itself, as it said when it was last asked: its icons, and its
+    # website. Empty when it said nothing.
+    icons: list[ConnectionIcon] = Field(default_factory=list[ConnectionIcon])
+    website_url: str | None = None
     # Kept for a tool the server no longer lists, too: if the tool comes back, it comes
     # back as closed as the user left it.
     limits: list[ToolLimit] = Field(default_factory=list[ToolLimit])
@@ -455,17 +474,36 @@ def _sendable(schema: Mapping[str, object]) -> bool:
 
 
 # The fields that hold what a server listed. Asking it again writes these and no others.
-_LISTED = ("tools", "tools_left_out", "checked_at", "updated_at")
+_LISTED = ("tools", "tools_left_out", "icons", "website_url", "checked_at", "updated_at")
 # The fields that hold a sign-in.
 _SIGN_IN = ("oauth", "oauth_client", "oauth_tokens")
 
 
-def _with_tools(connection: Connection, listed: Sequence[McpTool]) -> Connection:
-    """The connection with the tools its server listed just now."""
-    tools, left_out = _kept(connection.key, listed)
+def _with_tools(connection: Connection, listed: McpListing) -> Connection:
+    """The connection with the tools its server listed just now, and its icons.
+
+    Icons none of which could be fetched just now leave the ones kept as they are: a
+    host that did not answer for a moment does not take a good icon away.
+    """
+    tools, left_out = _kept(connection.key, listed.tools)
+    icons = [
+        ConnectionIcon(
+            src=icon.src, mime_type=icon.mime_type, sizes=list(icon.sizes), theme=icon.theme
+        )
+        for icon in listed.about.icons
+    ]
+    if not icons and listed.about.unreached:
+        icons = connection.icons
     now = datetime.now(UTC)
     return connection.model_copy(
-        update={"tools": tools, "tools_left_out": left_out, "checked_at": now, "updated_at": now}
+        update={
+            "tools": tools,
+            "tools_left_out": left_out,
+            "icons": icons,
+            "website_url": listed.about.website_url,
+            "checked_at": now,
+            "updated_at": now,
+        }
     )
 
 
@@ -599,11 +637,19 @@ class ConnectionEntityClass:
                 updated = updated.model_copy(update={"oauth": asked})
                 written.add("oauth")
                 if new_address:
-                    # The copy is of the old server's tools.
-                    updated = updated.model_copy(update={"tools": [], "tools_left_out": 0})
-                    written |= {"tools", "tools_left_out"}
+                    # The copy is of the old server's tools, and so are its icons.
+                    cleared: dict[str, object] = {
+                        "tools": [],
+                        "tools_left_out": 0,
+                        "icons": [],
+                        "website_url": None,
+                    }
+                    updated = updated.model_copy(update=cleared)
+                    written |= set(cleared)
             elif asked is not None:
-                updated = _with_tools(updated, asked)
+                # The icons kept are the old server's: none of them stays for the new one.
+                kept = updated.model_copy(update={"icons": []}) if new_address else updated
+                updated = _with_tools(kept, asked)
                 written |= set(_LISTED)
             if "tool_gems" in changes:
                 limits = await self._limits(updated, changes["tool_gems"])
@@ -623,8 +669,12 @@ class ConnectionEntityClass:
         Only the tools are written: who the connection is open to is not touched, even
         if it was changed while the server was being asked. A server that asks for a
         sign-in leaves the tools as they were, and the connection needs a sign-in.
+
+        The client kept for the server is closed first, so a new one is opened: what the
+        server says of itself (its icons) is said when a client opens.
         """
         before = await self.get(connection_id)
+        await self._mcp.forget(before.server)
         asked = await self._ask(before)
         async with self._lock(before.id):
             current = await self.get(connection_id)
@@ -847,7 +897,7 @@ class ConnectionEntityClass:
 
         return Tool(spec, run, shown=lambda arguments: label, connection=connection.name)
 
-    async def _ask(self, connection: Connection) -> list[McpTool] | McpAuthServer:
+    async def _ask(self, connection: Connection) -> McpListing | McpAuthServer:
         """The tools the connection's server lists now, or how to sign in to it.
 
         How to sign in, when the server answers 401 and publishes a sign-in this

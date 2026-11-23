@@ -28,6 +28,7 @@ Connections are kept in the `Connections` collection, one document each:
 | `deferred` | on, its tools are not sent with every request: a gem finds and loads them with `tool_search` when it needs one (see [Deferred tools](#deferred-tools)). Off, all of them are sent in full with every request. Default on |
 | `gems` | the gems it is open to: `"all"`, or a list of gem ids. **A new connection is open to none** until the user says which |
 | `tools` | a copy of the tools the server listed when it was last asked: each one's name, title, description and schema |
+| `icons`, `website_url` | how the server shows itself, as it stated when its tools were last copied (see [The server's icons](#the-servers-icons)). Empty and null when it stated nothing |
 | limits | for one tool, the gems it is open to. A limit only narrows: the tool is offered to a gem when the connection is open to the gem and the limit names it too. A limit that names no gem turns the tool off for everyone. A tool with no limit is open to whoever the connection is |
 
 ## Who may use what
@@ -84,6 +85,42 @@ are passed over, and a line is logged. Every tool a gem is offered is sent with 
 request (unless its connection is deferred), so a connection with many tools costs
 context and, in a call, time before the first word. Open a connection to the gems that
 need it, and turn off the tools they do not.
+
+## The server's icons
+
+An MCP server may state its own icons and its website when a client opens (its
+`serverInfo`). They are read with the tools, on the same client and in the same use of
+it, and kept with the copy: written with it, and dropped with it when a new address
+needs a sign-in. A refresh closes the client kept for the server first, so a new one is
+opened and a changed icon is heard. Only the backend can read them, as most servers
+refuse a client that has not signed in, so the app gets them from the connection, in
+the shape [the contract](chat-contract.md#connections-v1connections) gives.
+
+Every icon is checked as the MCP spec asks of whoever uses one (its security
+considerations for icons), and kept as a `data:` address, so the app never reaches a
+host for one:
+
+- **Where it may come from.** A `data:` address, in base64 or percent-encoded. Or an
+  `https:` one on the server's own domain: its host, a domain above it (`example.com`
+  for `mcp.example.com`), or one below it. A domain above a host is its owner's, so no
+  list of public suffixes is needed; one beside it (`cdn.example.com`) is not taken. An
+  address with a user or password in it, by another IP, or plain `http:` is not fetched.
+- **How it is fetched.** With a client of its own, so no cookie goes from one icon to
+  another, and with none of the connection's headers and no pass. No redirect is
+  followed. No more than 64 KB is read. The first eight icons the server states are
+  fetched at once, within 5 seconds, and the first three that can be kept are kept.
+- **What it is.** Told by its first bytes, never by what it says it is: what it was given
+  as (the `data:` address's own type, or the answer's `Content-Type`, or the icon's
+  `mimeType` when those say nothing) only has to agree. `image/jpg` is JPEG.
+- **An SVG** that holds a script, an event handler, a page (`foreignObject`) or a
+  `javascript:` link is not kept. The others are passed on as the server gave them.
+- **What the server says of it** is checked too: a size is kept only as `WxH` or `any`,
+  eight at most, and a website only as an `http` or `https` address.
+- **It never fails a connection.** An icon that cannot be had is left out. One whose host
+  did not answer, or answered 429 or 500 and up, leaves the icons kept before as they
+  were, when no other could be had: a moment's trouble does not take a good icon away.
+- **What it does not cover**: a server can show any picture, another company's logo too.
+  The connection's name and address are what say which server it is.
 
 ## What a tool call does
 
