@@ -66,6 +66,18 @@ class ConnectionsModels:
                 # Null for no limit: it is open to whoever the connection is.
                 gems: list[str] | None
 
+            class Icon(BaseModel):
+                """One of the server's own icons, as it stated it."""
+
+                # Always a `data:` address: the picture itself, so the app never fetches
+                # one. PNG, JPEG, WebP or SVG, at most 64 KB.
+                src: str
+                mime_type: str
+                # As the server said, such as "48x48" or "any". Empty when it did not say.
+                sizes: list[str]
+                # The background it is made for: "light", "dark", or null for either.
+                theme: Literal["light", "dark"] | None
+
             class SignIn(BaseModel):
                 """A connection's sign-in, as far as the app needs to show it.
 
@@ -103,6 +115,11 @@ class ConnectionsModels:
                 tools: list["ConnectionsModels.V1.Output.Tool"]
                 # How many tools the server listed that cannot be used here.
                 tools_left_out: int
+                # The server's own icons, at most three, in its order, as it stated them
+                # when it was last asked. Empty when it stated none this backend holds.
+                icons: list["ConnectionsModels.V1.Output.Icon"]
+                # The server's website, as it stated it. Null when it did not.
+                website_url: str | None
                 # Null for a connection that does not sign in: it uses its headers only.
                 sign_in: "ConnectionsModels.V1.Output.SignIn | None"
                 checked_at: datetime

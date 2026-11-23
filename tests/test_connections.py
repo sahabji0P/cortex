@@ -1014,6 +1014,26 @@ async def test_a_connection_is_sent_without_what_lets_us_in(setup: _Setup) -> No
     assert await service.list_connections() == []
 
 
+async def test_a_connection_is_sent_with_its_server_s_icons_and_website(setup: _Setup) -> None:
+    service = ConnectionsServiceV1Class(setup.connections)
+    setup.servers.at[_URL] = _iconed(Icon(src=_PNG_DATA, sizes=["48x48"], theme="dark"))
+
+    made = await service.create_connection(
+        ConnectionsModels.V1.Input.CreateConnection(name="Issue Tracker", url=_URL)
+    )
+
+    sent = json.loads(made.model_dump_json())
+    assert sent["icons"] == [
+        {"src": _PNG_DATA, "mime_type": "image/png", "sizes": ["48x48"], "theme": "dark"}
+    ]
+    assert sent["website_url"] == "https://tracker.example.com"
+    # A server that states nothing is sent with nothing, not without the fields.
+    setup.servers.at[_URL] = _server()
+    await setup.mcp.forget(setup.servers.opened[-1])
+    plain = json.loads((await service.refresh_connection(made.id)).model_dump_json())
+    assert (plain["icons"], plain["website_url"]) == ([], None)
+
+
 async def test_a_connection_is_deferred_unless_the_user_says_not(setup: _Setup) -> None:
     service = ConnectionsServiceV1Class(setup.connections)
     made = await service.create_connection(
