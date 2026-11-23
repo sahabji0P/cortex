@@ -70,11 +70,11 @@ from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.adapters.mcp_adp import (
-    McpAbout,
     McpAdapterClass,
     McpAuthServer,
     McpChallenge,
     McpFailure,
+    McpListing,
     McpRegistration,
     McpServer,
     McpTokens,
@@ -479,16 +479,12 @@ _LISTED = ("tools", "tools_left_out", "icons", "website_url", "checked_at", "upd
 _SIGN_IN = ("oauth", "oauth_client", "oauth_tokens")
 
 
-@dataclass(frozen=True, slots=True)
-class _Listed:
-    """What a server answered when it was asked: its tools, and how it shows itself."""
+def _with_tools(connection: Connection, listed: McpListing) -> Connection:
+    """The connection with the tools its server listed just now, and its icons.
 
-    tools: Sequence[McpTool]
-    about: McpAbout
-
-
-def _with_tools(connection: Connection, listed: _Listed) -> Connection:
-    """The connection with the tools its server listed just now, and its icons."""
+    Icons none of which could be fetched just now leave the ones kept as they are: a
+    host that did not answer for a moment does not take a good icon away.
+    """
     tools, left_out = _kept(connection.key, listed.tools)
     icons = [
         ConnectionIcon(
@@ -496,6 +492,8 @@ def _with_tools(connection: Connection, listed: _Listed) -> Connection:
         )
         for icon in listed.about.icons
     ]
+    if not icons and listed.about.unreached:
+        icons = connection.icons
     now = datetime.now(UTC)
     return connection.model_copy(
         update={
@@ -669,8 +667,12 @@ class ConnectionEntityClass:
         Only the tools are written: who the connection is open to is not touched, even
         if it was changed while the server was being asked. A server that asks for a
         sign-in leaves the tools as they were, and the connection needs a sign-in.
+
+        The client kept for the server is closed first, so a new one is opened: what the
+        server says of itself (its icons) is said when a client opens.
         """
         before = await self.get(connection_id)
+        await self._mcp.forget(before.server)
         asked = await self._ask(before)
         async with self._lock(before.id):
             current = await self.get(connection_id)
@@ -795,7 +797,7 @@ class ConnectionEntityClass:
             await self._store(signed, _SIGN_IN)
         await self._mcp.forget(current.server)
         try:
-            listed = await self._on_server(signed, self._list)
+            listed = await self._on_server(signed, self._mcp.list_tools)
         except McpFailure as exc:
             self._tell(signed.id)
             return SignInOutcome(
@@ -893,7 +895,7 @@ class ConnectionEntityClass:
 
         return Tool(spec, run, shown=lambda arguments: label, connection=connection.name)
 
-    async def _ask(self, connection: Connection) -> _Listed | McpAuthServer:
+    async def _ask(self, connection: Connection) -> McpListing | McpAuthServer:
         """The tools the connection's server lists now, or how to sign in to it.
 
         How to sign in, when the server answers 401 and publishes a sign-in this
@@ -901,7 +903,7 @@ class ConnectionEntityClass:
         Raises `UpstreamError` otherwise.
         """
         try:
-            return await self._on_server(connection, self._list)
+            return await self._on_server(connection, self._mcp.list_tools)
         except McpFailure as exc:
             failure = exc
         if failure.sign_in_needed and not connection.own_authorization:
@@ -922,12 +924,6 @@ class ConnectionEntityClass:
         raise UpstreamError(
             f"The server at {connection.url} could not be asked for its tools: {failure.reason}"
         ) from failure
-
-    async def _list(self, server: McpServer) -> _Listed:
-        """The server's tools, and how it shows itself. Raises `McpFailure` as listing
-        does: an icon that cannot be had never fails it (`about` never raises)."""
-        tools = await self._mcp.list_tools(server)
-        return _Listed(tools, await self._mcp.about(server))
 
     async def _on_server[T](
         self, connection: Connection, ask: Callable[[McpServer], Awaitable[T]]

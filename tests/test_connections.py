@@ -22,7 +22,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import Icon
 from pydantic import ValidationError
 
-from app.adapters.mcp_adp import McpAbout, McpAdapterClass, McpFailure, McpServer
+from app.adapters.mcp_adp import McpAbout, McpAdapterClass, McpFailure, McpListing, McpServer
 from app.core.errors import InvalidError, NotFoundError, UpstreamError
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
@@ -101,6 +101,7 @@ class _Servers:
 class _Setup(SimpleNamespace):
     docdb: _DocDB
     servers: _Servers
+    icons: "_IconHost"
     mcp: McpAdapterClass
     gems: GemEntityClass
     connections: ConnectionEntityClass
@@ -118,11 +119,13 @@ class _Setup(SimpleNamespace):
 async def setup() -> AsyncGenerator[_Setup]:
     docdb, adapter = _docdb()
     servers = _Servers()
-    mcp = McpAdapterClass(servers.open)
+    icons = _IconHost()
+    mcp = McpAdapterClass(servers.open, transport=icons)
     gems = GemEntityClass(adapter)
     made = _Setup(
         docdb=docdb,
         servers=servers,
+        icons=icons,
         mcp=mcp,
         gems=gems,
         connections=ConnectionEntityClass(docdb=adapter, mcp=mcp, gems=gems),
@@ -143,7 +146,7 @@ async def _run(tool: Tool, **arguments: object) -> str:
 async def test_a_server_s_tools_are_listed_as_it_lists_them() -> None:
     mcp = McpAdapterClass(_Servers().open)
 
-    tools = await mcp.list_tools(McpServer(_URL))
+    tools = (await mcp.list_tools(McpServer(_URL))).tools
 
     assert [(tool.name, tool.title, tool.description) for tool in tools] == [
         ("find_issues", "Find issues", "Find the issues that mention a text."),
@@ -193,7 +196,7 @@ async def test_a_server_that_cannot_be_reached_fails_in_words_and_is_tried_again
 
     # The failed client is not kept: the next call opens a new one.
     servers.at[gone.url] = _server()
-    assert len(await mcp.list_tools(gone)) == 3
+    assert len((await mcp.list_tools(gone)).tools) == 3
     assert servers.opened == [gone, gone]
     await mcp.close()
 
@@ -214,7 +217,11 @@ async def test_a_forgotten_server_s_client_is_closed_and_a_new_one_opened_when_n
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 24
 _PNG_DATA = f"data:image/png;base64,{base64.b64encode(_PNG).decode()}"
-_SVG = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+_JPEG = b"\xff\xd8\xff\xe0" + b"\0" * 24
+_SVG = b'<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"/>'
+# The server the icon tests ask: its icons may come from its own host, a domain above
+# it, or one below it.
+_ICONED = "https://mcp.tracker.example/mcp"
 
 
 class _IconHost(httpx2.AsyncBaseTransport):
@@ -222,95 +229,166 @@ class _IconHost(httpx2.AsyncBaseTransport):
 
     def __init__(self) -> None:
         self.asked: list[httpx2.Request] = []
-        self.answers: dict[str, httpx2.Response] = {
-            "https://cdn.example.com/dark.svg": httpx2.Response(
-                200, headers={"Content-Type": "image/svg+xml; charset=utf-8"}, content=_SVG
-            ),
-            "https://cdn.example.com/page.png": httpx2.Response(
-                200, headers={"Content-Type": "text/html"}, content=b"<html></html>"
-            ),
-            "https://cdn.example.com/huge.png": httpx2.Response(
-                200, headers={"Content-Type": "image/png"}, content=b"\0" * (64 * 1024 + 1)
-            ),
-            "https://cdn.example.com/moved.png": httpx2.Response(
-                302, headers={"Location": "https://cdn.example.com/dark.svg"}
-            ),
-        }
+        self.answers: dict[str, httpx2.Response] = {}
+
+    def serve(self, url: str, status: int = 200, content: bytes = b"", kind: str = "") -> str:
+        headers = {"Content-Type": kind} if kind else {}
+        self.answers[url] = httpx2.Response(status, headers=headers, content=content)
+        return url
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         self.asked.append(request)
         return self.answers.get(str(request.url), httpx2.Response(404))
 
 
-def _iconed(*icons: Icon, website_url: str | None = "https://tracker.example.com") -> MCPServer:
+def _iconed(*icons: Icon, website_url: str | None = "https://tracker.example") -> MCPServer:
     return MCPServer("tracker", website_url=website_url, icons=list(icons))
 
 
-async def test_a_server_s_icons_are_held_as_data_and_only_the_usable_ones() -> None:
+async def _about(host: _IconHost, *icons: Icon, website_url: str | None = None) -> McpAbout:
+    """How the icon tests' server shows itself, as listing its tools reads it."""
+    server = _iconed(*icons, website_url=website_url)
+    mcp = McpAdapterClass(_Servers(**{_ICONED: server}).open, transport=host)
+    try:
+        return (await mcp.list_tools(McpServer(_ICONED, (("X-Key", "secret"),), "a-pass"))).about
+    finally:
+        await mcp.close()
+
+
+async def test_icons_are_read_with_the_tools_and_held_as_data() -> None:
     host = _IconHost()
-    servers = _Servers(
-        **{
-            "https://iconed.example.com/mcp": _iconed(
-                Icon(src="https://cdn.example.com/page.png", mime_type="image/png"),
-                Icon(src=_PNG_DATA, mime_type="image/png", sizes=["48x48"], theme="light"),
-                Icon(src="http://cdn.example.com/plain.png"),
-                Icon(src="https://cdn.example.com/huge.png"),
-                Icon(src="https://cdn.example.com/moved.png"),
-                Icon(src="https://cdn.example.com/gone.png"),
-                Icon(src="data:image/gif;base64,R0lGODlh"),
-                Icon(src="https://cdn.example.com/dark.svg", theme="dark"),
-            )
-        }
+    svg = host.serve("https://tracker.example/icon.svg", content=_SVG, kind="image/svg+xml")
+    png = host.serve("https://cdn.mcp.tracker.example/i.png", content=_PNG, kind="image/png")
+
+    about = await _about(
+        host,
+        Icon(src=_PNG_DATA, mime_type="image/png", sizes=["48x48"], theme="light"),
+        Icon(src=svg, sizes=["any"], theme="dark"),
+        Icon(src=png),
+        website_url="https://tracker.example",
     )
-    mcp = McpAdapterClass(servers.open, transport=host)
-    server = McpServer("https://iconed.example.com/mcp", (("X-Key", "secret"),), token="a-pass")
 
-    about = await mcp.about(server)
-
-    assert about.website_url == "https://tracker.example.com"
+    assert about.website_url == "https://tracker.example"
     assert [(icon.mime_type, icon.sizes, icon.theme) for icon in about.icons] == [
         ("image/png", ("48x48",), "light"),
-        ("image/svg+xml", (), "dark"),
+        ("image/svg+xml", ("any",), "dark"),
+        ("image/png", (), None),
     ]
     assert about.icons[0].src == _PNG_DATA
     assert base64.b64decode(about.icons[1].src.split(",", 1)[1]) == _SVG
-    # The plain http one is never asked for, and nothing that lets us in goes with an icon.
-    assert {str(request.url) for request in host.asked} == {
-        "https://cdn.example.com/page.png",
-        "https://cdn.example.com/huge.png",
-        "https://cdn.example.com/moved.png",
-        "https://cdn.example.com/gone.png",
-        "https://cdn.example.com/dark.svg",
-    }
+    assert not about.unreached
+    # Nothing that lets us in to the server goes with an icon.
+    assert len(host.asked) == 2
     assert all(
-        "authorization" not in request.headers and "x-key" not in request.headers
+        "authorization" not in request.headers
+        and "x-key" not in request.headers
+        and "cookie" not in request.headers
         for request in host.asked
     )
-    # The server's own client is the one already open: it is not opened again.
-    assert len(servers.opened) == 1
-    await mcp.close()
+
+
+async def test_an_icon_is_fetched_only_from_the_server_s_own_domain_by_https() -> None:
+    host = _IconHost()
+    for url in (
+        "https://elsewhere.example/i.png",  # another domain
+        "https://other.tracker.example.net/i.png",  # a lookalike
+        "https://cdn.tracker.example/i.png",  # beside the server, not above or below it
+        "http://tracker.example/i.png",  # not https
+        "https://user:pw@tracker.example/i.png",  # credentials in the address
+        "https://127.0.0.1/i.png",
+    ):
+        host.serve(url, content=_PNG, kind="image/png")
+
+    about = await _about(host, *(Icon(src=url) for url in host.answers))
+
+    assert about == McpAbout()
+    assert host.asked == []
+
+
+async def test_an_icon_s_kind_is_told_by_its_bytes() -> None:
+    host = _IconHost()
+    html = host.serve("https://tracker.example/a.png", content=b"<html></html>", kind="image/png")
+    lying = host.serve("https://tracker.example/b.png", content=_JPEG, kind="image/png")
+    bare = host.serve("https://tracker.example/c", content=_PNG, kind="application/octet-stream")
+    jpg = host.serve("https://tracker.example/d.jpg", content=_JPEG, kind="image/jpg")
+    gif = "data:image/gif;base64,R0lGODlhAQABAAAAACw="
+
+    about = await _about(
+        host,
+        Icon(src=html),
+        Icon(src=lying),
+        Icon(src=gif),
+        Icon(src=bare, mime_type="image/png"),  # the icon's own type stands in
+        Icon(src=jpg),  # `image/jpg` is JPEG too
+    )
+
+    assert [icon.mime_type for icon in about.icons] == ["image/png", "image/jpeg"]
+
+
+async def test_an_svg_that_would_run_anything_is_not_kept() -> None:
+    def data(svg: str) -> Icon:
+        return Icon(src=f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}")
+
+    about = await _about(
+        _IconHost(),
+        data('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'),
+        data('<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>'),
+        data('<svg xmlns="http://www.w3.org/2000/svg"><foreignObject/></svg>'),
+        data('<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:x()"/></svg>'),
+        # Percent-encoded, as SVGs often are, and with `BASE64` in capitals: both kept.
+        Icon(src="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22/%3E"),
+        Icon(src=f"data:image/png;BASE64,{base64.b64encode(_PNG).decode()}"),
+    )
+
+    assert [icon.mime_type for icon in about.icons] == ["image/svg+xml", "image/png"]
+
+
+async def test_what_a_server_says_of_its_icons_is_checked_as_untrusted() -> None:
+    host = _IconHost()
+    huge = host.serve(
+        "https://tracker.example/huge.png", content=_PNG + b"\0" * 64 * 1024, kind="image/png"
+    )
+    moved = host.serve("https://tracker.example/moved.png", 302)
+    host.answers[moved].headers["Location"] = "https://tracker.example/i.png"
+    many = [f"{n}x{n}" for n in range(1, 20)]
+
+    about = await _about(
+        host,
+        Icon(src=huge),
+        Icon(src=moved),
+        Icon(src="data:image/png;base64,not base64!"),
+        Icon(src=_PNG_DATA, sizes=["48x48", "big", "0x5", "any", *many]),
+        website_url="http://[::1",
+    )
+
+    assert [icon.sizes for icon in about.icons] == [
+        ("48x48", "any", "1x1", "2x2", "3x3", "4x4", "5x5", "6x6")
+    ]
+    assert about.website_url is None
 
 
 async def test_at_most_three_icons_are_kept_in_the_server_s_order() -> None:
     icons = [Icon(src=_PNG_DATA, sizes=[f"{n}x{n}"]) for n in (16, 32, 48, 64)]
-    servers = _Servers(**{"https://iconed.example.com/mcp": _iconed(*icons)})
-    mcp = McpAdapterClass(servers.open, transport=_IconHost())
 
-    about = await mcp.about(McpServer("https://iconed.example.com/mcp"))
+    about = await _about(_IconHost(), *icons)
 
     assert [icon.sizes for icon in about.icons] == [("16x16",), ("32x32",), ("48x48",)]
-    await mcp.close()
 
 
-async def test_a_server_that_says_nothing_or_cannot_be_reached_has_nothing_to_show() -> None:
-    servers = _Servers(
-        **{"https://odd.example.com/mcp": _iconed(website_url="javascript:alert(1)")}
-    )
-    mcp = McpAdapterClass(servers.open, transport=_IconHost())
+async def test_an_icon_whose_host_does_not_answer_is_told_apart() -> None:
+    host = _IconHost()
+    busy = host.serve("https://tracker.example/busy.png", 503)
 
-    assert await mcp.about(McpServer(_URL)) == McpAbout()
-    assert await mcp.about(McpServer("https://odd.example.com/mcp")) == McpAbout()
-    assert await mcp.about(McpServer("https://nowhere.example.com/mcp")) == McpAbout()
+    assert (await _about(host, Icon(src=busy), Icon(src=_PNG_DATA))).unreached
+    # A 404 is an answer: the icon is not there, and there is nothing to wait for.
+    gone = await _about(host, Icon(src="https://tracker.example/gone.png"))
+    assert gone == McpAbout()
+
+
+async def test_a_server_that_says_nothing_has_nothing_to_show() -> None:
+    mcp = McpAdapterClass(_Servers().open, transport=_IconHost())
+
+    assert (await mcp.list_tools(McpServer(_URL))).about == McpAbout()
     await mcp.close()
 
 
@@ -618,15 +696,43 @@ async def test_a_connection_keeps_its_server_s_icons_and_a_refresh_takes_them_ag
     assert [(icon.src, icon.sizes, icon.theme) for icon in made.icons] == [
         (_PNG_DATA, ["48x48"], "dark")
     ]
-    assert made.website_url == "https://tracker.example.com"
+    assert made.website_url == "https://tracker.example"
     assert Connection.model_validate(setup.docdb.collections["Connections"][0]) == made
 
-    # The server no longer says how it shows itself: the next refresh keeps nothing.
+    # The server no longer says how it shows itself. A refresh opens a new client to it,
+    # so it is heard, with nothing forgotten by hand first.
     setup.servers.at[_URL] = _server()
-    await setup.mcp.forget(made.server)
     refreshed = await setup.connections.refresh(str(made.id))
     assert (refreshed.icons, refreshed.website_url) == ([], None)
     assert setup.docdb.collections["Connections"][0]["icons"] == []
+
+
+async def test_a_good_icon_stays_when_its_host_does_not_answer_for_a_moment(
+    setup: _Setup,
+) -> None:
+    icon = setup.icons.serve("https://example.com/i.png", content=_PNG, kind="image/png")
+    setup.servers.at[_URL] = _iconed(Icon(src=icon))
+    made = await setup.connections.create(name="Tracker", url=_URL)
+    assert [one.mime_type for one in made.icons] == ["image/png"]
+
+    setup.icons.serve(icon, 503)
+    kept = await setup.connections.refresh(str(made.id))
+    assert kept.icons == made.icons
+
+    # An answer that it is gone is an answer: the icon goes.
+    setup.icons.serve(icon, 404)
+    gone = await setup.connections.refresh(str(made.id))
+    assert gone.icons == []
+
+
+async def test_a_website_the_server_names_badly_does_not_stop_a_connection(
+    setup: _Setup,
+) -> None:
+    setup.servers.at[_URL] = _iconed(website_url="http://[::1")
+
+    made = await setup.connections.create(name="Tracker", url=_URL)
+
+    assert made.website_url is None
 
 
 async def test_a_connection_kept_before_icons_reads_back_with_none(setup: _Setup) -> None:
@@ -675,11 +781,8 @@ async def test_tools_that_cannot_be_offered_are_left_out_and_counted(setup: _Set
     ]
 
     class _Lists:
-        async def list_tools(self, server: McpServer) -> list[Any]:
-            return listed
-
-        async def about(self, server: McpServer) -> McpAbout:
-            return McpAbout()
+        async def list_tools(self, server: McpServer) -> McpListing:
+            return McpListing(cast("Any", listed), McpAbout())
 
     connections = ConnectionEntityClass(
         docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
@@ -1026,10 +1129,9 @@ async def test_a_connection_is_sent_with_its_server_s_icons_and_website(setup: _
     assert sent["icons"] == [
         {"src": _PNG_DATA, "mime_type": "image/png", "sizes": ["48x48"], "theme": "dark"}
     ]
-    assert sent["website_url"] == "https://tracker.example.com"
+    assert sent["website_url"] == "https://tracker.example"
     # A server that states nothing is sent with nothing, not without the fields.
     setup.servers.at[_URL] = _server()
-    await setup.mcp.forget(setup.servers.opened[-1])
     plain = json.loads((await service.refresh_connection(made.id)).model_dump_json())
     assert (plain["icons"], plain["website_url"]) == ([], None)
 
@@ -1089,15 +1191,11 @@ class _SlowLists:
         self.asked = asyncio.Event()
         self.answer = asyncio.Event()
 
-    async def list_tools(self, server: McpServer) -> list[Any]:
+    async def list_tools(self, server: McpServer) -> McpListing:
         self.asked.set()
         await self.answer.wait()
-        return [
-            SimpleNamespace(name="close_issue", title=None, description="", input_schema=_OBJECT)
-        ]
-
-    async def about(self, server: McpServer) -> McpAbout:
-        return McpAbout()
+        tool = SimpleNamespace(name="close_issue", title=None, description="", input_schema=_OBJECT)
+        return McpListing(cast("Any", [tool]), McpAbout())
 
     async def forget(self, server: McpServer) -> None:
         pass
@@ -1142,11 +1240,8 @@ async def test_two_tools_the_model_would_be_told_by_one_name_are_not_both_kept(
     ]
 
     class _Lists:
-        async def list_tools(self, server: McpServer) -> list[Any]:
-            return listed
-
-        async def about(self, server: McpServer) -> McpAbout:
-            return McpAbout()
+        async def list_tools(self, server: McpServer) -> McpListing:
+            return McpListing(cast("Any", listed), McpAbout())
 
     connections = ConnectionEntityClass(
         docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
@@ -1183,11 +1278,8 @@ async def test_a_schema_a_provider_would_refuse_is_left_out(
     ]
 
     class _Lists:
-        async def list_tools(self, server: McpServer) -> list[Any]:
-            return listed
-
-        async def about(self, server: McpServer) -> McpAbout:
-            return McpAbout()
+        async def list_tools(self, server: McpServer) -> McpListing:
+            return McpListing(cast("Any", listed), McpAbout())
 
     connections = ConnectionEntityClass(
         docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
@@ -1205,11 +1297,8 @@ async def test_a_gem_is_offered_no_more_tools_than_a_provider_takes(setup: _Setu
     ]
 
     class _Lists:
-        async def list_tools(self, server: McpServer) -> list[Any]:
-            return listed
-
-        async def about(self, server: McpServer) -> McpAbout:
-            return McpAbout()
+        async def list_tools(self, server: McpServer) -> McpListing:
+            return McpListing(cast("Any", listed), McpAbout())
 
     connections = ConnectionEntityClass(
         docdb=cast("Any", setup.docdb), mcp=cast("Any", _Lists()), gems=setup.gems
