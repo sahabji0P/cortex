@@ -871,8 +871,11 @@ async def _about(
         *(_icon(icon, server_url, transport) for icon in stated), return_exceptions=True
     )
     for one in held:
-        if isinstance(one, BaseException) and not isinstance(one, _Unreached):
-            raise one
+        if isinstance(one, BaseException) and not isinstance(one, Exception):
+            raise one  # a cancellation, not an icon's failure
+        if isinstance(one, Exception) and not isinstance(one, _Unreached):
+            # Not one `_icon` knows of. An icon never fails a listing: it is left out.
+            _log.warning("an icon of %s was left out: %s", server_url, _reason(one))
     return McpAbout(
         icons=tuple(one for one in held if isinstance(one, McpIcon))[:_ICONS_KEPT],
         website_url=_website(info.website_url),
@@ -902,7 +905,8 @@ async def _icon(
                 given, data = await _fetch(icon.src, transport)
         except (httpx2.TransportError, TimeoutError) as exc:
             raise _Unreached from exc
-        except ValueError:
+        except (httpx2.HTTPError, httpx2.InvalidURL, httpx2.StreamError, ValueError):
+            # An address the client will not take, or an answer it cannot read.
             return None
     else:
         return None

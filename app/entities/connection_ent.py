@@ -647,7 +647,9 @@ class ConnectionEntityClass:
                     updated = updated.model_copy(update=cleared)
                     written |= set(cleared)
             elif asked is not None:
-                updated = _with_tools(updated, asked)
+                # The icons kept are the old server's: none of them stays for the new one.
+                kept = updated.model_copy(update={"icons": []}) if new_address else updated
+                updated = _with_tools(kept, asked)
                 written |= set(_LISTED)
             if "tool_gems" in changes:
                 limits = await self._limits(updated, changes["tool_gems"])

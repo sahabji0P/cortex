@@ -725,6 +725,36 @@ async def test_a_good_icon_stays_when_its_host_does_not_answer_for_a_moment(
     assert gone.icons == []
 
 
+async def test_an_icon_the_client_cannot_take_or_read_does_not_stop_a_connection(
+    setup: _Setup,
+) -> None:
+    garbled = setup.icons.serve("https://tools.example.com/z.png", content=b"not gzip")
+    setup.icons.answers[garbled].headers["Content-Encoding"] = "gzip"
+    setup.servers.at[_URL] = _iconed(
+        Icon(src="https://tools.example.com:abc/i.png"),
+        Icon(src="https://tools.example.com/\x01.png"),
+        Icon(src=garbled),
+        Icon(src=_PNG_DATA),
+    )
+
+    made = await setup.connections.create(name="Tracker", url=_URL)
+
+    assert [icon.src for icon in made.icons] == [_PNG_DATA]
+
+
+async def test_a_new_address_keeps_none_of_the_old_server_s_icons(setup: _Setup) -> None:
+    setup.servers.at[_URL] = _iconed(Icon(src=_PNG_DATA))
+    made = await setup.connections.create(name="Tracker", url=_URL)
+    other = "https://other.example.com/mcp"
+    busy = setup.icons.serve("https://other.example.com/i.png", 503)
+    setup.servers.at[other] = _iconed(Icon(src=busy))
+
+    moved = await setup.connections.update(str(made.id), {"url": other})
+
+    assert [icon.src for icon in made.icons] == [_PNG_DATA]
+    assert moved.icons == []
+
+
 async def test_a_website_the_server_names_badly_does_not_stop_a_connection(
     setup: _Setup,
 ) -> None:
