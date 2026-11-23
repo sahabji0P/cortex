@@ -28,6 +28,7 @@ Connections are kept in the `Connections` collection, one document each:
 | `deferred` | on, its tools are not sent with every request: a gem finds and loads them with `tool_search` when it needs one (see [Deferred tools](#deferred-tools)). Off, all of them are sent in full with every request. Default on |
 | `gems` | the gems it is open to: `"all"`, or a list of gem ids. **A new connection is open to none** until the user says which |
 | `tools` | a copy of the tools the server listed when it was last asked: each one's name, title, description and schema |
+| `icons`, `website_url` | how the server shows itself, as it stated when its tools were last copied (see [The server's icons](#the-servers-icons)). Empty and null when it stated nothing |
 | limits | for one tool, the gems it is open to. A limit only narrows: the tool is offered to a gem when the connection is open to the gem and the limit names it too. A limit that names no gem turns the tool off for everyone. A tool with no limit is open to whoever the connection is |
 
 ## Who may use what
@@ -84,6 +85,28 @@ are passed over, and a line is logged. Every tool a gem is offered is sent with 
 request (unless its connection is deferred), so a connection with many tools costs
 context and, in a call, time before the first word. Open a connection to the gems that
 need it, and turn off the tools they do not.
+
+## The server's icons
+
+An MCP server may state its own icons and its website when a client opens (its
+`serverInfo`). They are read with the tools, from the same open client, and kept with
+the copy: written and replaced with it, and dropped with it when a new address needs a
+sign-in. Only the backend can read them, as most servers refuse a client that has not
+signed in, so the app gets them from the connection.
+
+- **An icon is kept as a `data:` address**, so the app never reaches a host for one. One
+  the server gives as `data:` is kept as it is. One it names by an `https:` address is
+  fetched once, here, with none of the connection's headers and no pass, and no redirect
+  followed. A plain `http:` one is not fetched.
+- **What is kept**: PNG, JPEG, WebP or SVG, judged by what came back (the `data:`
+  address's own type, or the answer's `Content-Type`), not by what the server said it
+  would be. At most 64 KB each, and no more than that is read. The first three that can
+  be kept, of the first eight the server states, in its order.
+- **It never fails a connection.** An icon that cannot be had, or a server that states
+  none, leaves `icons` empty. All of them are fetched at once, within 5 seconds.
+- **What it does not cover**: a server can show any picture, another company's logo too.
+  The connection's name and address are what say which server it is. An SVG is passed on
+  as the server gave it, for the app to draw as a picture, never as a page.
 
 ## What a tool call does
 
