@@ -34,7 +34,7 @@ config ← core ← adapters ← entities ← routers ← main
 | `cartesia_stt_adp.py` | Cartesia speech-to-text, which also detects turns |
 | `cartesia_tts_adp.py` | Cartesia text-to-speech, with each word's timing |
 | `parallel_adp.py` | Parallel web search |
-| `mcp_adp.py` | MCP tool servers, over Streamable HTTP, with their sign-in |
+| `mcp_adp.py` | MCP tool servers, over Streamable HTTP, with their sign-in and their icons |
 | `cliproxy_adp.py` | CLIProxyAPI's management API: the proxy's ChatGPT logins |
 | `docdb_adp.py` | MongoDB |
 | `redis_adp.py` | Redis: only the user login writes to it |

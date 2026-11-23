@@ -91,7 +91,9 @@ need it, and turn off the tools they do not.
 An MCP server may state its own icons and its website when a client opens (its
 `serverInfo`). They are read with the tools, from the same open client, and kept with
 the copy: written and replaced with it, and dropped with it when a new address needs a
-sign-in. Only the backend can read them, as most servers refuse a client that has not
+sign-in. A connection kept before icons were read has none until it is refreshed. The
+client is kept open, so they are what the server said when it was opened: a new icon at
+the server shows after a restart, or a change of address, headers or pass. Only the backend can read them, as most servers refuse a client that has not
 signed in, so the app gets them from the connection.
 
 - **An icon is kept as a `data:` address**, so the app never reaches a host for one. One
