@@ -5,21 +5,24 @@ and the SDK's client, so the protocol is the real one. Only the transport is not
 """
 
 import asyncio
+import base64
 import contextlib
 import json
 from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx2
 import pytest
 from bson import ObjectId
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
+from mcp.types import Icon
 from pydantic import ValidationError
 
-from app.adapters.mcp_adp import McpAdapterClass, McpFailure, McpServer
+from app.adapters.mcp_adp import McpAbout, McpAdapterClass, McpFailure, McpServer
 from app.core.errors import InvalidError, NotFoundError, UpstreamError
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
@@ -206,6 +209,108 @@ async def test_a_forgotten_server_s_client_is_closed_and_a_new_one_opened_when_n
     await mcp.list_tools(server)
 
     assert servers.opened == [server, server]
+    await mcp.close()
+
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 24
+_PNG_DATA = f"data:image/png;base64,{base64.b64encode(_PNG).decode()}"
+_SVG = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+
+
+class _IconHost(httpx2.AsyncBaseTransport):
+    """The web, as far as icons go: what each address answers, and what was asked."""
+
+    def __init__(self) -> None:
+        self.asked: list[httpx2.Request] = []
+        self.answers: dict[str, httpx2.Response] = {
+            "https://cdn.example.com/dark.svg": httpx2.Response(
+                200, headers={"Content-Type": "image/svg+xml; charset=utf-8"}, content=_SVG
+            ),
+            "https://cdn.example.com/page.png": httpx2.Response(
+                200, headers={"Content-Type": "text/html"}, content=b"<html></html>"
+            ),
+            "https://cdn.example.com/huge.png": httpx2.Response(
+                200, headers={"Content-Type": "image/png"}, content=b"\0" * (64 * 1024 + 1)
+            ),
+            "https://cdn.example.com/moved.png": httpx2.Response(
+                302, headers={"Location": "https://cdn.example.com/dark.svg"}
+            ),
+        }
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self.asked.append(request)
+        return self.answers.get(str(request.url), httpx2.Response(404))
+
+
+def _iconed(*icons: Icon, website_url: str | None = "https://tracker.example.com") -> MCPServer:
+    return MCPServer("tracker", website_url=website_url, icons=list(icons))
+
+
+async def test_a_server_s_icons_are_held_as_data_and_only_the_usable_ones() -> None:
+    host = _IconHost()
+    servers = _Servers(
+        **{
+            "https://iconed.example.com/mcp": _iconed(
+                Icon(src="https://cdn.example.com/page.png", mime_type="image/png"),
+                Icon(src=_PNG_DATA, mime_type="image/png", sizes=["48x48"], theme="light"),
+                Icon(src="http://cdn.example.com/plain.png"),
+                Icon(src="https://cdn.example.com/huge.png"),
+                Icon(src="https://cdn.example.com/moved.png"),
+                Icon(src="https://cdn.example.com/gone.png"),
+                Icon(src="data:image/gif;base64,R0lGODlh"),
+                Icon(src="https://cdn.example.com/dark.svg", theme="dark"),
+            )
+        }
+    )
+    mcp = McpAdapterClass(servers.open, transport=host)
+    server = McpServer("https://iconed.example.com/mcp", (("X-Key", "secret"),), token="a-pass")
+
+    about = await mcp.about(server)
+
+    assert about.website_url == "https://tracker.example.com"
+    assert [(icon.mime_type, icon.sizes, icon.theme) for icon in about.icons] == [
+        ("image/png", ("48x48",), "light"),
+        ("image/svg+xml", (), "dark"),
+    ]
+    assert about.icons[0].src == _PNG_DATA
+    assert base64.b64decode(about.icons[1].src.split(",", 1)[1]) == _SVG
+    # The plain http one is never asked for, and nothing that lets us in goes with an icon.
+    assert {str(request.url) for request in host.asked} == {
+        "https://cdn.example.com/page.png",
+        "https://cdn.example.com/huge.png",
+        "https://cdn.example.com/moved.png",
+        "https://cdn.example.com/gone.png",
+        "https://cdn.example.com/dark.svg",
+    }
+    assert all(
+        "authorization" not in request.headers and "x-key" not in request.headers
+        for request in host.asked
+    )
+    # The server's own client is the one already open: it is not opened again.
+    assert len(servers.opened) == 1
+    await mcp.close()
+
+
+async def test_at_most_three_icons_are_kept_in_the_server_s_order() -> None:
+    icons = [Icon(src=_PNG_DATA, sizes=[f"{n}x{n}"]) for n in (16, 32, 48, 64)]
+    servers = _Servers(**{"https://iconed.example.com/mcp": _iconed(*icons)})
+    mcp = McpAdapterClass(servers.open, transport=_IconHost())
+
+    about = await mcp.about(McpServer("https://iconed.example.com/mcp"))
+
+    assert [icon.sizes for icon in about.icons] == [("16x16",), ("32x32",), ("48x48",)]
+    await mcp.close()
+
+
+async def test_a_server_that_says_nothing_or_cannot_be_reached_has_nothing_to_show() -> None:
+    servers = _Servers(
+        **{"https://odd.example.com/mcp": _iconed(website_url="javascript:alert(1)")}
+    )
+    mcp = McpAdapterClass(servers.open, transport=_IconHost())
+
+    assert await mcp.about(McpServer(_URL)) == McpAbout()
+    assert await mcp.about(McpServer("https://odd.example.com/mcp")) == McpAbout()
+    assert await mcp.about(McpServer("https://nowhere.example.com/mcp")) == McpAbout()
     await mcp.close()
 
 

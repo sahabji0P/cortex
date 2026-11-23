@@ -4,6 +4,10 @@ MCP adapter: the tool servers a gem can be connected to, reached over Streamable
 A server is known here only by its address and the headers sent with every request to
 it. Two things are asked of one: which tools it has, and to run a call of one.
 
+A server may also say how it shows itself: its icons and its website (`about`). An icon
+it names by address is fetched here, and kept as a `data:` address, so the app never
+reaches a host for one.
+
 A client is kept open for each server and shared by every call to it. The protocol's
 newer versions want a tool listed before it is called, and its older ones open with a
 handshake, so a client made for each call would pay for both every time. The SDK's
@@ -60,17 +64,19 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken, ProtectedResourceMetadata
 from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_server_url
 from mcp.shared.exceptions import MCPError
-from mcp.types import CallToolResult, ContentBlock
+from mcp.types import CallToolResult, ContentBlock, Icon
 from pydantic import AnyUrl, BaseModel, ValidationError
 
 from app.core.times import UtcDatetime
 
 __all__ = [
+    "McpAbout",
     "McpAdapterClass",
     "McpAuthServer",
     "McpAuthorization",
     "McpChallenge",
     "McpFailure",
+    "McpIcon",
     "McpRegistration",
     "McpResult",
     "McpServer",
@@ -92,6 +98,14 @@ _LIST_PAGES_MAX = 50
 _SIGN_IN_SECONDS = 10.0
 # The name this backend registers under, which a sign-in page may show the user.
 _CLIENT_NAME = "Cortex"
+# A server's icons: which kinds of picture are kept, how large one may be, how many are
+# kept and looked at, and how long fetching them may take, all of them at once.
+_ICON_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/svg+xml"})
+_ICON_MAX_BYTES = 64 * 1024
+_ICONS_KEPT = 3
+_ICONS_LOOKED_AT = 8
+_ICON_SECONDS = 5.0
+_WEBSITE_MAX_LENGTH = 2_000
 
 _log = logging.getLogger(__name__)
 
@@ -120,6 +134,25 @@ class McpTool:
     title: str | None
     description: str
     input_schema: dict[str, object]  # JSON schema
+
+
+@dataclass(frozen=True, slots=True)
+class McpIcon:
+    """One of a server's icons, held here: `src` is always a `data:` address."""
+
+    src: str
+    mime_type: str
+    sizes: tuple[str, ...] = ()
+    # Which background it is made for. None: either.
+    theme: Literal["light", "dark"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class McpAbout:
+    """How a server shows itself, as far as it says: its icons, and its website."""
+
+    icons: tuple[McpIcon, ...] = ()
+    website_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +397,31 @@ class McpAdapterClass:
                 name, dict(arguments), read_timeout_seconds=_CALL_SECONDS
             )
         return McpResult(text=_text(result), is_error=result.is_error)
+
+    async def about(self, server: McpServer) -> McpAbout:
+        """How the server shows itself: its icons, and its website, as it said when opened.
+
+        Never raises: a server that cannot be reached, or says nothing, has nothing to
+        show. Only icons this backend can hold are kept (see `_icon`), the first
+        `_ICONS_KEPT` of them in the server's order. One named by an `https:` address
+        is fetched, and none of the server's headers or its pass go with it.
+        """
+        try:
+            async with self._using(server) as client:
+                info = client.server_info
+        except McpFailure:
+            return McpAbout()
+        if info is None:
+            return McpAbout()
+        stated = (info.icons or [])[:_ICONS_LOOKED_AT]
+        async with httpx2.AsyncClient(
+            transport=self._transport, timeout=_ICON_SECONDS, follow_redirects=False
+        ) as http:
+            held = await asyncio.gather(*(_icon(http, icon) for icon in stated))
+        return McpAbout(
+            icons=tuple(icon for icon in held if icon is not None)[:_ICONS_KEPT],
+            website_url=_website(info.website_url),
+        )
 
     async def forget(self, server: McpServer) -> None:
         """Close the client kept for a server that is no longer used, if there is one."""
@@ -798,6 +856,66 @@ def _resource(url: str, prm: ProtectedResourceMetadata) -> str:
     if check_resource_allowed(requested_resource=resource, configured_resource=named):
         return named
     return resource
+
+
+async def _icon(http: httpx2.AsyncClient, icon: Icon) -> McpIcon | None:
+    """An icon a server stated, held as a `data:` address. None if it cannot be kept.
+
+    Kept: a `data:` address in base64, or an `https:` one that answers 200 itself, with
+    no redirect, within `_ICON_SECONDS`. Its kind is what came back (the address's own,
+    or the answer's `Content-Type`), not what the server said it would be, and it has
+    to be one of `_ICON_TYPES` and at most `_ICON_MAX_BYTES` long.
+    """
+    try:
+        if icon.src.startswith("data:"):
+            kind, data = _data(icon.src)
+        elif urlsplit(icon.src).scheme == "https":
+            async with asyncio.timeout(_ICON_SECONDS):
+                kind, data = await _fetch(http, icon.src)
+        else:
+            return None
+    except (httpx2.HTTPError, httpx2.InvalidURL, TimeoutError, ValueError):
+        return None
+    if kind not in _ICON_TYPES or not data or len(data) > _ICON_MAX_BYTES:
+        return None
+    return McpIcon(
+        src=f"data:{kind};base64,{base64.b64encode(data).decode()}",
+        mime_type=kind,
+        sizes=tuple(icon.sizes or ()),
+        theme=icon.theme,
+    )
+
+
+def _data(src: str) -> tuple[str, bytes]:
+    """The kind and the bytes of a `data:` address in base64. Raises `ValueError`."""
+    head, _, payload = src.removeprefix("data:").partition(",")
+    kind, *params = head.split(";")
+    if "base64" not in params or len(payload) > _ICON_MAX_BYTES * 4 // 3 + 4:
+        raise ValueError("not a data address this backend holds")
+    return kind.strip().lower(), base64.b64decode(payload, validate=True)
+
+
+async def _fetch(http: httpx2.AsyncClient, src: str) -> tuple[str, bytes]:
+    """The kind and the bytes an address answers with. Raises `ValueError` if it is
+    not a 200, or longer than `_ICON_MAX_BYTES`: no more than that is read."""
+    async with http.stream("GET", src) as answer:
+        if answer.status_code != 200:
+            raise ValueError(f"it answered {answer.status_code}")
+        kind = answer.headers.get("content-type", "").split(";")[0].strip().lower()
+        data = bytearray()
+        async for chunk in answer.aiter_bytes():
+            data.extend(chunk)
+            if len(data) > _ICON_MAX_BYTES:
+                raise ValueError("too large")
+    return kind, bytes(data)
+
+
+def _website(url: str | None) -> str | None:
+    """A server's website, if it is an http or https address of a usable length."""
+    if url is None or len(url) > _WEBSITE_MAX_LENGTH:
+        return None
+    parts = urlsplit(url)
+    return url if parts.scheme in ("http", "https") and parts.hostname else None
 
 
 def _text(result: CallToolResult) -> str:
