@@ -700,8 +700,11 @@ A connection, as every route but `DELETE` answers:
 - **`tools` is a copy**, made at `checked_at`. A gem is offered the copy. It changes when
   the connection is added, when its `url` or `headers` change, and on a refresh.
   `tools_left_out` counts tools the server lists that cannot be used here.
-- **`icons` and `website_url` are the server's own**, as it stated them (MCP's
-  `serverInfo`) when its tools were last copied, and they change with the copy. Only
+- **`icons` and `website_url` are the server's own** (MCP's `serverInfo`), written with
+  each copy of the tools. A connection added before them has none until it is
+  refreshed. They are what the server said when the backend last opened its client to
+  it, so a change of icon at the server shows after a restart of the backend, or a
+  change of the connection's address, headers or sign-in. Only
   this backend can read them: most servers refuse a client that is not signed in. Each
   icon's `src` is a `data:` address, never a link: the backend fetched it, so the app
   never reaches a host for an icon. It is PNG, JPEG, WebP or SVG, at most 64 KB. `sizes`
