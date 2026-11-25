@@ -14,6 +14,10 @@ memory, for each gem, is a `GemConversation`:
   `late_results.py`): one `LateResults` for the gem, whoever made the call. A result is
   told in the call if one holds the gem, and in writing otherwise.
 
+The user can reset a gem (`reset`): it starts again, knowing nothing from before. A
+reset takes the gem as a reply does, so a message sent meanwhile is answered by the
+gem as it is after the reset.
+
 A gem with none of these is not kept. Running calls live in this process's memory, so a
 restart loses them. A placeholder whose call is gone is closed with a stub saying so,
 before the next reply is made.
@@ -28,7 +32,7 @@ from typing import Any, Literal, Protocol
 
 from bson import ObjectId
 
-from app.core.errors import NotFoundError
+from app.core.errors import ConflictError, NotFoundError
 from app.entities.conversation_store import ConversationStoreClass, Remembered
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
@@ -81,6 +85,16 @@ class Caller(Protocol):
     def results_came(self) -> None:
         """A late result has come in, to be told in the call."""
         ...
+
+
+class _Resetting:
+    """A reset of a gem, which holds the gem as a reply does until it is done."""
+
+    def __init__(self) -> None:
+        self.over = asyncio.Event()
+
+    def cut(self) -> None:
+        """A reset is not cut: whoever comes next waits for it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +192,38 @@ class ConversationEntityClass:
         kept.call = None
         self._quiet(key)
         self.let_go(key)
+
+    async def reset(self, gem_id: str) -> None:
+        """Reset a gem: from here on, it knows nothing from before. Its config stays.
+
+        A reply being written is cut and stored first, and calls still running in the
+        background are stopped, their results dropped: what they would answer is gone.
+        The log keeps everything: the reset is an entry of its own. Raises
+        `NotFoundError` if there is no such gem, `ConflictError` while a call holds it,
+        and what stopped the reset if it could not be stored.
+        """
+        if not await self._gems.exists(gem_id):
+            raise NotFoundError("Gem")
+        key, found = gem_key(gem_id), ObjectId(gem_id)
+        kept = self.gem(key)
+        if kept.call is not None:
+            raise ConflictError("the gem is in a call")
+        resetting = _Resetting()
+        previous, kept.writer = kept.writer, resetting
+        try:
+            if previous is not None:
+                previous.cut()
+                await previous.over.wait()
+            await self.log.open(found)
+            await self.log.record_reset(found)
+            # Only once the reset is stored. A result that comes meanwhile is not told:
+            # the reset holds the gem.
+            kept.late.stop()
+        finally:
+            resetting.over.set()
+            if kept.writer is resetting:
+                kept.writer = None
+            self.let_go(key)
 
     async def messages(self, gem_id: str) -> list[Message]:
         """A gem's conversation as it is shown, oldest first.
@@ -281,10 +327,10 @@ class ConversationEntityClass:
         """Everything the request written down as entry `seq` was sent.
 
         Its items are what the gem remembered by then: every remembered entry before
-        the request's own, in order. With them come the model, instructions and tools
-        in force. `exact` is False if the items do not come to the count the request
-        wrote down: an entry before it was lost. Raises `NotFoundError` if `seq` is not
-        a request of this gem.
+        the request's own since the gem was last reset, in order. With them
+        come the model, instructions and tools in force. `exact` is False if the items
+        do not come to the count the request wrote down: an entry before it was lost.
+        Raises `NotFoundError` if `seq` is not a request of this gem.
         """
         if not await self._gems.exists(gem_id):
             raise NotFoundError("Gem")
@@ -293,7 +339,7 @@ class ConversationEntityClass:
         request = await self._store.one(found, seq)
         if request is None or request.kind != "request.sent":
             raise NotFoundError("Request")
-        items = [entry.data.item for entry in await self._store.load(found) if entry.seq < seq]
+        items = [entry.data.item for entry in await self._store.load(found, before=seq)]
         return {
             "request": request.data.get("request"),
             "items": items,

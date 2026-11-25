@@ -34,6 +34,17 @@ async def get_chat(gem_id: str, service: GemsServiceRegistry.V1) -> GemsModels.V
     return await service.get_chat(gem_id)
 
 
+@router.post("/{gem_id}/reset", status_code=204)
+async def reset_gem(gem_id: str, service: GemsServiceRegistry.V1) -> Response:
+    """Reset the gem: it starts again, knowing nothing from before. Its config stays.
+
+    A reply being written is cut first. Refused with 409 while the gem is in a call.
+    The gem's log keeps everything, with the reset as an entry of its own.
+    """
+    await service.reset_gem(gem_id)
+    return Response(status_code=204)
+
+
 @router.get("/{gem_id}/log")
 async def get_log(
     gem_id: str,

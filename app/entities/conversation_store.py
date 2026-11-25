@@ -8,9 +8,9 @@ same shape: its number in the log (`seq`), when it was written (`at`), what it i
 
 What an entry is, is said by its kind. Some kinds are what the gem remembers
 (`REMEMBERED`): each holds one item exactly as a model is sent it, in `data.item`. The
-gem's conversation is those entries, in the order of their numbers, and nothing else:
-every reply in writing, and every call, starts from them. That is what makes the
-database the truth.
+gem's conversation is those entries since it was last reset, in the order of their
+numbers, and nothing else: every reply in writing, and every call, starts from them.
+That is what makes the database the truth.
 
 - `user.said`     what the user said, typed or spoken
 - `note.written`  a line of ours: a call started or ended, the gem is to greet
@@ -26,6 +26,10 @@ finished. Those are never sent to a model. They are there to be looked at (see
 
 Each thing is written once, as the kind of entry it is. What the user said is not also
 written as something that happened: the entry that remembers it is the record of it.
+
+A gem can be reset (`gem.reset`): it starts again, knowing nothing from before. Nothing
+is taken out of the log: the conversation is what the gem remembers after the latest
+such entry.
 
 What is kept in memory is in `conversation_ent.py` and `gem_log.py`. A gem's log goes
 when the gem does (see `GemEntityClass.delete`).
@@ -48,6 +52,7 @@ from app.entities.model import Item
 
 __all__ = [
     "REMEMBERED",
+    "RESET",
     "ConversationStoreClass",
     "Kept",
     "LogEntry",
@@ -69,6 +74,9 @@ REMEMBERED: tuple[str, ...] = (
     "tool.called",
     "tool.result",
 )
+
+# The kind of entry that resets a gem: its conversation starts again after it.
+RESET = "gem.reset"
 
 _KIND_BY_ROLE = {"user": "user.said", "developer": "note.written", "assistant": "gem.said"}
 
@@ -183,11 +191,26 @@ class ConversationStoreClass:
     def __init__(self, docdb: DocDBAdapterClass) -> None:
         self._docdb = docdb
 
-    async def load(self, gem_id: ObjectId) -> list[Remembered]:
-        """The gem's whole conversation, oldest first: the entries it remembers."""
+    async def load(self, gem_id: ObjectId, *, before: int | None = None) -> list[Remembered]:
+        """The gem's conversation, oldest first: what it remembers since it was last reset.
+
+        With `before`, the conversation as it stood just before that entry.
+        """
+        upto: dict[str, Any] = {} if before is None else {"seq": {"$lt": before}}
+        reset = await self._docdb.get_many(
+            LogEntry,
+            filters={"gem_id": gem_id, "kind": RESET, **upto},
+            sort=[("seq", -1)],
+            limit=1,
+        )
+        since = reset[0].seq + 1 if reset else 0
         return await self._docdb.get_many(
             Remembered,
-            filters={"gem_id": gem_id, "kind": {"$in": list(REMEMBERED)}},
+            filters={
+                "gem_id": gem_id,
+                "kind": {"$in": list(REMEMBERED)},
+                "seq": {"$gte": since, **upto.get("seq", {})},
+            },
             sort=[("seq", 1)],
         )
 

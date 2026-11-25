@@ -127,6 +127,12 @@ loses nothing: a socket that closes cuts its replies, and they are stored as cut
   old results are not cleared. The context grows with every message, and quickly when
   tools are used. A message is at most 20,000 characters, so one stray paste cannot ride
   along in every request after it.
+- **The user can reset the gem.** It then starts again, knowing nothing from before.
+  A reset takes the gem as a reply does: one being written is cut first, a message sent
+  meanwhile waits and is answered after the reset, and a call refuses it. Background
+  calls are stopped. Nothing is deleted: the log gets a `gem.reset` entry, and the
+  conversation is what the gem remembers after the latest one (see
+  [the contract](chat-contract.md#post-v1gemsgem_idreset)).
 - **Deleting a gem** deletes its conversation and its log, and a background result of a
   deleted gem is dropped.
 

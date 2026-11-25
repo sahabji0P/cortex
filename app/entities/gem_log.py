@@ -7,7 +7,8 @@ where every entry gets its number, and the one place entries are written from.
 
 Some kinds are what the gem remembers: what the user said, a line of ours, what the gem
 said, a tool call and its result (`conversation_store.REMEMBERED`). Each holds one item
-as a model is sent it, and the gem's conversation is those entries in order. A
+as a model is sent it, and the gem's conversation is those entries in order, since its
+last reset. A
 conversation hands each one over the moment it joins its history (`Recording.remember`),
 so the log's order is the order the model was sent things in.
 
@@ -15,6 +16,10 @@ The other kinds are what happened. No model is ever sent them. Each belongs to a
 unless it says otherwise:
 
 - `call.opened`, `call.closed`   a call began, or ended. No turn. Writing has neither.
+- `gem.reset`        the user reset the gem. No turn. The gem knows nothing from
+                     before it: its conversation starts again after it. Unlike the
+                     rest, it cannot be lost: a reset is done only once it is stored
+                     (`record_reset`).
 - `turn.opened`      a reply was asked for. `by` says by what: the `user`, the `gem`
                      speaking first, or a `background_result` that is to be told.
                      `mode` is `call` or `chat`.
@@ -25,8 +30,8 @@ unless it says otherwise:
                      change found later (the way to the provider) is written just
                      before the request it applies to, in that request's turn.
 - `request.sent`     a request went to the model. It was sent everything the gem
-                     remembered by then: every remembered entry before this one, and
-                     nothing else. `count` is how many that is.
+                     remembered by then: every remembered entry before this one since
+                     the last reset, and nothing else. `count` is how many that is.
 - `request.done`     how the request ended: `done`, `failed`, or `cut` while the model
                      was still producing. Everything the model produced, in full: its
                      text and its tool calls. When the first of it came, the tokens
@@ -101,6 +106,7 @@ from bson import ObjectId
 
 from app.entities.conversation_store import (
     REMEMBERED,
+    RESET,
     ConversationStoreClass,
     LogEntry,
     remembered,
@@ -246,6 +252,18 @@ class LogEntityClass:
             return
         (seq,) = self.take(gem_id)
         self._add(remembered(gem_id, seq, added, mode))
+
+    async def record_reset(self, gem_id: ObjectId) -> None:
+        """Write down that the gem is reset, once it is stored.
+
+        The log must be open. This is not something that happened, to be lost if it
+        cannot be written: the gem's conversation starts after it. So it is written at
+        once, and raises if it could not be stored.
+        """
+        (seq,) = self.take(gem_id)
+        entry = LogEntry(gem_id=gem_id, kind=RESET, seq=seq, at=datetime.now(UTC))
+        await self._store.write([entry])
+        self._tell(gem_id, entry.shown())
 
     async def written(self, gem_id: ObjectId | None = None) -> None:
         """Wait until every entry so far has been written, or could not be: of one gem, or all."""

@@ -93,6 +93,9 @@ class GemsServiceV1Class:
             ]
         )
 
+    async def reset_gem(self, gem_id: str) -> None:
+        await self.conversations.reset(gem_id)
+
     async def get_log(
         self, gem_id: str, *, before: int | None, limit: int
     ) -> GemsModels.V1.Output.Log:

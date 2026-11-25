@@ -1,9 +1,10 @@
 """What every test checks without asking: a request is sent what its gem remembers.
 
 The gem's log holds nothing of what a request was sent. It is read back as every entry
-the gem remembered before the request (see `gem_log.py`). That is only true while a
-conversation hands each thing to the log before the request that carries it, so every
-request made in every test is checked against what its gem remembers at that moment.
+the gem remembered before the request, since the gem was last reset (see
+`gem_log.py`). That is only true while a conversation hands each thing to the log before
+the request that carries it, so every request made in every test is checked against what
+its gem remembers at that moment.
 """
 
 from collections.abc import Iterator, Sequence
@@ -12,7 +13,7 @@ from typing import Any
 import pytest
 from bson import ObjectId
 
-from app.entities.conversation_store import REMEMBERED, LogEntry
+from app.entities.conversation_store import REMEMBERED, RESET, LogEntry
 from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, Mode
 from app.entities.model import Item
@@ -45,12 +46,11 @@ def every_request_is_sent_what_its_gem_remembers(monkeypatch: pytest.MonkeyPatch
         collections = getattr(getattr(log._store, "_docdb", None), "collections", None)
         if collections is None:
             return None  # not one of the tests' own stores
-        stored = {
-            document["seq"]: document["data"]["item"]
-            for document in collections.get("GemLog", [])
-            if document["gem_id"] == gem_id and document["kind"] in REMEMBERED
-        }
-        return [item for _, item in sorted({**stored, **handed.get((id(log), gem_id), {})}.items())]
+        documents = [d for d in collections.get("GemLog", []) if d["gem_id"] == gem_id]
+        since = max((d["seq"] for d in documents if d["kind"] == RESET), default=-1)
+        stored = {d["seq"]: d["data"]["item"] for d in documents if d["kind"] in REMEMBERED}
+        everything = {**stored, **handed.get((id(log), gem_id), {})}
+        return [item for seq, item in sorted(everything.items()) if seq > since]
 
     def requesting(self: Recording, turn: int | None, items: Sequence[Item], think: bool) -> Any:
         remembered = remembered_now(self)

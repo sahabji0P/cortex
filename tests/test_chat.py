@@ -16,11 +16,11 @@ import pytest
 from bson import ObjectId
 from pydantic import BaseModel
 
-from app.core.errors import NotFoundError
+from app.core.errors import ConflictError, NotFoundError
 from app.entities import chat_ent, conversation_ent, late_results
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
-from app.entities.conversation_ent import ConversationEntityClass
+from app.entities.conversation_ent import ConversationEntityClass, gem_key
 from app.entities.conversation_store import (
     REMEMBERED,
     ConversationStoreClass,
@@ -2457,3 +2457,121 @@ async def test_a_client_that_goes_before_its_message_is_answered_leaves_it_store
     ]
     await _close(other, other_linked)
     assert setup.conversations._kept == {}
+
+
+# ---- resetting a gem
+
+
+async def _reset(setup: _Chat, gem_id: str | None = None) -> None:
+    await setup.conversations.reset(str(setup.gem.id) if gem_id is None else gem_id)
+
+
+async def test_a_reset_gem_starts_again_and_its_log_keeps_everything() -> None:
+    setup = await _chat(_said("Hi."), _said("Hello."))
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done")
+    before = await setup.stored()
+
+    await _reset(setup)
+
+    assert await setup.stored() == []
+    assert await setup.shown() == []
+    socket.send(setup.gem.id, "who am I?")
+    await socket.until("chat.done", 2)
+    # Nothing from before is sent, and the time is given again, as to a new gem.
+    assert setup.llm.requests[1]["input"] == [TIME_LINE, {"role": "user", "content": "who am I?"}]
+    assert await setup.shown() == [("user", "who am I?"), ("gem", "Hello.")]
+    # The log keeps all of it, with the reset in between.
+    gem_id = str(setup.gem.id)
+    entries, _ = await setup.conversations.log_page(gem_id)
+    kinds = [entry["kind"] for entry in entries]
+    assert kinds.count("gem.reset") == 1
+    reset = kinds.index("gem.reset")
+    assert entries[reset]["turn"] is None
+    assert kinds[:reset].count("user.said") == kinds[reset:].count("user.said") == 1
+    # Each request still reads back exactly what it was sent, on either side of the reset.
+    sent = [
+        await setup.conversations.log_sent(gem_id, entry["seq"])
+        for entry in entries
+        if entry["kind"] == "request.sent"
+    ]
+    assert [one["exact"] for one in sent] == [True, True]
+    assert [one["items"] for one in sent] == [before[:2], setup.llm.requests[1]["input"]]
+    await _close(socket, linked)
+
+
+async def test_a_reset_cuts_the_reply_being_written_and_forgets_it_too() -> None:
+    never = asyncio.Event()
+    setup = await _chat([_delta("Once upon "), never])
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "a story")
+    await socket.until("chat.text")
+
+    await _reset(setup)
+
+    assert socket.chat()[-1] == ("chat.cut", "Once upon…")
+    assert await setup.stored() == []
+    assert setup.conversations._kept == {}
+    await _close(socket, linked)
+
+
+async def test_a_reset_stops_a_search_running_in_the_background() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), search=searches)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+
+    await _reset(setup)
+    await _settle()
+
+    # Its placeholder is gone with the rest, so its result is never told.
+    assert searches.cancelled == [_WEATHER]
+    assert await setup.stored() == []
+    assert setup.conversations._kept == {}
+    await _close(socket, linked)
+
+
+async def test_a_gem_in_a_call_is_not_reset() -> None:
+    setup = await _chat(_said("Hi."))
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "hello")
+    await socket.until("chat.done")
+    kept = setup.conversations.gem(gem_key(str(setup.gem.id)))
+    kept.call = cast("Any", object())
+
+    with pytest.raises(ConflictError, match="the gem is in a call"):
+        await _reset(setup)
+
+    kept.call = None
+    assert await setup.shown() == [("user", "hello"), ("gem", "Hi.")]
+    await _close(socket, linked)
+
+
+async def test_a_reset_that_cannot_be_stored_fails_and_forgets_nothing() -> None:
+    searches = _Searches(_WEATHER)
+    setup = await _chat(_looks(), _said("Noon."), search=searches)
+    socket, linked = await _open(setup.service())
+    await _cut_while_searching(setup, socket)
+    shown = await setup.shown()
+    setup.docdb.breaks_after = 0
+
+    with pytest.raises(ConnectionError):
+        await _reset(setup)
+    await _settle()
+
+    setup.docdb.breaks_after = None
+    assert await setup.shown() == shown
+    # The search in the background carries on: its placeholder is still remembered.
+    assert searches.cancelled == []
+    assert setup.conversations.gem(gem_key(str(setup.gem.id))).late.pending
+    await _close(socket, linked)
+    searches.gates[_WEATHER].set()
+
+
+@pytest.mark.parametrize("gem_id", [str(ObjectId()), "not-an-id"])
+async def test_resetting_a_gem_that_is_not_there_is_a_404(gem_id: str) -> None:
+    setup = await _chat()
+
+    with pytest.raises(NotFoundError):
+        await _reset(setup, gem_id)
