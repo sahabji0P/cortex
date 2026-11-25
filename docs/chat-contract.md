@@ -8,8 +8,9 @@ The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
 
 ## Plain HTTP
 
-- Gems: `/v1/gems`, and a gem's conversation, calls included, `GET /v1/gems/{gem_id}/chat`. A
-  gem's fields are in [Gems](gems.md#a-gems-config). Its config is version 3. A gem made with
+- Gems: `/v1/gems`, a gem's conversation, calls included, `GET /v1/gems/{gem_id}/chat`,
+  and [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset), which has it start again. A gem's
+  fields are in [Gems](gems.md#a-gems-config). Its config is version 3. A gem made with
   `instructions` blank or left out is given the default instructions, which come back in
   the answer; a change stores `instructions` as sent, so blank means none.
 - A gem's log, everything that happened with it: `GET /v1/gems/{gem_id}/log` (see
@@ -319,6 +320,25 @@ The conversation so far, calls included, oldest first, for showing on screen:
 
 Deleting a gem deletes its conversation, and its log with it.
 
+### `POST /v1/gems/{gem_id}/reset`
+
+Resets the gem: it starts again, knowing nothing from before. A reset is of everything
+the gem knows. Today that is its conversation, so its history comes back empty; what
+the gem comes to know in other ways later is reset with it. The gem itself, its config
+and its log stay. No body. 204 when it is done.
+
+- A reply being written to the gem is cut first, with `chat.cut` to its socket as for any
+  cut, and is forgotten with the rest.
+- Tool calls still running in the background are stopped, and their results are never
+  told: what they would answer is gone.
+- While the gem is in a call it is refused, 409 with "the gem is in a call".
+- A gem that is not there is a 404.
+- Nothing is taken out of the log: the reset is an entry of its own, `gem.reset`, and
+  the conversation is what the gem remembers after it. The next message is given the
+  time again, as a new gem's first is.
+- What a tool did (a message sent, a file written) is not undone: only what the gem
+  knows is reset.
+
 ## A gem's log
 
 The backend writes down everything that happens with a gem: what it remembers, every
@@ -349,9 +369,9 @@ ended, not as running.
 
 ### What the gem remembers
 
-Five kinds are what the gem remembers. The gem's conversation is these entries, in the
-order of `seq`, and nothing else: every reply and every call starts from them, and no
-model is ever sent anything else from the log. Each has the same fields:
+Five kinds are what the gem remembers. The gem's conversation is these entries since the
+latest `gem.reset`, in the order of `seq`, and nothing else: every reply and every call
+starts from them, and no model is ever sent anything else from the log. Each has the same fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -380,6 +400,7 @@ Every other kind is something that happened. No model is ever sent them.
 | `kind` | Its own fields | Meaning |
 | --- | --- | --- |
 | `call.opened`, `call.closed` | none | A call began, or ended. No turn. Writing has neither |
+| `gem.reset` | none | The user reset the gem (see [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset)). No turn. The gem knows nothing from before it: its conversation is the remembered entries after the latest one |
 | `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) or `background_result` (results of calls that went on in the background are to be told, with nothing new from the user). `mode` is `call` or `chat` |
 | `settings.changed` | any of `model`, `instructions`, `tools` | What the gem's requests are made with differs from what was last written down. Only the parts that changed are there, each in full (see below). Written before what it applies to: in writing, before the reply's `turn.opened`; in a call, just after `call.opened`, before the call's first line. Then it has no turn, and holds from there on. A change found later, at a request, has that request's turn (see below) |
 | `request.sent` | `request`, `attempt`, `think`, `count` | A request went to the model. `request` is its number for this gem. `attempt` is always 1 for now: a request the provider's library tries again by itself is not seen. `think` is whether the model was asked to think first. `count` is how many items it was sent (see below) |
@@ -390,11 +411,12 @@ Every other kind is something that happened. No model is ever sent them.
 | `turn.closed` | `outcome`, `error` | The reply was settled into what the gem remembers. `outcome` is `finished`, `cut` or `failed`. `error` is why it failed, or null. What was kept of the reply is not here: it is the turn's `gem.said` entries. A turn closed as `cut` with no `gem.said` kept nothing of its text |
 
 **What a request was sent.** A request was sent every remembered entry before it in the
-log, in order of `seq`, and nothing else: everything the gem remembers is added before
-the request that carries it. `count` is how many items that was. So to show what request
-N was sent, take the remembered entries with a lower `seq` than its `request.sent`, or
-ask `GET /v1/gems/{gem_id}/log/{seq}/sent`. If they do not come to `count`, an entry
-before it was lost. Besides its items, a request is sent the instructions and the tools
+log since the latest `gem.reset` before it, in order of `seq`, and nothing else:
+everything the gem remembers is added before the request that carries it. `count` is
+how many items that was. So to show what request N was sent, take the remembered
+entries between that reset (or the start) and its `request.sent`, or ask
+`GET /v1/gems/{gem_id}/log/{seq}/sent`. If they do not come to `count`, an entry before
+it was lost. Besides its items, a request is sent the instructions and the tools
 of the latest `settings.changed` before it.
 
 **How a request ended.** `outcome` is `done`, `failed` (with `error`), or `cut`: the
@@ -565,8 +587,8 @@ One entry, in full. A 404 if the gem or the entry is not there.
 ### `GET /v1/gems/{gem_id}/log/{seq}/sent`
 
 Everything the request written down as entry `seq` (a `request.sent`) was sent, read
-from the log by the backend: the `item` of every remembered entry before it, in order,
-and the settings in force.
+from the log by the backend: the `item` of every remembered entry before it since the
+latest reset, in order, and the settings in force.
 
 ```json
 {

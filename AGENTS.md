@@ -20,7 +20,7 @@ a change here needs a matching change there:
 | The standing socket `/v1/link` (`app/routers/link`; its frames in `docs/chat-contract.md`) | `src/link.rs`, `src/chat.rs`, `src/voice.rs`, `src/audio.rs` | Written chat, and calls: `call.start` and its settings, the call's audio and how it is played, `call.playback`, and the frames a call ends with |
 | `VoiceEvent` in `app/entities/voice_ent.py` | `src/protocol.rs` | A call's events, sent on the link with `call.` put before their type |
 | `/v1/gems` (`app/routers/gems`, `GemConfig` in `app/entities/gem_ent.py`) | `src/gem_routes.rs` | The gems and their configs |
-| `GET /v1/gems/{id}/chat` | `src/chat.rs` | A gem's conversation so far, a call's turns included |
+| `GET /v1/gems/{id}/chat`, `POST /v1/gems/{id}/reset` | `src/chat.rs` | A gem's conversation so far, a call's turns included, and resetting the gem so it starts again |
 | `GET /v1/gems/{id}/log`, `GET /v1/gems/{id}/log/{seq}`, `GET /v1/gems/{id}/log/{seq}/sent`, and the frames `log.watch`, `log.unwatch` and `log.entry` on the link (the entries are written down in `app/entities/gem_log.py`) | `src/trajectory.rs`, `src/log_store.rs`, and Home's figures in `src/ui/stats.rs` | A gem's log: every turn, every request to the model with its tokens and cost, every tool call, every change of model, instructions or tools, and what the gem remembers, as entries of one shape in the order they happened |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
 | `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | `src/connections.rs`, `src/ui/connections_view.rs` | The tool servers gems can use, their tools, which gem may use which, whether a gem finds its tools by searching (`deferred`), each server's own icons and website, and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
@@ -77,7 +77,8 @@ What that means in practice:
   Everything that happens with a gem is written down in one list, in order, each thing
   once, as the kind of entry it is. Five kinds (`user.said`, `note.written`,
   `gem.said`, `tool.called`, `tool.result`) are what the gem remembers, and its
-  conversation is those entries: `docs/chat-contract.md` says every kind and its fields.
+  conversation is those entries, since the latest `gem.reset`:
+  `docs/chat-contract.md` says every kind and its fields.
   A new thing a gem does (a new step of the loop, a new paid service) is a new kind of
   entry there, written through `gem_log.py`, and never a store of its own. Adding a
   kind, or a field of one, is a change to the contract. Writing what happened never
