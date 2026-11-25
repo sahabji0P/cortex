@@ -143,7 +143,7 @@ Never commit credentials.
 | Route | What it is |
 | --- | --- |
 | `WS /v1/link` | The standing socket: written chat, calls and their audio, and the log as it is written |
-| `/v1/gems` | The gems and their configs, a gem's conversation (`/chat`) and its log (`/log`) |
+| `/v1/gems` | The gems and their configs, a gem's conversation (`/chat`), its log (`/log`), and a reset (`/reset`) |
 | `/v1/darbar` | The Darbar text, which every gem is told first |
 | `/v1/connections` | The MCP tool servers, who may use them, and their sign-ins |
 | `/v1/providers/openai` | How OpenAI is reached: the API key or the proxy, and the proxy's accounts |

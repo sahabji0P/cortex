@@ -97,6 +97,7 @@ change, in [`app/entities/darbar_ent.py`](../app/entities/darbar_ent.py).
 | `PATCH /v1/gems/{gem_id}` | changes only the fields sent. Only `model`, `image` and `voice` may be null |
 | `DELETE /v1/gems/{gem_id}` | deletes it (204), with its conversation and its log. It is taken out of every connection that names it |
 | `GET /v1/gems/{gem_id}/chat` | its conversation so far, calls included |
+| `POST /v1/gems/{gem_id}/reset` | resets it (204): it starts again, knowing nothing from before. Its config and its log stay. 409 while it is in a call (see [the contract](chat-contract.md#post-v1gemsgem_idreset)) |
 | `GET /v1/gems/{gem_id}/log` | its log (see [Observability](observability.md)) |
 
 The Darbar text is read and set at `/v1/darbar` (see
