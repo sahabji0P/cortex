@@ -331,8 +331,9 @@ and its log stay. No body. 204 when it is done.
   cut, and is forgotten with the rest.
 - Tool calls still running in the background are stopped, and their results are never
   told: what they would answer is gone.
-- While the gem is in a call it is refused, 409 with "the gem is in a call".
-- A gem that is not there is a 404.
+- While the gem is in a call it is refused: a 409, `{"code": "conflict", "message": "the
+  gem is in a call"}`.
+- A gem that is not there is a 404, `{"code": "not_found", "message": "Gem not found"}`.
 - Nothing is taken out of the log: the reset is an entry of its own, `gem.reset`, and
   the conversation is what the gem remembers after it. The next message is given the
   time again, as a new gem's first is.
