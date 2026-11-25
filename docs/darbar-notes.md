@@ -45,7 +45,11 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Product questions are settled by trying them out with proper evals, not blindly.
 - Tools are the same in a call and in chat: the same tools, run the same way, by one copy of the code.
 - A tool call still running at a cut carries on in both. cancel_tool_call stops one, for any tool.
-- Nothing is cleared from the history, in a call or in chat. Keep it simple.
+- Nothing is cleared from the history by itself, in a call or in chat. Keep it simple.
+- Reset gem: the user resets a gem and it starts again, knowing nothing. Built for its conversation. The log keeps all of it.
+- A reset is of everything a gem knows: when Gyan Kosh comes, a reset clears that too.
+- Reset asks the user to confirm first. In the app: the side panel and the gem's settings.
+- No branches: one line of conversation, by design.
 - A stored result says what it is by a mark, never by its wording.
 - In a call the app shows a reply's words as they are heard: each word is sent with where it starts in the audio. The model's text is not sent early. Chat is unchanged.
 - A connection is an MCP server reached by address. Its tools are offered next to web search, in a call and in chat.
@@ -69,8 +73,8 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The log is the base. A new thing a gem does is a new kind of entry in it, never a store of its own.
 - Nothing is hidden in it: every request, what it was sent, its tokens, its cost, every tool call, every change of model, instructions or tools.
 - One log, one shape of entry: seq, at, kind, turn, and its own fields. Each thing is written once, as the kind it is, at the moment it is final.
-- What the gem remembers is five kinds of entry: user.said, note.written, gem.said, tool.called, tool.result. Its conversation is those, in order.
-- A request holds a count only: it was sent every remembered entry before it.
+- What the gem remembers is five kinds of entry: user.said, note.written, gem.said, tool.called, tool.result. Its conversation is those, in order, since the latest reset.
+- A request holds a count only: it was sent every remembered entry before it, since the latest reset.
 - What a reply produced before a tool call joins the history when it is sent back to the model, before the request that carries it.
 - A cut reply shows what was heard. Its tokens and cost are the whole of what the provider charged. Cut while the model was still producing, no count is read yet: shown as unknown.
 - Cost is worked out by us from a price table kept by hand. No provider reports one. Unknown is shown as unknown, never as nothing.
@@ -133,6 +137,8 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Which mode each message was in, in the history route's answer: on hold.
 - A reply that plays to its end is stored only when the user next speaks or the call ends.
 - A long conversation is sent whole at the start of every call. Trimming comes with Gyan Kosh.
+- Compaction: a summary in place of the older part. Next, with the caching work.
+- Rewind to a turn, instead of resetting everything: put off.
 
 ## Learned from Docker Agent (read 2026-11-16, config version 16)
 
