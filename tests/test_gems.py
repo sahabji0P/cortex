@@ -526,6 +526,8 @@ def test_the_routes_are_the_ones_a_client_expects() -> None:
         ("GET", "/v1/gems/{gem_id}", None),
         # The gem's written conversation, for showing on screen.
         ("GET", "/v1/gems/{gem_id}/chat", None),
+        # Resets it: the gem starts again, knowing nothing from before.
+        ("POST", "/v1/gems/{gem_id}/reset", 204),
         ("GET", "/v1/gems/{gem_id}/log", None),
         ("GET", "/v1/gems/{gem_id}/log/{seq}", None),
         ("GET", "/v1/gems/{gem_id}/log/{seq}/sent", None),
