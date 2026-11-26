@@ -434,8 +434,10 @@ async def test_a_watch_by_webhook_is_renewed_believed_and_stopped(hooked: _Hooke
 
     await server.emit("issue.posted", {"repo": "owner/one", "number": 1}, event_id="p1")
     await hooked.told.wait_for(1)
-    # The grant lasts 300 ms: it is asked for again before it lapses, and still posts.
-    await asyncio.sleep(0.5)
+    # A grant lasts 300 ms, and is asked for again when four fifths of it have gone. By
+    # the third ask, 480 ms or more have passed, so the first grant has lapsed: the
+    # server drops a lapsed subscription, and a post still coming shows it was renewed.
+    await _asked(server, "events/subscribe", times=3)
     await server.emit("issue.posted", {"repo": "owner/one", "number": 2}, event_id="p2")
     await hooked.told.wait_for(2)
     await _stop(watching)
@@ -444,7 +446,6 @@ async def test_a_watch_by_webhook_is_renewed_believed_and_stopped(hooked: _Hooke
         ("issue.posted", "p1", "1"),
         ("issue.posted", "p2", "2"),
     ]
-    assert server.asked.count("events/subscribe") >= 3
     assert hooked.answers == [200, 200]
     assert delivered.seen == ["webhook"]
     # Stopped when the watch ends.
