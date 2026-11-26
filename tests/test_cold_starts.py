@@ -348,15 +348,17 @@ async def test_a_call_whose_cold_start_cannot_be_stored_fails(
     docdb = world.store._docdb
 
     stored_before = await world.stored()
+    # Only the write that holds the cold start fails: a call that did not start cold
+    # would not fail.
+    docdb.breaks_on_kind = "cache.cold"
 
     call, _, keeping = await world.call()
-    docdb.breaks_after = 0
     with pytest.raises(CallFault):
         async with asyncio.timeout(2):
             await keeping
     with pytest.raises(CallFault):
         await call.close()
-    docdb.breaks_after = None
+    docdb.breaks_on_kind = None
 
     # The call failed, and nothing it added is stored: not its cold start, not its line.
     assert await world.store.of_kind(world.gem.id, "cache.cold") == []

@@ -105,6 +105,8 @@ class _DocDB:
         self.slow: Any = None
         # When set, a write of several documents stops after this many, and fails.
         self.breaks_after: int | None = None
+        # When set, a write that holds a log entry of this kind fails, writing nothing.
+        self.breaks_on_kind: str | None = None
 
     def _all(self, collection: type[BaseModel]) -> list[dict[str, Any]]:
         return self.collections.setdefault(_name(collection), [])
@@ -166,6 +168,10 @@ class _DocDB:
         if self.slow is not None:
             await self.slow.wait()
         documents = self._all(type(data[0]))
+        if self.breaks_on_kind is not None and any(
+            isinstance(item, LogEntry) and item.kind == self.breaks_on_kind for item in data
+        ):
+            raise ConnectionError("the database went away")
         for written, item in enumerate(data):
             if self.breaks_after is not None and written == self.breaks_after:
                 raise ConnectionError("the database went away part-way")
