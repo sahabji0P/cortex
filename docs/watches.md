@@ -34,11 +34,12 @@ with the arguments each takes, and `watch` refuses any other. Which delivery is 
 
 A watch's `delivery` says how its events reach the backend now, in the words of
 a connection's event kinds: `push`, `webhook` or `poll`. The connections tell the watch
-each one it starts on, and it is kept, and told to the app when it changes: so a watch
-whose server would not take the webhook says `poll`. It is none until the watch first
-starts on one. A plain webhook says `webhook` from when it is made, and a timer none. A
-watch stored before watches kept it has none until it next starts on one, so a webhook
-stored then has none.
+the one its server has answered on (a stream opened, a webhook granted, a poll
+answered), and it is kept, and told to the app when it changes: so a watch whose server
+would not take the webhook says `poll`. It is none until the server first answers. A
+plain webhook says `webhook` from when it is made, and a timer none. A watch stored
+before watches kept it has none until its server next answers, so a webhook stored then
+has none.
 
 The cursor after each event is kept, so after a restart the watch goes on from where it
 left off. Each MCP watch has a webhook address too, for a server that delivers by
@@ -102,9 +103,10 @@ why.
 - **Failing.** An MCP watch whose connection cannot run it (the connection is gone, is
   no longer open to the gem, or does not answer), or a timer whose event the sink cannot
   keep, is failing. It is tried again after 10 seconds, then twice as long each time,
-  at most every ten minutes. An MCP watch is active again once a try has run for a
-  minute or brought an event; a timer once its event is kept. The 10 seconds and the
-  minute are **not yet ruled on**.
+  at most every ten minutes. An MCP watch is active again once its server answers (a
+  stream opened, a webhook granted, a poll answered) or it brings an event: one that is
+  reached but never answers stays failing, and does not flip back and forth. A timer is
+  active again once its event is kept. The 10 seconds are **not yet ruled on**.
 - **A post that cannot be kept** is answered 503, and nothing is counted, so the sender
   may try again.
 

@@ -274,8 +274,9 @@ server offers for the kind:
    once a second, and every 30 seconds when it does not say; at once when it says more
    are waiting.
 
-The watch is told each delivery it starts on (`push`, `webhook` or `poll`, and `poll`
-after a webhook the server would not take), and shows it as its `delivery` (see
+The watch is told the delivery its server answers on (`push`, `webhook` or `poll`, and
+`poll` after a webhook the server would not take), once for each, and shows it as its
+`delivery`. That answer is also what makes a failing watch active again (see
 [Watches](watches.md#mcp-events)).
 
 - **Cursors.** A watch starts from its last cursor, or from now. After a drop, or a
