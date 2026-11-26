@@ -150,7 +150,7 @@ Never commit credentials.
 | --- | --- |
 | `WS /v1/link` | The standing socket: written chat, calls and their audio, and the log as it is written |
 | `/v1/gems` | The gems and their configs, a gem's conversation (`/chat`), its log (`/log`), and a reset (`/reset`) |
-| `/v1/gems/{id}/watches` | A gem's watches, which the gem makes, and removing one |
+| `/v1/gems/{id}/watches` | A gem's watches, which the gem makes, removing one, and a webhook's address and secret when the user asks (`/{watch_id}/hook`) |
 | `POST /v1/hooks/{token}` | Where a watch's webhook is posted to, from outside. The only route a tunnel should expose |
 | `/v1/darbar` | The Darbar text, which every gem is told first |
 | `/v1/connections` | The MCP tool servers, who may use them, and their sign-ins |
