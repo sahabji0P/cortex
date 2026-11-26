@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 from bson import ObjectId
 
+from app.entities.cold_start import Cache
 from app.entities.conversation_ent import ConversationEntityClass, Stored
 from app.entities.conversation_store import REMEMBERED, ConversationStoreClass
 from app.entities.gem_ent import GemEntityClass
@@ -732,3 +733,77 @@ async def test_the_log_is_read_back_in_pages_newest_first() -> None:
     one = await store.one(gem_id, 4)
     assert one is not None and one.shown()["by"] == "user"
     assert await store.one(gem_id, 99) is None
+
+
+# ---- a cold start
+
+
+async def test_describing_says_whether_anything_changed() -> None:
+    _, _, _, recording = await _recording()
+    layers = [Layer("gem", "You are X.\n")]
+
+    assert recording.describe(model="6 Luna", via=lambda: "api", layers=layers, tools=[])
+    assert not recording.describe(model="6 Luna", via=lambda: "api", layers=layers, tools=[])
+    # The way to the provider is part of the model.
+    assert recording.describe(model="6 Luna", via=lambda: "proxy", layers=layers, tools=[])
+    assert recording.provider == "OpenAI"
+
+
+async def test_a_cold_start_is_written_down_in_order_and_must_be_stored() -> None:
+    docdb, conversations, gem_id, recording = await _recording()
+    docdb.breaks_after = 0
+
+    recording.cold("quiet", 4)
+    await conversations.log.written()
+    # Like what the gem remembers, whoever waits for it is told it is not stored.
+    with pytest.raises(ConnectionError):
+        await conversations.log.stored(gem_id)
+
+    docdb.breaks_after = None
+    recording.remember(_user("one"))
+    await conversations.log.stored(gem_id)
+
+    cold, one = _log(docdb)
+    assert (cold["seq"], cold["kind"], cold["data"]) == (
+        0,
+        "cache.cold",
+        {"reason": "quiet", "before": 4},
+    )
+    assert (one["seq"], one["kind"]) == (1, "user.said")
+
+
+async def test_a_cold_start_that_was_given_up_is_never_stored_later() -> None:
+    docdb, conversations, gem_id, recording = await _recording()
+    docdb.breaks_after = 0
+
+    recording.cold("settings", 2)
+    with pytest.raises(ConnectionError):
+        await conversations.stored(gem_id)
+    docdb.breaks_after = None
+    recording.remember(_user("two"))
+    await conversations.stored(gem_id)
+
+    assert _kinds(docdb) == ["user.said"]
+
+
+async def test_the_cache_is_read_since_the_last_reset() -> None:
+    _, store, conversations = await _conversations()
+    gem_id = ObjectId()
+    await conversations.log.open(gem_id)
+    recording = conversations.recording(gem_id, "chat")
+
+    assert await store.cache(gem_id) == Cache()
+    turn = recording.turn("user")
+    turn.sent([], False)  # 1
+    recording.cold("quiet", 1)  # 2
+    turn.sent([], False)  # 3
+    await conversations.log.written()
+
+    cache = await store.cache(gem_id)
+    assert (cache.sent, cache.before) == (3, 1)
+    assert cache.sent_at is not None
+    # As it stood before the second request.
+    assert (await store.cache(gem_id, before=3)).sent == 1
+    # A reset forgets both.
+    await conversations.log.record_reset(gem_id)
+    assert await store.cache(gem_id) == Cache()

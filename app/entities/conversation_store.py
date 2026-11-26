@@ -31,6 +31,9 @@ A gem can be reset (`gem.reset`): it starts again, knowing nothing from before. 
 is taken out of the log: the conversation is what the gem remembers after the latest
 such entry.
 
+A conversation can start cold (`cache.cold`, see `cold_start.py`): from then on, long
+tool results before its line are sent expired. What is stored stays as it was.
+
 What is kept in memory is in `conversation_ent.py` and `gem_log.py`. A gem's log goes
 when the gem does (see `GemEntityClass.delete`).
 """
@@ -46,11 +49,13 @@ from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.core.times import UtcDatetime, in_utc
+from app.entities.cold_start import Cache
 from app.entities.history import Added, Mode, Source
 from app.entities.loop import ResultMark
 from app.entities.model import Item
 
 __all__ = [
+    "COLD",
     "REMEMBERED",
     "RESET",
     "ConversationStoreClass",
@@ -77,6 +82,9 @@ REMEMBERED: tuple[str, ...] = (
 
 # The kind of entry that resets a gem: its conversation starts again after it.
 RESET = "gem.reset"
+
+# The kind of entry that says a conversation started cold (see `cold_start.py`).
+COLD = "cache.cold"
 
 _KIND_BY_ROLE = {"user": "user.said", "developer": "note.written", "assistant": "gem.said"}
 
@@ -196,23 +204,49 @@ class ConversationStoreClass:
 
         With `before`, the conversation as it stood just before that entry.
         """
-        upto: dict[str, Any] = {} if before is None else {"seq": {"$lt": before}}
-        reset = await self._docdb.get_many(
-            LogEntry,
-            filters={"gem_id": gem_id, "kind": RESET, **upto},
-            sort=[("seq", -1)],
-            limit=1,
-        )
-        since = reset[0].seq + 1 if reset else 0
         return await self._docdb.get_many(
             Remembered,
             filters={
                 "gem_id": gem_id,
                 "kind": {"$in": list(REMEMBERED)},
-                "seq": {"$gte": since, **upto.get("seq", {})},
+                "seq": await self._since(gem_id, before),
             },
             sort=[("seq", 1)],
         )
+
+    async def cache(self, gem_id: ObjectId, *, before: int | None = None) -> Cache:
+        """Where the gem's cache stands, since it was last reset (see `cold_start.py`).
+
+        The last request sent and the line of the latest cold start. With `before`, as
+        it stood just before that entry.
+        """
+        seq = await self._since(gem_id, before)
+        latest = [
+            await self._docdb.get_many(
+                LogEntry,
+                filters={"gem_id": gem_id, "kind": kind, "seq": seq},
+                sort=[("seq", -1)],
+                limit=1,
+            )
+            for kind in ("request.sent", COLD)
+        ]
+        sent, started_cold = (found[0] if found else None for found in latest)
+        return Cache(
+            sent=None if sent is None else sent.seq,
+            sent_at=None if sent is None else sent.at,
+            before=None if started_cold is None else int(started_cold.data["before"]),
+        )
+
+    async def _since(self, gem_id: ObjectId, before: int | None) -> dict[str, int]:
+        """The numbers of the gem's entries since it was last reset, before `before` if given."""
+        upto: dict[str, int] = {} if before is None else {"$lt": before}
+        reset = await self._docdb.get_many(
+            LogEntry,
+            filters={"gem_id": gem_id, "kind": RESET, **({"seq": upto} if upto else {})},
+            sort=[("seq", -1)],
+            limit=1,
+        )
+        return {"$gte": reset[0].seq + 1 if reset else 0, **upto}
 
     async def write(self, entries: Sequence[LogEntry]) -> None:
         """Add entries to a log, in the order given: all, or none.
