@@ -492,10 +492,10 @@ async def test_a_server_that_will_not_post_to_the_address_is_polled(setup: _Setu
     assert delivered.seen == ["poll"]
 
 
-async def _asked(server: EventsServer, method: str) -> None:
-    """Wait until the server has been asked `method`."""
+async def _asked(server: EventsServer, method: str, times: int = 1) -> None:
+    """Wait until the server has been asked `method`, this many times."""
     async with asyncio.timeout(5):
-        while method not in server.asked:
+        while server.asked.count(method) < times:
             server.heard.clear()
             await server.heard.wait()
 
