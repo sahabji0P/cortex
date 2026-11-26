@@ -492,7 +492,9 @@ async def running(server: EventsServer, port: int = 0) -> AsyncGenerator[Running
             return
         await app(scope, receive, send)
 
-    config = uvicorn.Config(routed, host="127.0.0.1", port=port, log_level="warning", lifespan="on")
+    config = uvicorn.Config(
+        routed, host="127.0.0.1", port=port, log_level="warning", lifespan="on", ws="none"
+    )
     serving = uvicorn.Server(config)
     task = asyncio.create_task(serving.serve())
     try:

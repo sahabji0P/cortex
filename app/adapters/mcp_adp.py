@@ -4,6 +4,13 @@ MCP adapter: the tool servers a gem can be connected to, reached over Streamable
 A server is known here only by its address and the headers sent with every request to
 it. Two things are asked of one: which tools it has, and to run a call of one.
 
+A server may also serve events (SEP-3415, the extension `io.modelcontextprotocol/events`):
+things that happen, which a client listens for. Its kinds of event are read with its
+tools, when it says it has the extension. One kind is listened for in any of three ways
+the server offers for it: asked for again and again (`events/poll`), held open while
+the server sends each one (`events/stream`), or posted by the server to an address of
+ours (`events/subscribe`, a webhook), each post signed with a secret we give it.
+
 A server may also say how it shows itself: its icons and its website, read with its
 tools. An icon it names by address is fetched here, from the server's own domain only,
 and kept as a `data:` address, so the app never reaches a host for one.
@@ -37,7 +44,7 @@ import ipaddress
 import json
 import logging
 import re
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -46,6 +53,7 @@ from urllib.parse import quote, unquote_to_bytes, urlencode, urlsplit
 
 import httpx2
 from mcp import Client
+from mcp.client import ClientExtension, advertise
 from mcp.client.auth import OAuthFlowError, PKCEParameters
 from mcp.client.auth.oauth2 import check_registration_usable
 from mcp.client.auth.utils import (
@@ -66,16 +74,19 @@ from mcp.shared.auth import OAuthClientMetadata, OAuthToken, ProtectedResourceMe
 from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_server_url
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, ContentBlock, Icon, Implementation
-from pydantic import AnyUrl, BaseModel, ValidationError
+from mcp_types import Request, RequestParams, Result
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.times import UtcDatetime
 
 __all__ = [
+    "EVENTS_EXTENSION",
     "McpAbout",
     "McpAdapterClass",
     "McpAuthServer",
     "McpAuthorization",
     "McpChallenge",
+    "McpEventType",
     "McpFailure",
     "McpIcon",
     "McpListing",
@@ -93,7 +104,7 @@ _LIST_SECONDS = 20.0
 _CALL_SECONDS = 60.0
 # How long closing a client waits for what is still running on it.
 _CLOSE_SECONDS = 5.0
-# A tool list that never ends cannot hold a request up for ever.
+# A tool list, or an event list, that never ends cannot hold a request up for ever.
 _LIST_PAGES_MAX = 50
 # How long one request to a sign-in server may take. A renewal is made inside a tool
 # call, so it is kept short: a sign-in server that does not answer fails the call soon.
@@ -111,6 +122,11 @@ _ICON_SECONDS = 5.0
 _WEBSITE_MAX_LENGTH = 2_000
 
 _log = logging.getLogger(__name__)
+
+# The MCP events extension (SEP-3415), as a server names it under its capabilities.
+EVENTS_EXTENSION = "io.modelcontextprotocol/events"
+# The ways a server may offer to deliver one kind of event.
+_DELIVERIES = ("poll", "push", "webhook")
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +156,19 @@ class McpTool:
 
 
 @dataclass(frozen=True, slots=True)
+class McpEventType:
+    """One kind of event a server can send, as it lists it (`events/list`)."""
+
+    name: str
+    description: str
+    # How it may be delivered: any of "poll", "push" and "webhook", in the server's order.
+    # Only those three are kept.
+    delivery: tuple[str, ...]
+    # The JSON schema of the arguments a listener gives it.
+    input_schema: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class McpIcon:
     """One of a server's icons, held here: `src` is always a `data:` address."""
 
@@ -165,10 +194,14 @@ class McpAbout:
 
 @dataclass(frozen=True, slots=True)
 class McpListing:
-    """What a server answered when it was asked for its tools, and how it shows itself."""
+    """What a server answered when it was asked for its tools, and how it shows itself.
+
+    `events` are the kinds of event it serves: none when it does not have the extension.
+    """
 
     tools: list[McpTool]
     about: McpAbout
+    events: list[McpEventType] = field(default_factory=list[McpEventType])
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +234,9 @@ class McpFailure(Exception):
     the server answered 401, or a sign-in server refused to renew a pass. It is set for
     nothing else. A 403 is not it: that is a server that knows who we are and says no,
     and signing in again would not change it. `challenge` is what a 401 said.
+
+    `code` is the protocol's error code, when the server answered with one: it says
+    whether asking again could help (the events extension's own are -32023 to -32027).
     """
 
     def __init__(
@@ -209,11 +245,13 @@ class McpFailure(Exception):
         *,
         sign_in_needed: bool = False,
         challenge: McpChallenge | None = None,
+        code: int | None = None,
     ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.sign_in_needed = sign_in_needed
         self.challenge = challenge
+        self.code = code
 
 
 class McpAuthServer(BaseModel):
@@ -275,7 +313,34 @@ class McpAuthorization:
     verifier: str = field(repr=False)
 
 
-type _Opener = Callable[[McpServer], AbstractAsyncContextManager[Client]]
+# Opens a client for a server, with the extensions it declares and listens with.
+type _Opener = Callable[[McpServer, Sequence[ClientExtension]], AbstractAsyncContextManager[Client]]
+
+
+class _ListEventsParams(RequestParams):
+    cursor: str | None = None
+
+
+class _ListEvents(Request[_ListEventsParams, Literal["events/list"]]):
+    method: Literal["events/list"] = "events/list"
+
+
+class _EventType(BaseModel):
+    """One kind of event as `events/list` gives it. Fields not read here are let through."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    description: str = ""
+    delivery: list[str] = Field(default_factory=list[str])
+    input_schema: dict[str, object] = Field(default_factory=dict, alias="inputSchema")
+
+
+class _EventsListed(Result):
+    model_config = ConfigDict(extra="ignore")
+
+    events: list[_EventType]
+    next_cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,8 +443,9 @@ class McpAdapterClass:
         """Every tool the server has now, in the order it lists them, and how it shows itself.
 
         How it shows itself is what it said when the client was opened, read from the
-        same client as the tools (see `_about`). Raises `McpFailure` if it cannot be
-        reached or does not answer. An icon that cannot be had never fails it.
+        same client as the tools (see `_about`). Its kinds of event are read too, when
+        it says it has the events extension. Raises `McpFailure` if it cannot be reached
+        or does not answer. An icon that cannot be had never fails it.
         """
         tools: list[McpTool] = []
         async with self._using(server) as client:
@@ -401,7 +467,8 @@ class McpAdapterClass:
                 if cursor is None:
                     break
             info = client.server_info
-        return McpListing(tools, await _about(info, server.url, self._transport))
+            events = await _list_events(client)
+        return McpListing(tools, await _about(info, server.url, self._transport), events)
 
     async def call_tool(
         self, server: McpServer, name: str, arguments: Mapping[str, object]
@@ -673,7 +740,9 @@ class McpAdapterClass:
             yield http
 
     @contextlib.asynccontextmanager
-    async def _open_http(self, server: McpServer) -> AsyncGenerator[Client]:
+    async def _open_http(
+        self, server: McpServer, extensions: Sequence[ClientExtension]
+    ) -> AsyncGenerator[Client]:
         """A client for a server reached over Streamable HTTP, with its headers and pass."""
 
         async def note(response: httpx2.Response) -> None:
@@ -698,7 +767,9 @@ class McpAdapterClass:
                 event_hooks={"response": [note]},
                 transport=self._transport,
             ) as http,
-            Client(streamable_http_client(server.url, http_client=http)) as client,
+            Client(
+                streamable_http_client(server.url, http_client=http), extensions=extensions
+            ) as client,
         ):
             yield client
 
@@ -707,7 +778,7 @@ class McpAdapterClass:
         """The server's client, for one request. Whatever goes wrong is an `McpFailure`."""
         link = self._links.get(server)
         if link is None or not link.alive:
-            link = self._links[server] = _Link(self._opener(server))
+            link = self._links[server] = _Link(self._opener(server, (_EVENTS_DECLARED,)))
         link.users += 1
         self._refused.pop(server, None)
         try:
@@ -726,6 +797,7 @@ class McpAdapterClass:
                 _reason(exc, status),
                 sign_in_needed=status == 401,
                 challenge=None if refusal is None else refusal.challenge,
+                code=_code(exc),
             ) from exc
         finally:
             link.users -= 1
@@ -742,6 +814,52 @@ class McpAdapterClass:
         closing = asyncio.create_task(link.close())
         self._closing.add(closing)
         closing.add_done_callback(self._closing.discard)
+
+
+# Every client says it understands the events extension, as a client may (SEP-3415).
+_EVENTS_DECLARED = advertise(EVENTS_EXTENSION)
+# What a server answers for a method it does not have.
+_METHOD_NOT_FOUND = -32601
+
+
+async def _list_events(client: Client) -> list[McpEventType]:
+    """The kinds of event a server serves, in its order. None if it has not the extension.
+
+    A kind that names no delivery this backend knows is left out: it could not be
+    listened for. A server that says it has the extension and then has no `events/list`
+    is taken as having none.
+    """
+    if EVENTS_EXTENSION not in (client.server_capabilities.extensions or {}):
+        return []
+    events: list[McpEventType] = []
+    cursor: str | None = None
+    for _ in range(_LIST_PAGES_MAX):
+        try:
+            async with asyncio.timeout(_LIST_SECONDS):
+                page = await client.session.send_request(
+                    _ListEvents(params=_ListEventsParams(cursor=cursor)), _EventsListed
+                )
+        except MCPError as exc:
+            if exc.code == _METHOD_NOT_FOUND:
+                return []
+            raise
+        for kind in page.events:
+            delivery = tuple(way for way in kind.delivery if way in _DELIVERIES)
+            if kind.name and delivery:
+                events.append(
+                    McpEventType(kind.name, kind.description, delivery, kind.input_schema)
+                )
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    return events
+
+
+def _code(exc: BaseException) -> int | None:
+    """The protocol's error code a failure carries, if the server answered with one."""
+    while isinstance(exc, BaseExceptionGroup):
+        exc = cast("BaseExceptionGroup[BaseException]", exc).exceptions[0]
+    return exc.code if isinstance(exc, MCPError) else None
 
 
 def _reason(exc: BaseException, status: int | None = None) -> str:
