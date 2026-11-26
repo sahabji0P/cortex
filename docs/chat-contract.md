@@ -1012,7 +1012,7 @@ The answer is sent with `Cache-Control: no-store`, and is never logged.
 ```json
 {
   "address": "https://hooks.example.com/v1/hooks/q3Vb8Lx0nTzR2kWfYc5HdA7mJpE1sGuX9oKiN4vBtZw",
-  "secret": "Hn5tK2wQ8rLm0yVb3cXz7pJd1fGs9aUe4oRi6kTq-Zs",
+  "secret": "whsec_3q2+7wAAAAAz4WlI9mZxQn5tK2wQ8rLm0yVb3cXz7pI=",
   "content_type": "application/json"
 }
 ```
@@ -1020,8 +1020,9 @@ The answer is sent with `Cache-Control: no-store`, and is never logged.
 - **`address`** is `PUBLIC_URL`, then `/v1/hooks/`, then the watch's token. It is null
   while the backend has no `PUBLIC_URL`: the secret is still given.
 - **`secret`** is what the posts are signed with (see `POST /v1/hooks/{token}` below).
-  It is not the token: each watch has its own. A watch made before the backend kept one
-  has its token as its secret, so its secret is the end of its address.
+  It is not the token: each watch has its own, written as Standard Webhooks writes one
+  (`whsec_` and base64), which a sender takes as it is. A watch made before the backend
+  kept one has its token as its secret, so its secret is the end of its address.
 - **`content_type`** is what to register the webhook to post: `application/json`.
 
 | Answer | When |
