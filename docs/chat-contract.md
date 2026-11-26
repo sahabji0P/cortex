@@ -100,12 +100,12 @@ ahead of what the user says.
   result: one `chat.event` for each event that came in (after any `chat.result`), then
   `chat.text` and `chat.tool` frames, then exactly one of `chat.done`, `chat.cut` or
   `chat.error`. Show it as a reply of the gem's, under a line saying what came in.
-- **It goes to the socket of the latest message to that gem, if there is one, and is
-  made all the same if there is not.** Unlike a reply about a background result, it is
-  written and stored even when no app is connected, and a socket that closes does not
-  cut it. A new message cuts it like any other reply. After the backend restarts, no
-  socket counts as the latest until a message is sent, so such replies are only stored:
-  read the history again.
+- **It goes to every socket that is open, and is made all the same if none is.** A
+  socket gets it whether or not it has written to that gem, so an app that is open sees
+  the gem wake. Unlike a reply about a background result, it is written and stored even
+  when no app is connected, and a socket that closes does not cut it. A new message cuts
+  it like any other reply. A socket that opens while it is being written gets none of
+  it: read the history again.
 - **Events that come while a reply is written all wait for it**, and are told together
   in one reply after it.
 - **An event waiting when a message comes goes in ahead of the message**, and the reply

@@ -132,7 +132,7 @@ loses nothing: a socket that closes cuts its replies, and they are stored as cut
   gem's next turn and goes in ahead of what the user says; events that come while a
   turn runs all go into the next one. A gem that is quiet is woken by it: in a call, at
   the next moment nobody speaks and nothing plays; in writing, by a reply nobody asked
-  for, sent to the socket of the latest message, or to nobody, and stored either way.
+  for, sent to every socket that is open, or to nobody, and stored either way.
   Events still waiting when a call ends are told in writing. Each is written down in the
   log as it comes, so one that came before a restart is told after it
   ([`events_ent.py`](../app/entities/events_ent.py)). A reset drops them.
