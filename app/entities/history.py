@@ -79,6 +79,8 @@ type Mode = Literal["call", "chat"]
 # - `greeting`     our line that asks the gem to speak first in a call
 # - `no-words`     our line that says the user made a sound with no words in it
 # - `time-line`    our line that gives the date and the time
+# - `event`        an event a watch of the gem's caught, told as a user message in an
+#                  event tag: outside data, not the user's words
 type Source = Literal[
     "user",
     "gem",
@@ -91,6 +93,7 @@ type Source = Literal[
     "greeting",
     "no-words",
     "time-line",
+    "event",
 ]
 
 # The line of ours that goes before the first turn in each mode, after a turn in the
@@ -138,7 +141,8 @@ class Added:
     turn: int | None = None
     # For a stub call of ours and its result: the id of the call whose result they
     # carry. Kept beside them, so nobody has to read it out of the stub's arguments.
-    delivers: str | None = None
+    # For an event: the number of the `event.came` it tells, in the gem's log.
+    delivers: str | int | None = None
 
 
 def said(text: str, at: datetime | None = None, turn: int | None = None) -> Added:

@@ -9,7 +9,12 @@ from bson import ObjectId
 
 from app.entities.cold_start import Cache
 from app.entities.conversation_ent import ConversationEntityClass, Stored
-from app.entities.conversation_store import REMEMBERED, ConversationStoreClass
+from app.entities.conversation_store import (
+    REMEMBERED,
+    ConversationStoreClass,
+    LogEntry,
+    remembered,
+)
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, line, said, stubs
@@ -807,3 +812,46 @@ async def test_the_cache_is_read_since_the_last_reset() -> None:
     # A reset forgets both.
     await conversations.log.record_reset(gem_id)
     assert await store.cache(gem_id) == Cache()
+
+
+# ---- events: what came in, and the gem told of it
+
+
+def _event_told(text: str, came: int) -> Added:
+    """An event as the gem is told it: a user message, written by the event, not the user."""
+    return Added({"role": "user", "content": text}, _NOW, source="event", delivers=came)
+
+
+async def test_an_event_told_is_remembered_as_its_own_kind_not_as_the_users_words() -> None:
+    docdb, store, conversations = await _conversations()
+    gem_id = ObjectId()
+
+    await conversations.add(
+        gem_id, Stored([]), [_user("hello"), _event_told("<event>…</event>", 7)], "chat"
+    )
+
+    assert [(d["kind"], d["data"]["source"]) for d in _stored_items(docdb)] == [
+        ("user.said", "user"),
+        ("event.received", "event"),
+    ]
+    assert "event.received" in REMEMBERED
+    # It says which `event.came` it tells by that entry's number, and reads back so.
+    told = (await store.load(gem_id))[-1]
+    assert told.kind == "event.received"
+    assert told.data.delivers == 7
+    assert told.data.item == {"role": "user", "content": "<event>…</event>"}
+
+
+async def test_the_events_waiting_are_those_since_the_reset_that_nothing_has_told() -> None:
+    _, store, _ = await _conversations()
+    gem_id = ObjectId()
+
+    def came(seq: int, kind: str = "event.came") -> LogEntry:
+        return LogEntry(gem_id=gem_id, kind=kind, seq=seq, at=_NOW, data={"name": "x"})
+
+    await store.write([came(0), came(1)])
+    await store.write([came(2, "gem.reset")])  # both are forgotten
+    await store.write([came(3), came(4), came(5)])
+    await store.write([remembered(gem_id, 6, _event_told("four", 4), "chat")])
+
+    assert [entry.seq for entry in await store.pending_events(gem_id)] == [3, 5]
