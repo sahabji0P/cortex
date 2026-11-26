@@ -173,7 +173,11 @@ async def test_a_gem_with_events_waiting_is_kept_until_they_are_told() -> None:
 async def test_a_reset_drops_the_events_waiting_and_tells_whoever_asked() -> None:
     conversations, _, gem_id = await _gem()
     reset: list[ObjectId] = []
-    conversations.when_reset(reset.append)
+
+    async def told(gem_id: ObjectId) -> None:
+        reset.append(gem_id)
+
+    conversations.when_reset(told)
     await _came_in(conversations, gem_id)
 
     await conversations.reset(str(gem_id))

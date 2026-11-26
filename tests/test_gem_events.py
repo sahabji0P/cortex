@@ -485,7 +485,11 @@ async def test_a_reset_drops_an_event_waiting_for_a_reply_and_says_so() -> None:
     gate = asyncio.Event()
     world = await _world([gate, *_said("Never said.")])
     reset: list[ObjectId] = []
-    world.conversations.when_reset(reset.append)
+
+    async def told(gem_id: ObjectId) -> None:
+        reset.append(gem_id)
+
+    world.conversations.when_reset(told)
     client = _Client()
     world.chat.send(str(world.gem.id), "hi", client.deliver)
     await _until(lambda: bool(_requests(world)))

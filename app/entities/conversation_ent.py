@@ -35,7 +35,7 @@ before the next reply is made.
 
 import asyncio
 import json
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
@@ -183,7 +183,7 @@ class ConversationEntityClass:
         self._kept: dict[str, GemConversation] = {}
         self._quiet: Callable[[str], None] = _nobody
         # Told the id of each gem that is reset, once the reset is stored.
-        self._resets: list[Callable[[ObjectId], None]] = []
+        self._resets: list[Callable[[ObjectId], Awaitable[None]]] = []
 
     def tell_results_with(self, quiet: Callable[[str], None]) -> None:
         """Who tells a gem's late results: `quiet` is given the gem's key when one comes in.
@@ -192,10 +192,11 @@ class ConversationEntityClass:
         """
         self._quiet = quiet
 
-    def when_reset(self, told: Callable[[ObjectId], None]) -> None:
+    def when_reset(self, told: Callable[[ObjectId], Awaitable[None]]) -> None:
         """Tell `told` each gem that is reset, once the reset is stored.
 
         Such as the gem's watches, which end with it: what they were for is forgotten.
+        The reset is over only once each is done, and fails if one raises.
         """
         self._resets.append(told)
 
@@ -260,7 +261,7 @@ class ConversationEntityClass:
             kept.late.stop()
             kept.events.drop_before(reset)
             for told in self._resets:
-                told(found)
+                await told(found)
         finally:
             resetting.over.set()
             if kept.writer is resetting:
