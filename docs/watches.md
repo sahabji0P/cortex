@@ -112,8 +112,8 @@ why.
 
 ### The gem is told
 
-A watch tells its gem when its state changes, once for each change, as an event of its
-own handed to the sink like any other: written down as `event.came`, told at the gem's
+A watch tells its gem when its state changes, once for each change, and when the user
+removes it, as an event of its own handed to the sink like any other: written down as `event.came`, told at the gem's
 next turn, and waking it if it is quiet.
 
 | Event | When | Its data |
@@ -121,6 +121,7 @@ next turn, and waking it if it is quiet.
 | `watch.failing` | An active watch starts failing | The `reason` |
 | `watch.paused` | The fuse pauses it | The `reason` |
 | `watch.recovered` | A failing watch is active again | None |
+| `watch.ended` | The user removes it in the app | "The user removed this watch." |
 
 - **Once.** A failing watch tried again tells nothing more, nor one whose `reason`
   changes while it stays failing: the app is told of that, the gem is not. Each has an
@@ -132,7 +133,11 @@ next turn, and waking it if it is quiet.
   kept. If the sink cannot keep it, that is logged, and the gem is not told: a timer
   failing because the sink cannot keep its event is the case, and its gem hears only
   that it works again.
-- **Removing a watch** is not a change of state, and tells the gem nothing.
+- **Only the user's removal is told.** The app's remove route asks for `watch.ended`
+  itself. The gem's own `unwatch` does not (its result already says so), nor a reset
+  (the gem starts again knowing nothing, so it would land in a fresh conversation), nor
+  deleting the gem. If the sink cannot keep it, that is logged, and the watch is removed
+  all the same.
 
 ## The fuse
 
@@ -145,7 +150,8 @@ answered 409.
 ## What ends a watch
 
 - **The gem** removes one with `unwatch`, and **the user** in the app. Either way it stops
-  at once, and the gem's log gets `watch.removed`, saying by whom.
+  at once, and the gem's log gets `watch.removed`, saying by whom. When the user removes
+  it, the gem is told `watch.ended` (see [The gem is told](#the-gem-is-told)).
 - **A reset** of the gem removes all its watches (`end_for`), each written down as
   removed by the user.
 - **Deleting a gem** removes its watches with it, and writes nothing: its log is gone.
