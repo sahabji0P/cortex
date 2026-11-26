@@ -462,6 +462,11 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
   5.5 and Sonnet 5.5, and the pipeline check passes on Haiku 5.5 and Opus 5.5.
 - **Deferred tools keep the cache.** On both providers each request after a tool search
   read the whole of the request before it from the cache.
+- **A round of many calls keeps the cache** (Anthropic). On Haiku 5.5, the request after
+  a round of 12 calls read nothing with only the mark at its end, and wrote the whole
+  conversation again (4,968 tokens). With the second mark (see
+  [Caching](models.md#caching)) it read 4,255 and wrote the 712 new ones, and the request
+  after it read all of it and wrote 14.
 
 ## Known gaps
 
@@ -502,6 +507,9 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
 - **A reply heard to its end is stored only later.** It is settled, and stored, when
   the user next speaks, a background result is told, or the call ends. If the backend
   stops before then, it is lost.
+- **A round of more than some 18 calls misses the cache** on Anthropic, once: the
+  request after it reads nothing and caches the whole conversation again. On OpenAI the
+  limit is said to be 20 tool results, and was not measured.
 - **A long history is sent whole.** A call now starts from everything stored, so its
   first request is as long as the gem's whole conversation. Nothing is trimmed.
 - **One context with both speaking and writing in it has no recorded live run.** Whether
