@@ -18,6 +18,9 @@ The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
 - The Darbar text: `/v1/darbar`.
 - Connections, the tool servers gems can use, and which gem may use which:
   `/v1/connections` (see [Connections](#connections-v1connections)).
+- A gem's watches, which the gem makes and the user can remove:
+  `GET /v1/gems/{gem_id}/watches` and `DELETE /v1/gems/{gem_id}/watches/{watch_id}` (see
+  [Watches](#watches)).
 - The models a call can be held with: `GET /v1/voice/models`.
 - How OpenAI is reached, with the API key or through the ChatGPT proxy, and the proxy's
   account: `GET` and `PUT /v1/providers/openai`, `POST /v1/providers/openai/sign-in`
@@ -43,8 +46,9 @@ a `type`. Binary frames are a call's audio.
 
 | `type` | Fields | Meaning |
 | --- | --- | --- |
-| `link.ready` | `version` (7) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later. Version 4: a call's reply comes as words timed to its audio (`call.assistant.word`), and `call.assistant.delta` is gone. Version 5: `connection.changed`. Version 6: a gem's log can be watched (see [A gem's log](#a-gems-log)). Version 7: an event a gem watches for can wake it (`chat.event`) |
+| `link.ready` | `version` (7) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later. Version 4: a call's reply comes as words timed to its audio (`call.assistant.word`), and `call.assistant.delta` is gone. Version 5: `connection.changed`. Version 6: a gem's log can be watched (see [A gem's log](#a-gems-log)). Version 7: an event a gem watches for can wake it (`chat.event`), and `watch.changed` |
 | `connection.changed` | `id` (a connection's id) | A connection's sign-in has changed: it needs a sign-in now, or one was just finished. Sent to every open socket. Read the connection again (`GET /v1/connections/{id}`) for its `sign_in` and its tools |
+| `watch.changed` | `gem`, `watch` (their ids) | One of a gem's watches was added, removed, or changed state. Sent to every open socket. Read the gem's watches again (`GET /v1/gems/{gem}/watches`): a removed one is not there (see [Watches](#watches)) |
 | `chat.result` | `gem`, `text` | A search, or another tool call, the gem started in an earlier reply has come back, and a reply about it follows, unasked. `text` is what the search looked up, as its `chat.tool` said, or "" |
 | `chat.event` | `gem`, `text` | Something one of the gem's watches waits for has happened, and a reply about it follows, unasked (see [Events](#events)). `text` says what came in, in a short line: the watch, as the gem described it when it made it, and what it caught, as "new commits on the main branch: push". The wording is not settled |
 | `chat.text` | `gem`, `text` | The next piece of the reply, as it is written |
@@ -434,6 +438,8 @@ Every other kind is something that happened. No model is ever sent them.
 | `kind` | Its own fields | Meaning |
 | --- | --- | --- |
 | `call.opened`, `call.closed` | none | A call began, or ended. No turn. Writing has neither |
+| `watch.added` | `watch`, `source`, `about` | The gem made a watch (see [Watches](#watches)). `watch` is its id, `source` is `mcp`, `webhook` or `timer`, and `about` what it is for, in the gem's words. No turn. Never its address or secret |
+| `watch.removed` | `watch`, `by` | A watch was removed: `by` is `gem` (with its `unwatch` tool) or `user` (in the app, or when the gem was reset). No turn. A deleted gem's watches go with its log, and write nothing |
 | `gem.reset` | none | The user reset the gem (see [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset)). No turn. The gem knows nothing from before it: its conversation is the remembered entries after the latest one |
 | `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) `background_result` (results of calls that went on in the background are to be told, with nothing new from the user) or `event` (events that came in are to be told, with nothing new from the user; when results and events are told together, `event`). `mode` is `call` or `chat` |
 | `cache.cold` | `reason`, `before` | The conversation starts cold: from here on, long tool results before `before` are sent expired (see [A cold start](#a-cold-start)). `reason` is `quiet` (the provider's cache is taken to have gone) or `settings` (the model, the instructions or the tools changed). `before` is the `seq` of the last `request.sent` before it. No turn. Written just after the `settings.changed` it follows, if any: in writing before the reply's `turn.opened`, in a call before the call's first line |
@@ -884,3 +890,73 @@ if its server asks for a sign-in, the connection is added (201) with `tools: []`
   that answers 401 and publishes no sign-in.
 - A new `url` drops the sign-in, and the connection needs one again if the new server
   asks. An `Authorization` header in a `PATCH` drops it too.
+
+## Watches
+
+A gem can watch things: something that happens wakes it, and it does what its
+instructions say. The gem makes a watch itself, with a tool call, and every watch
+belongs to that one gem. The app shows each gem's watches, and the user can remove one.
+How they run is in [Watches](watches.md).
+
+| Route | Does |
+| --- | --- |
+| `GET /v1/gems/{gem_id}/watches` | The gem's watches, the newest first. A gem that is not there is a 404 |
+| `DELETE /v1/gems/{gem_id}/watches/{watch_id}` | Removes one (204). It stops at once, and the gem's log gets `watch.removed` with `by: "user"`. A watch that is not that gem's is a 404 |
+| `POST /v1/hooks/{token}` | Where a watch's webhook is posted to, from outside. The app never calls it |
+
+A watch, as `GET` answers:
+
+```json
+{
+  "id": "6afdb62efdd277b795ce9460",
+  "gem": "6afdb62efdd277b795ce9401",
+  "about": "Review each new pull request.",
+  "source": "webhook",
+  "state": "active",
+  "reason": null,
+  "connection": null,
+  "event": null,
+  "arguments": null,
+  "every_minutes": null,
+  "next_at": null,
+  "has_address": true,
+  "created_at": "2026-11-26T09:00:00Z",
+  "last_event_at": "2026-11-26T09:40:00Z",
+  "events": 3
+}
+```
+
+- **`source`** is `mcp` (an event a connection's server sends), `webhook` (posts to an
+  address of ours) or `timer`.
+- **`state`** is `active`, `failing` (it cannot run now and is tried again) or `paused`
+  (it brings no more events until it is removed and made again). `reason` says why when
+  it is not active, in words to show, and is null when it is.
+- **For `mcp`**: `connection` is the connection's id, `event` the event's name and
+  `arguments` what the gem gave it. Null for the others.
+- **For `timer`**: `every_minutes`, and `next_at`, when it is next due. Null for the
+  others.
+- **`has_address`** is true for a webhook. The address and its secret are never sent:
+  the gem was given them in its tool's result, to register them where the events come
+  from.
+- **`events`** is how many it has brought, and `last_event_at` when it last did, or null.
+- Every change of a watch the app shows (added, removed, a new `state` or `reason`) comes
+  as `watch.changed` on the socket. A new event alone does not: read again to see
+  `events` move.
+
+### `POST /v1/hooks/{token}`
+
+The one route meant to be reached from outside, through a tunnel to `PUBLIC_URL`. Every
+answer is empty, and what was posted is never sent back or logged.
+
+| Answer | When |
+| --- | --- |
+| 202 | The event was handed over: the gem will be woken |
+| 200 | A GitHub `ping` (`X-GitHub-Event: ping`): it wakes nobody |
+| 401 | For a plain webhook, `X-Hub-Signature-256` is there and is not `sha256=` and the HMAC-SHA256 of the body with the watch's secret. For an MCP watch, the connection's server did not sign it |
+| 404 | The address is no watch's |
+| 409 | The watch is paused |
+| 413 | The body is over 1 MB |
+| 503 | The event could not be kept: the sender may try again |
+
+A plain webhook's event is named by `X-GitHub-Event`, or `webhook` when there is none,
+and its id is `X-GitHub-Delivery`.

@@ -94,7 +94,9 @@ class LinkModels:
                 # 4: a call's reply comes as words timed to its audio, not as text.
                 # 5: a connection whose sign-in changes is told (`connection.changed`).
                 # 6: a gem's log can be watched (`log.watch`, `log.entry`).
-                # 7: an event a gem watches for can wake it (`chat.event`).
+                # 7: an event a gem watches for can wake it (`chat.event`), and a
+                # gem's watch that is added, removed or changes state is told
+                # (`watch.changed`).
                 version: Literal[7] = 7
 
             class LogEntry(BaseModel):
@@ -121,6 +123,17 @@ class LinkModels:
 
                 type: Literal["connection.changed"] = "connection.changed"
                 id: str
+
+            class WatchChanged(BaseModel):
+                """One of a gem's watches was added, removed, or changed state: read them again.
+
+                Sent to every socket. Read the gem's watches again
+                (`GET /v1/gems/{gem}/watches`): a removed one is no longer there.
+                """
+
+                type: Literal["watch.changed"] = "watch.changed"
+                gem: str
+                watch: str
 
             class CallReady(BaseModel):
                 """The call is open. Its audio and events follow."""

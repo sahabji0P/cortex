@@ -95,7 +95,7 @@ entry it is, at the moment it is final.
 | | Kinds | Sent to a model? |
 | --- | --- | --- |
 | **What the gem remembers** | `user.said`, `note.written`, `gem.said`, `tool.called`, `tool.result`, `event.received` | Yes. The gem's conversation is these entries since the latest reset, in order, and nothing else |
-| **What happened** | `call.opened`, `call.closed`, `gem.reset`, `turn.opened`, `turn.closed`, `settings.changed`, `cache.cold`, `request.sent`, `request.done`, `tool.started`, `tool.backgrounded`, `tool.done`, `event.came` | Never |
+| **What happened** | `call.opened`, `call.closed`, `gem.reset`, `turn.opened`, `turn.closed`, `settings.changed`, `cache.cold`, `request.sent`, `request.done`, `tool.started`, `tool.backgrounded`, `tool.done`, `event.came`, `watch.added`, `watch.removed` | Never |
 
 So the log is not a copy kept beside the conversation: it *is* the conversation, with
 everything else that happened written in between. A `gem.reset` is where the user reset

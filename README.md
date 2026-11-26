@@ -136,6 +136,7 @@ Settings are read from the environment, or from `.env`, by
 | `OPENAI_PROXY_URL`, `OPENAI_PROXY_KEY` | OpenAI through a proxy on a ChatGPT login ([Models](docs/models.md#openai-through-a-chatgpt-login)) | none |
 | `OPENAI_PROXY_MANAGEMENT_KEY` | changing the proxy's ChatGPT account from the app | none |
 | `BACKEND_URL` | where the browser comes back to after a connection's sign-in | `http://127.0.0.1:8000` |
+| `PUBLIC_URL` | a gem's webhooks: the public https address of this backend, such as a tunnel to the Mac. Expose only `/v1/hooks/` ([Watches](docs/watches.md#exposing-only-the-hooks)) | none: no webhooks |
 | `MONGODB_URL`, `MONGODB_DB_NAME` | the database | `mongodb://localhost:27017`, `cortex` |
 | `REDIS_URL` | Redis, connected at start-up. Only the user login (`/v1/users`) writes to it | `redis://localhost:6379` |
 | `ENVIRONMENT`, `DEBUG` | `local`, `staging` or `production`; `DEBUG` opens the API to any web origin | `local`, `true` |
@@ -149,6 +150,8 @@ Never commit credentials.
 | --- | --- |
 | `WS /v1/link` | The standing socket: written chat, calls and their audio, and the log as it is written |
 | `/v1/gems` | The gems and their configs, a gem's conversation (`/chat`), its log (`/log`), and a reset (`/reset`) |
+| `/v1/gems/{id}/watches` | A gem's watches, which the gem makes, and removing one |
+| `POST /v1/hooks/{token}` | Where a watch's webhook is posted to, from outside. The only route a tunnel should expose |
 | `/v1/darbar` | The Darbar text, which every gem is told first |
 | `/v1/connections` | The MCP tool servers, who may use them, and their sign-ins |
 | `/v1/providers/openai` | How OpenAI is reached: the API key or the proxy, and the proxy's accounts |
@@ -168,6 +171,7 @@ FastAPI also serves its own schema at `/docs` while the backend runs.
 | [docs/gems.md](docs/gems.md) | A gem's config, its versions, and what a gem is told (the Darbar text and its instructions) |
 | [docs/models.md](docs/models.md) | The models, how the two providers differ, the ChatGPT proxy, and cost |
 | [docs/connections.md](docs/connections.md) | MCP tool servers: permissions, the copy of their tools, deferred tools, and browser sign-in |
+| [docs/watches.md](docs/watches.md) | What wakes a gem: MCP events, webhooks and timers, how each runs, and the fuse against a gem waking itself in a loop |
 | [docs/chat-contract.md](docs/chat-contract.md) | The contract with the app: every route, frame and field, and the rules for a call's audio |
 | [docs/voice-spec.md](docs/voice-spec.md) | What a call does and what the model is sent, rule by rule, with what was measured live and the known gaps. [voice-context.excalidraw](docs/voice-context.excalidraw) is the same as a picture |
 | [docs/darbar-notes.md](docs/darbar-notes.md) | The plan: the project's words, what is decided, what comes next, what is put off |
