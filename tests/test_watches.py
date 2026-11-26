@@ -5,11 +5,14 @@ so a timer's hours pass at once and nothing reaches the internet.
 """
 
 import asyncio
+import hashlib
+import hmac
 from collections.abc import AsyncGenerator, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from bson import ObjectId
 
@@ -17,9 +20,17 @@ from app.config import settings
 from app.core.errors import InvalidError, NotFoundError
 from app.entities.conversation_store import ConversationStoreClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.gem_event import GemEvent, McpEventKind, McpWatch, OnMcpEvent
+from app.entities.gem_event import (
+    EVENT_TEXT_LIMIT,
+    GemEvent,
+    McpEventKind,
+    McpWatch,
+    OnMcpEvent,
+)
 from app.entities.gem_log import LogEntityClass
 from app.entities.watch_ent import Watch, WatchEntityClass
+from app.main import app
+from app.routers.hooks.service import HooksServiceV1Class, get_hooks_service_v1
 from tests.test_chat import _DocDB, _docdb  # pyright: ignore[reportPrivateUsage]
 
 _PUBLIC = "https://hooks.example.com"
@@ -100,6 +111,9 @@ class _McpEvents:
         self.running: dict[str, OnMcpEvent] = {}
         self.stopped: list[str] = []
         self.fails: Exception | None = None
+        # Whether a post is one the server signed, and what each was posted with.
+        self.signed = True
+        self.posts: list[tuple[McpWatch, dict[str, str], bytes]] = []
 
     async def kinds_for(self, gem_id: ObjectId) -> list[McpEventKind]:
         return self.open.get(gem_id, [])
@@ -118,7 +132,11 @@ class _McpEvents:
     async def posted(
         self, watch: McpWatch, headers: Mapping[str, str], body: bytes, on_event: OnMcpEvent
     ) -> bool:
-        raise NotImplementedError
+        self.posts.append((watch, dict(headers), body))
+        if not self.signed:
+            return False
+        await on_event("issue.opened", body.decode(), "p1", None, "c9")
+        return True
 
 
 class _Setup(SimpleNamespace):
@@ -525,3 +543,256 @@ async def test_a_removed_mcp_watch_stops_at_once(setup: _Setup) -> None:
 
     assert setup.mcp.stopped == [str(made.id)]
     assert setup.mcp.running == {}
+
+
+# ---- the hooks route
+
+
+def _signature(secret: str, body: bytes) -> str:
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+@pytest.fixture
+async def hooks(setup: _Setup) -> AsyncGenerator[httpx.AsyncClient]:
+    """A client of the app, in the test's own loop, whose hooks route reaches `setup`'s watches."""
+    app.dependency_overrides[get_hooks_service_v1] = lambda: HooksServiceV1Class(setup.watches)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+    app.dependency_overrides.clear()
+
+
+async def _webhook(setup: _Setup) -> tuple[Watch, str]:
+    made = await setup.watches.add_webhook(setup.one.id, "Review each new pull request.")
+    assert made.token is not None
+    return made, made.token
+
+
+async def test_a_post_to_an_unknown_address_is_404_and_says_nothing(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    await _webhook(setup)
+
+    for token in ["nope", "x" * 43]:
+        answer = await hooks.post(f"/v1/hooks/{token}", content=b"hello")
+        assert (answer.status_code, answer.content) == (404, b"")
+    assert setup.sink.events == []
+
+
+async def test_an_unsigned_post_wakes_the_gem(setup: _Setup, hooks: httpx.AsyncClient) -> None:
+    made, token = await _webhook(setup)
+
+    answer = await hooks.post(f"/v1/hooks/{token}", content=b'{"action": "opened"}')
+
+    assert (answer.status_code, answer.content) == (202, b"")
+    assert setup.sink.events == [
+        GemEvent(
+            gem_id=setup.one.id,
+            watch_id=str(made.id),
+            source="webhook",
+            name="webhook",
+            about="Review each new pull request.",
+            data='{"action": "opened"}',
+            at=_START,
+        )
+    ]
+    assert setup.watch(made).events == 1
+
+
+async def test_a_github_post_signed_with_the_token_wakes_the_gem(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    _, token = await _webhook(setup)
+    body = b'{"action": "opened", "number": 7}'
+
+    answer = await hooks.post(
+        f"/v1/hooks/{token}",
+        content=body,
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-GitHub-Delivery": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
+            "X-Hub-Signature-256": _signature(token, body),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert answer.status_code == 202
+    [event] = setup.sink.events
+    assert (event.name, event.event_id, event.data) == (
+        "pull_request",
+        "72d3162e-cc78-11e3-81ab-4c9367dc0958",
+        body.decode(),
+    )
+
+
+async def test_a_post_whose_signature_is_not_the_token_s_is_401(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    _, token = await _webhook(setup)
+    body = b'{"secret_looking": "do-not-echo"}'
+
+    for signature in [
+        _signature("another", body).encode(),
+        b"sha256=",
+        b"nonsense",
+        "sha256=é".encode("latin-1"),
+    ]:
+        answer = await hooks.post(
+            f"/v1/hooks/{token}", content=body, headers={b"X-Hub-Signature-256": signature}
+        )
+        assert (answer.status_code, answer.content) == (401, b"")
+    assert setup.sink.events == []
+
+
+async def test_a_github_ping_is_answered_and_wakes_nobody(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    body = b'{"zen": "Keep it logically awesome."}'
+
+    answer = await hooks.post(
+        f"/v1/hooks/{token}",
+        content=body,
+        headers={"X-GitHub-Event": "ping", "X-Hub-Signature-256": _signature(token, body)},
+    )
+
+    assert (answer.status_code, answer.content) == (200, b"")
+    assert setup.sink.events == []
+    assert setup.watch(made).events == 0
+
+
+async def test_a_post_over_a_megabyte_is_413_and_not_handed_over(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    _, token = await _webhook(setup)
+    big = b"x" * (1024 * 1024 + 1)
+
+    answer = await hooks.post(f"/v1/hooks/{token}", content=big)
+
+    assert (answer.status_code, answer.content) == (413, b"")
+
+    async def streamed() -> AsyncGenerator[bytes]:
+        # With no length said beforehand: it is counted as it is read.
+        for _ in range(17):
+            yield b"y" * 65536
+
+    answer = await hooks.post(f"/v1/hooks/{token}", content=streamed())
+    assert (answer.status_code, answer.content) == (413, b"")
+    assert setup.sink.events == []
+    # A megabyte exactly is taken, and cut for the model.
+    answer = await hooks.post(f"/v1/hooks/{token}", content=b"z" * (1024 * 1024))
+    assert answer.status_code == 202
+    [event] = setup.sink.events
+    assert len(event.data) == EVENT_TEXT_LIMIT
+    assert event.data.endswith(
+        "[The event was 1048576 characters long. Only the first part is shown.]"
+    )
+
+
+async def test_a_body_that_is_not_utf8_is_handed_over_as_text(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    _, token = await _webhook(setup)
+
+    answer = await hooks.post(f"/v1/hooks/{token}", content=b"caf\xe9")
+
+    assert answer.status_code == 202
+    assert setup.sink.events[0].data == "caf\ufffd"
+
+
+async def test_a_post_that_cannot_be_kept_is_503_and_counts_nothing(
+    setup: _Setup, hooks: httpx.AsyncClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    made, token = await _webhook(setup)
+    setup.sink.fails = ConnectionError("the database went away")
+
+    answer = await hooks.post(f"/v1/hooks/{token}", content=b"private words")
+
+    assert (answer.status_code, answer.content) == (503, b"")
+    assert setup.watch(made).events == 0
+    assert "private words" not in caplog.text
+    assert "ConnectionError" in caplog.text
+
+
+async def test_a_post_to_an_mcp_watch_is_read_by_the_connections(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    assert made.token is not None
+
+    answer = await hooks.post(
+        f"/v1/hooks/{made.token}", content=b'{"n": 1}', headers={"X-Server-Signature": "s"}
+    )
+
+    assert answer.status_code == 202
+    [(watch, headers, body)] = setup.mcp.posts
+    assert (watch.watch_id, headers["x-server-signature"], body) == (str(made.id), "s", b'{"n": 1}')
+    assert [(event.source, event.event_id) for event in setup.sink.events] == [("mcp", "p1")]
+    assert setup.watch(made).cursor == "c9"
+
+    setup.mcp.signed = False
+    answer = await hooks.post(f"/v1/hooks/{made.token}", content=b'{"n": 2}')
+    assert (answer.status_code, answer.content) == (401, b"")
+    assert len(setup.sink.events) == 1
+
+
+async def test_a_timer_has_no_address(setup: _Setup) -> None:
+    made = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+
+    assert (made.token, made.hook_url) == (None, None)
+    assert await setup.watches.find_hook("") is None
+
+
+# ---- the fuse
+
+
+async def test_a_watch_that_brings_61_events_in_an_hour_is_paused(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    for _ in range(60):
+        assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 202
+        await setup.clock.advance(seconds=59)
+    await _until(lambda: len(setup.told) == 1)
+
+    answer = await hooks.post(f"/v1/hooks/{token}", content=b"{}")
+
+    assert (answer.status_code, answer.content) == (409, b"")
+    assert len(setup.sink.events) == 60
+    kept = setup.watch(made)
+    assert kept.state == "paused"
+    assert kept.reason is not None and "more than 60 events in an hour" in kept.reason
+    await _until(lambda: len(setup.told) == 2)
+    # It brings no more, an hour later too.
+    await setup.clock.advance(hours=2)
+    assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 409
+    assert len(setup.sink.events) == 60
+
+
+async def test_the_fuse_counts_only_the_last_hour(setup: _Setup, hooks: httpx.AsyncClient) -> None:
+    made, token = await _webhook(setup)
+    for _ in range(60):
+        assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 202
+    await setup.clock.advance(hours=1)
+
+    assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 202
+    assert setup.watch(made).state == "active"
+
+
+async def test_a_paused_mcp_watch_stops_running_and_does_not_run_again(setup: _Setup) -> None:
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await _until(lambda: str(made.id) in setup.mcp.running)
+    for number in range(61):
+        on_event = setup.mcp.running.get(str(made.id))
+        assert on_event is not None, number
+        await on_event("issue.opened", "{}", None, None, f"c{number}")
+    await _until(lambda: setup.mcp.stopped == [str(made.id)])
+
+    assert setup.watch(made).state == "paused"
+    assert (len(setup.sink.events), setup.watch(made).cursor) == (60, "c59")
+    await setup.watches.close()
+    again = setup.entity()
+    await again.start()
+    await setup.clock.advance(minutes=30)
+    assert len(setup.mcp.runs) == 1
+    await again.close()

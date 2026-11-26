@@ -15,13 +15,18 @@ A watch has one of three sources (see `gem_event.py`):
 - `webhook`: posts to an address of ours, `{PUBLIC_URL}/v1/hooks/{token}`, such as a
   GitHub repo's own webhook. The token is random and cannot be guessed, and it is the
   secret the posts are signed with too. Nothing runs for it: a post comes to the hooks
-  route.
+  route (`hooked`). A post signed the way GitHub signs one must be signed with it. A
+  GitHub `ping` wakes nobody.
 - `timer`: every so many minutes, at least `TIMER_MIN_MINUTES`, in a task of its own.
   It is first due one interval after it is made. One that came due while the backend
   was down goes off once as soon as it is up, and then keeps its rhythm.
 
 Whatever its source, an event is handed to the `EventSink`, which makes it part of the
 gem's conversation.
+
+A fuse keeps a gem from waking itself in a loop (it comments on a pull request, the
+webhook fires, it wakes and comments again): a watch that brings more than
+`_FUSE_EVENTS` events in an hour is paused, and brings no more.
 
 A watch is `active`, `failing` (it cannot run now, and is tried again: `reason` says
 why) or `paused` (it brings no more events until it is removed and made again: `reason`
@@ -40,9 +45,12 @@ paused runs from `start` until `close`.
 
 import asyncio
 import contextlib
+import hashlib
+import hmac
 import json
 import logging
 import secrets
+from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -73,6 +81,7 @@ from app.entities.gem_log import LogEntityClass
 __all__ = [
     "HOOKS_PATH",
     "TIMER_MIN_MINUTES",
+    "HookOutcome",
     "Listener",
     "RemovedBy",
     "Watch",
@@ -98,11 +107,24 @@ _RETRY_MOST_SECONDS = 600.0
 # THE OWNER HAS NOT RULED ON THIS NUMBER.
 _WORKS_AFTER_SECONDS = 60.0
 
+# The fuse: a watch that brings more than this many events within this long is paused.
+# THE OWNER HAS NOT RULED ON THIS. What it has brought is counted in memory, so a
+# restart starts the count again.
+_FUSE_EVENTS = 60
+_FUSE_WINDOW = timedelta(hours=1)
+_FUSED = (
+    f"It brought more than {_FUSE_EVENTS} events in an hour, so it was paused: the gem may "
+    "be waking itself in a loop. Remove it, and it can be made again."
+)
+
 _log = logging.getLogger(__name__)
 
 type WatchState = Literal["active", "failing", "paused"]
 # Who removed a watch: the gem, with a tool call, or the user, in the app.
 type RemovedBy = Literal["gem", "user"]
+# What became of a post to a watch's webhook address: handed over, a GitHub `ping` that
+# wakes nobody, refused for its signature, or not taken because the watch is paused.
+type HookOutcome = Literal["taken", "ignored", "refused", "paused"]
 
 # Told the gem's id and the watch's id of each watch added, removed, or whose state
 # changes. It may raise: that is not passed on.
@@ -211,6 +233,8 @@ class WatchEntityClass:
         self._running: dict[str, _Running] = {}
         # One for each watch: its events, and its changes of state, are written under it.
         self._locks: dict[str, asyncio.Lock] = {}
+        # When each watch brought its events of the last hour, for the fuse.
+        self._recent: dict[str, deque[datetime]] = {}
         self._listeners: set[Listener] = set()
         # Telling listeners, and removing a deleted gem's watches, run on their own.
         self._chores: set[asyncio.Task[None]] = set()
@@ -310,6 +334,7 @@ class WatchEntityClass:
             raise NotFoundError("Watch")
         await self._stop(str(watch.id))
         self._locks.pop(str(watch.id), None)
+        self._recent.pop(str(watch.id), None)
         await self._note(gem_id, "watch.removed", {"watch": str(watch.id), "by": by})
         self._tell(watch)
 
@@ -318,6 +343,42 @@ class WatchEntityClass:
         for watch in await self.list_for(gem_id):
             with contextlib.suppress(NotFoundError):
                 await self.remove(gem_id, str(watch.id), by="user")
+
+    async def find_hook(self, token: str) -> Watch | None:
+        """The watch whose webhook address ends in this token, or None."""
+        if not token:
+            return None
+        return await self._docdb.get(Watch, filters={"token": token})
+
+    async def hooked(self, watch: Watch, headers: Mapping[str, str], body: bytes) -> HookOutcome:
+        """A post came to the watch's webhook address: check it, and hand its event over.
+
+        A watch on MCP events has the connections check it and read it. A plain webhook's
+        post must be signed with the watch's token if it says it is signed (GitHub's
+        `X-Hub-Signature-256`). Its event is named by `X-GitHub-Event`, or "webhook", and
+        its id is `X-GitHub-Delivery`. Raises if the sink cannot keep it.
+        """
+        if watch.state == "paused":
+            return "paused"
+        if watch.source == "mcp":
+            taken = await self._mcp_events.posted(
+                watch.mcp, headers, body, self._on_event(watch.id)
+            )
+            return "taken" if taken else "refused"
+        named = {name.lower(): value for name, value in headers.items()}
+        signature = named.get("x-hub-signature-256")
+        if watch.token is None or (
+            signature is not None and not _signed(watch.token, body, signature)
+        ):
+            return "refused"
+        name = named.get("x-github-event") or "webhook"
+        if name == "ping":
+            return "ignored"
+        text = body.decode("utf-8", errors="replace")
+        event_id = named.get("x-github-delivery")
+        if not await self._deliver(watch.id, name, text, event_id, self._now(), {}):
+            return "paused"
+        return "taken"
 
     async def _add(self, watch: Watch) -> Watch:
         await self._docdb.insert(watch)
@@ -466,12 +527,20 @@ class WatchEntityClass:
     ) -> bool:
         """Hand one event of a watch to the sink, and keep `fields` with it once it is taken.
 
-        Returns False if the watch is gone or paused: then nothing is handed over. Raises
-        if the sink cannot keep it, and then nothing is kept.
+        Returns False if the watch is gone or paused, or the fuse pauses it now: then
+        nothing is handed over. Raises if the sink cannot keep it, and then nothing is
+        kept.
         """
         async with self._lock(watch_id):
             watch = await self._docdb.get(Watch, filters={"id": watch_id})
             if watch is None or watch.state == "paused":
+                return False
+            now = self._now()
+            recent = self._recent.setdefault(str(watch_id), deque())
+            while recent and recent[0] <= now - _FUSE_WINDOW:
+                recent.popleft()
+            if len(recent) >= _FUSE_EVENTS:
+                await self._pause(watch, _FUSED)
                 return False
             await self._sink.arrived(
                 GemEvent(
@@ -485,10 +554,11 @@ class WatchEntityClass:
                     event_id=event_id,
                 )
             )
+            recent.append(now)
             changed = watch.model_copy(
                 update={
                     **fields,
-                    "last_event_at": self._now(),
+                    "last_event_at": now,
                     "events": watch.events + 1,
                     "state": "active",
                     "reason": None,
@@ -498,6 +568,18 @@ class WatchEntityClass:
             if watch.state != changed.state:
                 self._tell(changed)
             return True
+
+    async def _pause(self, watch: Watch, reason: str) -> None:
+        """Pause the watch, and stop its task.
+
+        The task is stopped last, and not waited for: it may be the one asking, and is
+        then stopped at the next thing it waits on.
+        """
+        paused = watch.model_copy(update={"state": "paused", "reason": reason})
+        if await self._store(paused, {"state", "reason"}):
+            self._tell(paused)
+        if (running := self._running.pop(str(watch.id), None)) is not None:
+            running.task.cancel()
 
     async def _failing(self, watch_id: PydanticObjectId, failure: Exception) -> None:
         """The watch cannot run now: it is failing, and says why. It never raises."""
@@ -551,6 +633,12 @@ class WatchEntityClass:
         self._chores.add(chore)
         chore.add_done_callback(_done)
         chore.add_done_callback(self._chores.discard)
+
+
+def _signed(secret: str, body: bytes, signature: str) -> bool:
+    """Whether `signature` is the body's, as GitHub signs one: `sha256=` and its HMAC."""
+    expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected.encode(), signature.encode())
 
 
 def _cut(text: str) -> str:

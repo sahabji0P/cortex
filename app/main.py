@@ -13,6 +13,7 @@ from app.adapters import AdapterRegistry
 from app.config import settings
 from app.core.errors import AppError
 from app.entities import EntitiesRegistry
+from app.entities.watch_ent import HOOKS_PATH
 
 
 @asynccontextmanager
@@ -69,10 +70,11 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     """FastAPI's own 422, without what was sent where that may hold a secret.
 
     A refused field is answered with the input it was refused for. For a connection
-    that is its headers, whose values are never to be sent back.
+    that is its headers, whose values are never to be sent back. What is posted to a
+    watch's webhook is never sent back either.
     """
     errors = exc.errors()
-    if request.url.path.startswith("/v1/connections"):
+    if request.url.path.startswith(("/v1/connections", HOOKS_PATH)):
         errors = [{k: v for k, v in error.items() if k != "input"} for error in errors]
     return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
