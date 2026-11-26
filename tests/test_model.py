@@ -265,6 +265,39 @@ async def test_a_long_request_gets_a_second_cache_mark_far_enough_back() -> None
     assert short["cache_control"] == {"type": "ephemeral"}
 
 
+async def test_the_second_cache_mark_starts_at_nineteen_blocks() -> None:
+    llm = _Claude([_final()], [_final()])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
+
+    # 18 blocks (nine calls, no question), then 19 (the question too).
+    for history in (_round_of_calls(9)[1:], _round_of_calls(9)):
+        async for _ in model.round(history, instructions="", think=False):
+            pass
+
+    eighteen, nineteen = llm.requests
+    assert _marked(eighteen) == []
+    # The mark goes on the first block.
+    assert _marked(nineteen) == [18]
+
+
+def _reads_cache(request: dict, added: int) -> bool:
+    """Whether the request finds what the one before cached at its end, `added` blocks
+    back: each mark looks at its own block and the 19 before it."""
+    return any(mark <= added <= mark + 19 for mark in [0, *_marked(request)])
+
+
+async def test_the_two_marks_reach_back_thirty_seven_blocks_without_a_gap() -> None:
+    llm = _Claude([_final()])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
+
+    async for _ in model.round(_round_of_calls(19), instructions="", think=False):
+        pass
+
+    (request,) = llm.requests
+    assert all(_reads_cache(request, added) for added in range(38))
+    assert not _reads_cache(request, 38)
+
+
 async def test_the_second_cache_mark_passes_over_a_result_that_loads_tools() -> None:
     found = ToolSpec(
         name="tracker__close",

@@ -535,7 +535,8 @@ class _AnthropicModel:
 # nothing from the end, and the whole conversation is read and cached again. So a second
 # mark goes this many blocks before the end, and looks back as far again: a request that
 # adds up to 37 blocks, some 18 calls in one round, still reads the cache. Where the mark
-# falls inside what is cached already, it costs nothing.
+# falls inside what is cached already, it costs nothing. 18 leaves room: the mark may move
+# one block back past a search's result, and its window still meets the end mark's.
 _FAR_BACK = 18
 
 
