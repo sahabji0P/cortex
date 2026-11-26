@@ -955,10 +955,11 @@ A watch, as `GET` answers:
   address of ours) or `timer`.
 - **`delivery`** is how its events reach the backend now, in the words of a connection's
   event kinds: `push`, `webhook` or `poll`. A webhook is `webhook` from when it is made.
-  A watch on MCP events says the one it last started on, which can move from `webhook`
-  to `poll` when the server will not post to the address, and is null until it first
-  starts on one. Null for a timer, and for a watch stored before the backend kept it,
-  whatever its source, until it next starts on one: a webhook stored then stays null.
+  A watch on MCP events says the one its server last answered on, which can move from
+  `webhook` to `poll` when the server will not post to the address, and is null until
+  the server first answers. Null for a timer, and for a watch stored before the backend
+  kept it, whatever its source, until its server next answers: a webhook stored then
+  stays null.
 - **`state`** is `active`, `failing` (it cannot run now and is tried again) or `paused`
   (it brings no more events until it is removed and made again). `reason` says why when
   it is not active, in words to show, and is null when it is.
