@@ -63,6 +63,21 @@ class EntitiesRegistry:
         cls.Conversations = ConversationEntityClass(
             gems=cls.Gems, store=cls.ConversationStore, log=cls.Log
         )
+        # Where the events a gem watches for come in. Chat tells them, through the
+        # conversations, so it may come after.
+        cls.Events = EventsEntityClass(
+            gems=cls.Gems, conversations=cls.Conversations, store=cls.ConversationStore
+        )
+        # Run from the app's start (`start`) until it stops (`close`).
+        cls.Watches = WatchEntityClass(
+            docdb=adapter.DocDB,
+            gems=cls.Gems,
+            log=cls.Log,
+            sink=cls.Events,
+            mcp_events=McpEventsEntityClass(
+                docdb=adapter.DocDB, mcp=adapter.Mcp, connections=cls.Connections
+            ),
+        )
         cls.Chat = ChatEntityClass(
             gems=cls.Gems,
             darbar=cls.Darbar,
@@ -71,10 +86,7 @@ class EntitiesRegistry:
             anthropic=adapter.Anthropic,
             search=adapter.Parallel,
             connections=cls.Connections,
-        )
-        # Where the events a gem watches for come in. After chat, which tells them.
-        cls.Events = EventsEntityClass(
-            gems=cls.Gems, conversations=cls.Conversations, store=cls.ConversationStore
+            watches=cls.Watches,
         )
         cls.Voice = VoiceEntityClass(
             stt=adapter.CartesiaSTT,
@@ -89,16 +101,7 @@ class EntitiesRegistry:
             voice=cls.Voice,
             conversations=cls.Conversations,
             connections=cls.Connections,
-        )
-        # Run from the app's start (`start`) until it stops (`close`).
-        cls.Watches = WatchEntityClass(
-            docdb=adapter.DocDB,
-            gems=cls.Gems,
-            log=cls.Log,
-            sink=cls.Events,
-            mcp_events=McpEventsEntityClass(
-                docdb=adapter.DocDB, mcp=adapter.Mcp, connections=cls.Connections
-            ),
+            watches=cls.Watches,
         )
         # A reset gem forgets what its watches were for, so they end with the reset.
         cls.Conversations.when_reset(cls.Watches.end_for)
