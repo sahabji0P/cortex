@@ -5,16 +5,19 @@ use an OpenAI model, whose cache is held to last 30 minutes, unless a test says
 otherwise. The searches return a long page, so their results can be expired.
 """
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
+from app.entities.call_ent import CallFault
 from app.entities.cold_start import EXPIRED, KEEP_UNDER
 from app.entities.conversation_store import LogEntry
 from app.routers.gems.service import GemsServiceV1Class
 from tests.test_chat import _chat, _close, _kept, _open, _said
+from tests.test_one_conversation import _hang_up, _said_and_heard, _spoken, _world
 from tests.test_voice_conversation import _completed, _Search, _search_call, _starts
 from tests.time_lines import set_clock
 
@@ -296,3 +299,65 @@ async def test_a_cold_start_that_cannot_be_stored_fails_the_reply(
     assert await setup.stored() == stored_before
     assert _of(await _log(setup), "cache.cold") == []
     await _close(setup.socket, setup.linked)
+
+
+# ---- in a call
+
+
+async def _called_after_searching(monkeypatch: pytest.MonkeyPatch, quiet: timedelta) -> Any:
+    """A gem that searched in writing, then is called after being quiet for `quiet`."""
+    move = set_clock(monkeypatch, _START)
+    world = await _world(
+        _looks("first", "call_a"), _said("Found it."), _spoken("Hello."), search=_LongSearch()
+    )
+    await world.write("look it up")
+    move(_START + quiet)
+    return world
+
+
+async def test_a_call_after_the_lifetime_starts_cold(monkeypatch: pytest.MonkeyPatch) -> None:
+    world = await _called_after_searching(monkeypatch, timedelta(minutes=31))
+
+    world.llm.starts_cold()
+    call, f, keeping = await world.call()
+    await _said_and_heard(f, "hello")
+    await _hang_up(call, keeping)
+
+    colds = await world.store.of_kind(world.gem.id, "cache.cold")
+    assert [cold.data["reason"] for cold in colds] == ["quiet"]
+    assert _results(world.llm.requests[-1]) == [EXPIRED]
+
+
+async def test_a_call_within_the_lifetime_keeps_every_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await _called_after_searching(monkeypatch, timedelta(minutes=10))
+
+    call, f, keeping = await world.call()
+    await _said_and_heard(f, "hello")
+    await _hang_up(call, keeping)
+
+    assert await world.store.of_kind(world.gem.id, "cache.cold") == []
+    assert _PAGE in _results(world.llm.requests[-1])[0]
+
+
+async def test_a_call_whose_cold_start_cannot_be_stored_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await _called_after_searching(monkeypatch, timedelta(minutes=31))
+    docdb = world.store._docdb
+
+    stored_before = await world.stored()
+
+    call, _, keeping = await world.call()
+    docdb.breaks_after = 0
+    with pytest.raises(CallFault):
+        async with asyncio.timeout(2):
+            await keeping
+    with pytest.raises(CallFault):
+        await call.close()
+    docdb.breaks_after = None
+
+    # The call failed, and nothing it added is stored: not its cold start, not its line.
+    assert await world.store.of_kind(world.gem.id, "cache.cold") == []
+    assert await world.stored() == stored_before

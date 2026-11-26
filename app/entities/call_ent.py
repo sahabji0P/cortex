@@ -292,6 +292,8 @@ class CallEntityClass:
                 conversation = line.open(
                     darbar=darbar,
                     history=stored.items,
+                    # Checked once, as the call starts: a call never starts cold part-way.
+                    sent=lambda changed: self._conversations.sent(record, stored, changed=changed),
                     last_mode=stored.mode,
                     late=kept.late,
                     connected=connected,
