@@ -25,6 +25,8 @@ unless it says otherwise:
                      lost: it is written at once, and the source that brought it is told
                      only once it is stored (`record_event`). The gem is told it later,
                      by an `event.received` that `delivers` it.
+- `watch.added`, `watch.removed`  the gem made a watch, or it was removed (`by` the
+                     `gem` or the `user`). No turn. Written by `watch_ent.py`.
 - `turn.opened`      a reply was asked for. `by` says by what: the `user`, the `gem`
                      speaking first, a `background_result` that is to be told, or an
                      `event` that came in. `mode` is `call` or `chat`.
