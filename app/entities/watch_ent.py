@@ -104,6 +104,7 @@ from app.entities.tools import Tool
 
 __all__ = [
     "HOOKS_PATH",
+    "HOOK_CONTENT_TYPE",
     "TIMER_MIN_MINUTES",
     "HookOutcome",
     "Listener",
@@ -116,6 +117,8 @@ __all__ = [
 # Where a watch's webhook is posted to, under `settings.public_url`, followed by its
 # token. The route is defined in `app/routers/hooks`.
 HOOKS_PATH = "/v1/hooks"
+# What a watch's webhook is to be registered to post.
+HOOK_CONTENT_TYPE = "application/json"
 # How many random bytes a webhook's token is made of.
 _TOKEN_BYTES = 32
 
@@ -526,7 +529,7 @@ class WatchEntityClass:
             return (
                 f"Watching, under the id {made.id}. Register this webhook where its events come "
                 f"from:\nAddress: {made.hook_url}\nSecret: {made.token}\nContent type: "
-                "application/json\nEach post to it wakes you. The secret is for that "
+                f"{HOOK_CONTENT_TYPE}\nEach post to it wakes you. The secret is for that "
                 "registration only: do not show it to anyone."
             )
         if source == "event":
