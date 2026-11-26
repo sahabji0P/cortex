@@ -403,7 +403,7 @@ Every other kind is something that happened. No model is ever sent them.
 | `call.opened`, `call.closed` | none | A call began, or ended. No turn. Writing has neither |
 | `gem.reset` | none | The user reset the gem (see [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset)). No turn. The gem knows nothing from before it: its conversation is the remembered entries after the latest one |
 | `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) or `background_result` (results of calls that went on in the background are to be told, with nothing new from the user). `mode` is `call` or `chat` |
-| `cache.cold` | `reason`, `before` | The conversation starts cold: from here on, long tool results before `before` are sent expired (see [A cold start](#a-cold-start)). `reason` is `quiet` (the provider's cache has certainly gone) or `settings` (the model, the instructions or the tools changed). `before` is the `seq` of the last `request.sent` before it. No turn. Written just after the `settings.changed` it follows, if any: in writing before the reply's `turn.opened`, in a call before the call's first line |
+| `cache.cold` | `reason`, `before` | The conversation starts cold: from here on, long tool results before `before` are sent expired (see [A cold start](#a-cold-start)). `reason` is `quiet` (the provider's cache is taken to have gone) or `settings` (the model, the instructions or the tools changed). `before` is the `seq` of the last `request.sent` before it. No turn. Written just after the `settings.changed` it follows, if any: in writing before the reply's `turn.opened`, in a call before the call's first line |
 | `settings.changed` | any of `model`, `instructions`, `tools` | What the gem's requests are made with differs from what was last written down. Only the parts that changed are there, each in full (see below). Written before what it applies to: in writing, before the reply's `turn.opened`; in a call, just after `call.opened`, before the call's first line. Then it has no turn, and holds from there on. A change found later, at a request, has that request's turn (see below) |
 | `request.sent` | `request`, `attempt`, `think`, `count` | A request went to the model. `request` is its number for this gem. `attempt` is always 1 for now: a request the provider's library tries again by itself is not seen. `think` is whether the model was asked to think first. `count` is how many items it was sent (see below) |
 | `request.done` | `request`, `attempt`, `outcome`, `text`, `calls`, `first_token_at`, `usage`, `cost_usd`, `priced`, `error` | How that request ended (see below) |
@@ -427,14 +427,14 @@ instructions and the tools of the latest `settings.changed` before it.
 
 A gem's conversation only grows, and every request within a sitting starts with the
 whole of the one before it, so the provider's prompt cache holds. When the cache has
-certainly gone, everything is sent at full price anyway: that is a cold start, and
+gone, everything is sent at full price anyway: that is a cold start, and
 from then on, old tool results are sent expired instead of whole. Nothing stored
 changes: only what the model is sent.
 
 It is checked once for each reply in writing, and once when a call starts, never during
 a call. It is a cold start if the gem has had a `request.sent` since its latest
 `gem.reset`, and either the last one was sent longer ago than its provider keeps a
-cache (`quiet`: see [how long](models.md#one-history-two-providers)), or the model (`via` too), the
+cache (`quiet`: see [how long](models.md#caching)), or the model (`via` too), the
 instructions or the tools changed (`settings`). It is then written down as `cache.cold`,
 which, like what the gem remembers, must be stored: a reply whose cold start cannot be
 stored ends in `chat.error`, and a call in `call.failed`.
