@@ -32,6 +32,14 @@ A gem may watch only the events of a connection open to it: `watchable` lists th
 with the arguments each takes, and `watch` refuses any other. Which delivery is used
 (stream, webhook or poll) is the connections' choice, never the gem's.
 
+A watch's `delivery` says how its events reach the backend now, in the words of
+a connection's event kinds: `push`, `webhook` or `poll`. The connections tell the watch
+each one it starts on, and it is kept, and told to the app when it changes: so a watch
+whose server would not take the webhook says `poll`. It is none until the watch first
+starts on one. A plain webhook says `webhook` from when it is made, and a timer none. A
+watch stored before watches kept it has none until it next starts on one, so a webhook
+stored then has none.
+
 The cursor after each event is kept, so after a restart the watch goes on from where it
 left off. Each MCP watch has a webhook address too, for a server that delivers by
 posting to one: a post to it is checked and read by the connections, not here.
@@ -99,6 +107,30 @@ why.
   minute are **not yet ruled on**.
 - **A post that cannot be kept** is answered 503, and nothing is counted, so the sender
   may try again.
+
+### The gem is told
+
+A watch tells its gem when its state changes, once for each change, as an event of its
+own handed to the sink like any other: written down as `event.came`, told at the gem's
+next turn, and waking it if it is quiet.
+
+| Event | When | Its data |
+| --- | --- | --- |
+| `watch.failing` | An active watch starts failing | The `reason` |
+| `watch.paused` | The fuse pauses it | The `reason` |
+| `watch.recovered` | A failing watch is active again | None |
+
+- **Once.** A failing watch tried again tells nothing more, nor one whose `reason`
+  changes while it stays failing: the app is told of that, the gem is not. Each has an
+  id of its own change (its name and when it changed), so a later break of the same
+  watch is not taken for this one.
+- **Counted nowhere.** It is not in the watch's `events`, the fuse does not count it,
+  and a paused watch, which brings no more events, still tells it.
+- **It never holds the watch up.** It is handed over on its own, after the change is
+  kept. If the sink cannot keep it, that is logged, and the gem is not told: a timer
+  failing because the sink cannot keep its event is the case, and its gem hears only
+  that it works again.
+- **Removing a watch** is not a change of state, and tells the gem nothing.
 
 ## The fuse
 
