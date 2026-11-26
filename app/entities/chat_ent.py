@@ -68,6 +68,7 @@ from app.entities.late_results import LateResult
 from app.entities.model import LLM, ModelName, is_openai, model_for
 from app.entities.pending_events import PendingEvent, told_events
 from app.entities.tools import gem_toolbox
+from app.entities.watch_ent import WatchEntityClass
 from app.entities.written_ent import WrittenConversation, WrittenEvent
 
 __all__ = ["ChatEntityClass", "ChatEvent", "ChatTurn", "Deliver"]
@@ -166,6 +167,7 @@ class ChatEntityClass:
         anthropic: AnthropicAdapterClass,
         search: ParallelAdapterClass,
         connections: ConnectionEntityClass | None = None,
+        watches: WatchEntityClass | None = None,
     ) -> None:
         self._gems = gems
         self._darbar = darbar
@@ -175,6 +177,8 @@ class ChatEntityClass:
         self._search = search
         # The tool servers gems can use. Without it, no gem is offered a connection's tools.
         self._connections = connections
+        # A gem's watches. Without it, no gem is offered the tools to watch with.
+        self._watches = watches
         # The latest message to each gem, by `gem_key`: its id as the client spelled it,
         # and its client. A late result, or an event, is told to that client.
         self._latest: dict[str, tuple[str, Deliver]] = {}
@@ -315,6 +319,8 @@ class ChatEntityClass:
         # Read for every reply, so a connection opened or closed to the gem applies
         # from the next message.
         connected = [] if self._connections is None else await self._connections.tools_for(gem.id)
+        if self._watches is not None:
+            connected = [*connected, *self._watches.tools_for(gem.id)]
         tools = gem_toolbox(gem.tools, self._search, late.tool, history.items, connected)
         model = model_for(ready.llm, ready.name, tools.specs)
         # Read for every reply, so a change to it applies from the next message.

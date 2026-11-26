@@ -43,6 +43,7 @@ from app.entities.gem_log import Recording
 from app.entities.history import TimeTold
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass, VoiceEvent, VoiceLine
+from app.entities.watch_ent import WatchEntityClass
 
 __all__ = ["CallEntityClass", "CallFault", "CallRefused", "OpenCall"]
 
@@ -201,6 +202,7 @@ class CallEntityClass:
         voice: VoiceEntityClass,
         conversations: ConversationEntityClass,
         connections: ConnectionEntityClass | None = None,
+        watches: WatchEntityClass | None = None,
     ) -> None:
         self._gems = gems
         self._darbar = darbar
@@ -208,6 +210,8 @@ class CallEntityClass:
         self._conversations = conversations
         # The tool servers gems can use. Without it, no gem is offered a connection's tools.
         self._connections = connections
+        # A gem's watches. Without it, no gem is offered the tools to watch with.
+        self._watches = watches
 
     async def open(
         self, gem: str, *, speaks_first: bool | None = None, time_zone: str | None = None
@@ -244,6 +248,8 @@ class CallEntityClass:
             connected = (
                 [] if self._connections is None else await self._connections.tools_for(config.id)
             )
+            if self._watches is not None:
+                connected = [*connected, *self._watches.tools_for(config.id)]
         except Exception as exc:
             raise CallFault("the gem's connections could not be read", exc) from exc
         try:
