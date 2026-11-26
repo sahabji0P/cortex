@@ -91,6 +91,25 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The Darbar text does not mention the time line: the line explains itself.
 - To watch: a zone changed by the user may show only once the ten minutes are up.
 
+### Watches (decided 2026-11-26)
+
+- A gem can watch things: something that happens wakes it, and it does what its instructions say.
+- Waking on an event is not memory. It does not wait for Gyan Kosh.
+- Three sources: a connection's MCP events, a plain webhook, a timer.
+- MCP events (SEP-3415, extension `io.modelcontextprotocol/events`): Cortex listens, the server publishes. All three deliveries: poll, stream, webhook.
+- The gem never picks the delivery. Cortex does, from what the server offers: stream, then webhook, then poll.
+- Webhooks work before we are hosted: a tunnel to the Mac is enough.
+- A plain webhook, such as GitHub's own, is for anything with no MCP events. GitHub's MCP server sends none yet.
+- The gem makes a watch itself, with a tool call. Every watch belongs to one gem: none is free.
+- The app shows each gem's watches, and the user can remove one.
+- A gem woken by an event keeps all its tools. No special mode.
+- An event reaches the model as a user message in an event tag: outside data, not the user's words. Never as a made-up tool call.
+- An event never cuts a reply and is never an interruption. It waits for the next turn and goes in ahead of what the user says.
+- A gem that is quiet is woken by the event itself: a reply nobody asked for, stored even with the app closed.
+- Events that come while a turn runs all go into the next one: a burst is one turn, not one each.
+- "Notify me" is the gem writing in the chat. Notifications on the Mac come later.
+- Cortex publishing events of its own (its own MCP server) is a separate, later piece.
+
 ## Base (next, order not fixed, no rush)
 
 - The log: a provider library's own retries, each written as a request of its own. Today up to two are made unseen.
@@ -110,7 +129,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 
 - Gyan Kosh: what context a gem carries, and how much. The main work, and the important one.
 - Homes and the Darbar are part of the memory design too: what is private to a gem, what is common.
-- Proactivity: gems calling or messaging first, routines. Comes with memory.
+- Proactivity beyond watches: a gem calling you first. Waking on an event is decided (see Watches).
 - Gem to gem samvaad, and several gems in one call.
 - Workers: a worker returns to its parent gem. A shared worker that is triggered is a new idea.
 - Vault: secrets per gem, and shared ones. The model never sees a secret.
