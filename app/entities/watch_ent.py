@@ -761,6 +761,10 @@ class WatchEntityClass:
     ) -> bool:
         """Hand one event of a watch to the sink, and keep `fields` with it once it is taken.
 
+        The event is counted, and the fuse told of it, only if the sink kept it now: one it
+        passed over as already kept (delivered again) is not, but `fields` are kept with it
+        all the same, and it is answered as taken, so a timer or a cursor moves on.
+
         Returns False if the watch is gone or paused, or the fuse pauses it now: then
         nothing is handed over. Raises if the sink cannot keep it, and then nothing is
         kept.
@@ -776,7 +780,7 @@ class WatchEntityClass:
             if len(recent) >= _FUSE_EVENTS:
                 await self._pause(watch, _FUSED)
                 return False
-            await self._sink.arrived(
+            kept = await self._sink.arrived(
                 GemEvent(
                     gem_id=watch.gem_id,
                     watch_id=str(watch.id),
@@ -788,17 +792,14 @@ class WatchEntityClass:
                     event_id=event_id,
                 )
             )
-            recent.append(now)
+            counted: dict[str, Any] = {}
+            if kept:
+                recent.append(now)
+                counted = {"last_event_at": now, "events": watch.events + 1}
             changed = watch.model_copy(
-                update={
-                    **fields,
-                    "last_event_at": now,
-                    "events": watch.events + 1,
-                    "state": "active",
-                    "reason": None,
-                }
+                update={**fields, **counted, "state": "active", "reason": None}
             )
-            await self._store(changed, {*fields, "last_event_at", "events", "state", "reason"})
+            await self._store(changed, {*fields, *counted, "state", "reason"})
             if watch.state != changed.state:
                 self._tell(changed)
                 self._tell_gem(watch, changed)

@@ -84,10 +84,12 @@ class GemEvent:
 class EventSink(Protocol):
     """Takes the events that come in, and makes them part of their gem's conversation."""
 
-    async def arrived(self, event: GemEvent) -> None:
+    async def arrived(self, event: GemEvent) -> bool:
         """An event has come in. Returns once it is safely kept, before the gem answers it.
 
-        Raises if it could not be kept: the source may then try again.
+        Returns True if it was kept now, False if it was passed over as one already kept
+        (the same watch and `event_id`, delivered again). Raises if it could not be kept:
+        the source may then try again.
         """
         ...
 

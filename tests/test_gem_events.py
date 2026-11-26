@@ -569,11 +569,12 @@ async def test_an_event_delivered_again_by_its_own_id_is_kept_and_told_once() ->
     # The same delivery at once, as a sender trying again while the first is kept, then
     # again later, as after a restart; then the same id from another watch, and an event
     # with no id of its own, twice.
-    await asyncio.gather(sink.arrived(once), sink.arrived(once))
-    await sink.arrived(once)
-    await sink.arrived(replace(once, watch_id="w2"))
-    await sink.arrived(_gem_event(world))
-    await sink.arrived(_gem_event(world))
+    # Each says whether it was kept now, so the watch counts only the ones that were.
+    assert sorted(await asyncio.gather(sink.arrived(once), sink.arrived(once))) == [False, True]
+    assert await sink.arrived(once) is False
+    assert await sink.arrived(replace(once, watch_id="w2")) is True
+    assert await sink.arrived(_gem_event(world)) is True
+    assert await sink.arrived(_gem_event(world)) is True
     await _until(lambda: len(_requests(world)) == 2)
     await _quiet(world)
 

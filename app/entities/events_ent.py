@@ -56,7 +56,7 @@ class EventsEntityClass(EventSink):
         # while the first is still being kept is not kept twice.
         self._keeping: set[tuple[str, str, str]] = set()
 
-    async def arrived(self, event: GemEvent) -> None:
+    async def arrived(self, event: GemEvent) -> bool:
         """An event has come in. Returns once it is stored, before the gem answers it.
 
         Raises `NotFoundError` if the gem is not there, and what stopped it if it could
@@ -65,22 +65,24 @@ class EventsEntityClass(EventSink):
         told the event at its next turn.
 
         An event with its own id (`event_id`) is kept once: delivered again, as a source
-        does when it tries again after a failure or a restart, it is passed over.
+        does when it tries again after a failure or a restart, it is passed over, and
+        False is returned. True means it was kept now.
         """
         key = str(event.gem_id)
         if not await self._gems.exists(key):
             raise NotFoundError("Gem")
         if event.event_id is None:
             await self._keep(event)
-            return
+            return True
         same = (key, event.watch_id, event.event_id)
         if same in self._keeping:
-            return
+            return False
         self._keeping.add(same)
         try:
             if await self._store.event_came(event.gem_id, event.watch_id, event.event_id):
-                return
+                return False
             await self._keep(event)
+            return True
         finally:
             self._keeping.discard(same)
 

@@ -96,16 +96,25 @@ _CHANGES = ("watch.failing", "watch.paused", "watch.recovered", "watch.ended")
 
 
 class _Sink:
-    """The event sink: it keeps what it is handed, or fails while `fails` is set."""
+    """The event sink: it keeps what it is handed, or fails while `fails` is set.
+
+    Like the real one, it passes over an event whose watch and own id it has kept.
+    """
 
     def __init__(self) -> None:
         self.events: list[GemEvent] = []
         self.fails: Exception | None = None
 
-    async def arrived(self, event: GemEvent) -> None:
+    async def arrived(self, event: GemEvent) -> bool:
         if self.fails is not None:
             raise self.fails
+        if event.event_id is not None and any(
+            (kept.watch_id, kept.event_id) == (event.watch_id, event.event_id)
+            for kept in self.events
+        ):
+            return False
         self.events.append(event)
+        return True
 
     @property
     def caught(self) -> list[GemEvent]:
@@ -978,6 +987,54 @@ async def test_the_fuse_counts_only_the_last_hour(setup: _Setup, hooks: httpx.As
 
     assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 202
     assert setup.watch(made).state == "active"
+
+
+async def test_a_post_delivered_again_is_answered_but_counted_once_and_not_by_the_fuse(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    headers = {"X-GitHub-Event": "push", "X-GitHub-Delivery": "d-1"}
+    assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}", headers=headers)).is_success
+    first = setup.watch(made).last_event_at
+
+    # A sender trying again, more often than the fuse lets events in.
+    await setup.clock.advance(minutes=1)
+    for _ in range(70):
+        answer = await hooks.post(f"/v1/hooks/{token}", content=b"{}", headers=headers)
+        assert (answer.status_code, answer.content) == (202, b"")
+
+    kept = setup.watch(made)
+    assert (kept.state, kept.events, kept.last_event_at) == ("active", 1, first)
+    assert len(setup.sink.caught) == 1
+    # The fuse counted the one event it kept: 59 more still go in.
+    for number in range(59):
+        delivery = {**headers, "X-GitHub-Delivery": f"d-{number + 2}"}
+        assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}", headers=delivery)).is_success
+    assert (setup.watch(made).state, setup.watch(made).events) == ("active", 60)
+
+
+async def test_a_timer_whose_event_was_kept_before_still_moves_on(setup: _Setup) -> None:
+    made = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    # Its event was kept, but not its next time, as when the backend stopped in between.
+    setup.sink.events.append(
+        GemEvent(
+            gem_id=setup.one.id,
+            watch_id=str(made.id),
+            source="timer",
+            name="timer",
+            about="Check the inbox.",
+            data="",
+            at=_START,
+            event_id=f"timer:{(_START + timedelta(minutes=5)).isoformat()}",
+        )
+    )
+
+    await setup.clock.advance(minutes=5)
+
+    kept = setup.watch(made)
+    assert kept.due_at == _START + timedelta(minutes=10)
+    assert (kept.state, kept.events, kept.last_event_at) == ("active", 0, None)
+    assert len(setup.sink.caught) == 1
 
 
 async def test_a_paused_mcp_watch_stops_running_and_does_not_run_again(setup: _Setup) -> None:
