@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # the backend runs on the user's own Mac. Rethink it when the backend is deployed or
     # runs on another machine. Changing it makes each connection register again.
     backend_url: str = "http://127.0.0.1:8000"
+    # The public https address of this backend, such as a tunnel to the user's Mac, with
+    # no path. A watch's webhook is posted to `{public_url}/v1/hooks/{token}`, so it has
+    # to be reachable from where the events come from. The tunnel should let through only
+    # `/v1/hooks/` (see `docs/watches.md`). Empty = no watch can be given a webhook.
+    public_url: str = ""
 
     # The model a gem answers with, in a call or in writing, when its config names none:
     # "6 Luna", "6.1 Terra" or "6.1 Sol" (OpenAI); "Haiku 5.5", "Sonnet 5.5" or "Opus 5.5"

@@ -34,7 +34,7 @@ config ← core ← adapters ← entities ← routers ← main
 | `cartesia_stt_adp.py` | Cartesia speech-to-text, which also detects turns |
 | `cartesia_tts_adp.py` | Cartesia text-to-speech, with each word's timing |
 | `parallel_adp.py` | Parallel web search |
-| `mcp_adp.py` | MCP tool servers, over Streamable HTTP, with their sign-in and their icons |
+| `mcp_adp.py` | MCP tool servers, over Streamable HTTP, with their sign-in, their icons and their events |
 | `cliproxy_adp.py` | CLIProxyAPI's management API: the proxy's ChatGPT logins |
 | `docdb_adp.py` | MongoDB |
 | `redis_adp.py` | Redis: only the user login writes to it |
@@ -54,6 +54,8 @@ config ← core ← adapters ← entities ← routers ← main
 | `conversation_store.py` | each gem's log in the database (`GemLog`) |
 | `history.py` | the rules for what joins a history and when: the user's words, the lines where the mode changes, what is kept beside an item |
 | `late_results.py` | tool calls that outlive their reply, held until their results are told: one copy for a call and for chat |
+| `pending_events.py` | events that came in for a gem's watches, held until they are told: one copy for a call and for chat |
+| `events_ent.py` | where every watch hands its events (the `EventSink`), and waking gems with events waiting after a restart |
 | `cold_start.py` | when a conversation starts cold, and the items as they are sent from then on, with old long tool results expired |
 | `gem_log.py` | everything that happens with a gem, numbered and written down as it happens |
 | `model.py` | either provider's model behind one interface, and the list of models |
@@ -62,14 +64,19 @@ config ← core ← adapters ← entities ← routers ← main
 | `instructions.py` | what the model is told, in layers |
 | `tools.py` | the tools a model may call, each a small object, and which a gem is offered |
 | `connection_ent.py` | the tool servers, which gem may use which, and signing in to them |
+| `gem_event.py` | what wakes a gem: an event, and the shapes that cross between a watch's source and the gem |
+| `watch_ent.py` | a gem's watches: kept, run (MCP events, webhooks, timers), the fuse, and the gem's tools for them ([Watches](watches.md)) |
+| `mcp_events_ent.py` | the kinds of event a gem's connections serve, and running a watch on one |
 | `gem_ent.py` | a gem's config and its versions |
 | `darbar_ent.py` | the Darbar text every gem is told first |
 | `user_ent.py` | the user account behind `/v1/users` |
 
 ### Routers
 
-`link` (the standing socket, which carries chat, calls and the log), `gems`, `darbar`,
-`connections`, `providers`, `voice` (the model list) and `user`.
+`link` (the standing socket, which carries chat, calls and the log), `gems`, `watches` (a
+gem's watches), `hooks` (where a watch's webhook is posted, the one route meant to be
+reached from outside), `darbar`, `connections`, `providers`, `voice` (the model list) and
+`user`.
 
 ## The loop, and the surface a reply is delivered on
 
@@ -121,6 +128,14 @@ loses nothing: a socket that closes cuts its replies, and they are stored as cut
   result comes in during a call is told in the call. One still running when a call ends
   carries on, and its result is told in writing, to the socket of the latest message,
   or only stored if there is none.
+- **Events.** An event a watch of the gem's caught never cuts a reply. It waits for the
+  gem's next turn and goes in ahead of what the user says; events that come while a
+  turn runs all go into the next one. A gem that is quiet is woken by it: in a call, at
+  the next moment nobody speaks and nothing plays; in writing, by a reply nobody asked
+  for, sent to every socket that is open, or to nobody, and stored either way.
+  Events still waiting when a call ends are told in writing. Each is written down in the
+  log as it comes, so one that came before a restart is told after it
+  ([`events_ent.py`](../app/entities/events_ent.py)). A reset drops them.
 - **Calls lost to a restart.** Background calls run in the process's memory, so a
   restart loses them. Before the next reply, written or in a call, each one lost is
   closed with a stub call and a result saying it was lost and will not arrive.
@@ -132,7 +147,7 @@ loses nothing: a socket that closes cuts its replies, and they are stored as cut
 - **The user can reset the gem.** It then starts again, knowing nothing from before.
   A reset takes the gem as a reply does: one being written is cut first, a message sent
   meanwhile waits and is answered after the reset, and a call refuses it. Background
-  calls are stopped. Nothing is deleted: the log gets a `gem.reset` entry, and the
+  calls are stopped, and events still waiting are dropped. Nothing is deleted: the log gets a `gem.reset` entry, and the
   conversation is what the gem remembers after the latest one (see
   [the contract](chat-contract.md#post-v1gemsgem_idreset)).
 - **Deleting a gem** deletes its conversation and its log, and a background result of a
@@ -186,8 +201,14 @@ a message sent, before a reply to the one before has got through are one more us
 message after it, and the next reply answers both. The rule is one, for a call and for
 writing, in [`history.py`](../app/entities/history.py).
 
+**An event is told as outside data.** The gem is told it as a user message in an event
+tag, which says what the watch caught and that it is not the user's words. It is never
+a made-up tool call, and it is stored as its own kind, not as something the user said
+([the contract](chat-contract.md#an-event)).
+
 **Stored items say what they are.** Every item says its mode (`call` or `chat`) and who
-wrote it (`source`): the user, the gem, a tool, or one of our own lines and stubs. A
+wrote it (`source`): the user, the gem, a tool, an event, or one of our own lines and
+stubs. A
 placeholder, and the answer of a `cancel_tool_call` that stopped a call, carry a `mark`
 that says so, and are found by it, never by their wording. A stub says which call it
 delivers (`delivers`). The fields are in

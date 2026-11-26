@@ -66,6 +66,14 @@ class ConnectionsModels:
                 # Null for no limit: it is open to whoever the connection is.
                 gems: list[str] | None
 
+            class Event(BaseModel):
+                """One kind of event the server serves. `docs/chat-contract.md` says each field."""
+
+                name: str
+                description: str
+                # Any of "poll", "push" and "webhook".
+                delivery: list[str]
+
             class Icon(BaseModel):
                 """One of the server's own icons. `docs/chat-contract.md` says each field."""
 
@@ -112,6 +120,9 @@ class ConnectionsModels:
                 tools: list["ConnectionsModels.V1.Output.Tool"]
                 # How many tools the server listed that cannot be used here.
                 tools_left_out: int
+                # The kinds of event the server serves, read with its tools. Empty for a
+                # server that serves none.
+                events: list["ConnectionsModels.V1.Output.Event"]
                 # The server's own icons, and its website, as it stated them when its
                 # tools were last read. Empty and null when it stated nothing usable.
                 icons: list["ConnectionsModels.V1.Output.Icon"]

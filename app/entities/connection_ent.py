@@ -3,7 +3,8 @@ Connections: the tool servers gems can use, and which gem may use which.
 
 A connection is one MCP server the user has added: where it is, the headers that let
 this backend in, and a copy of the tools it listed when it was last asked, with the
-icons it stated then. They are kept in the `Connections` collection.
+icons it stated then and the kinds of event it serves (MCP events, SEP-3415). They are
+kept in the `Connections` collection.
 
 The copy is what a gem is offered, never the server's list of the moment. So the tools
 a model is told of are the ones the user was shown: a server cannot change a tool's
@@ -11,6 +12,8 @@ description, or add a tool, behind the user's back. The copy changes only when t
 connection is made, when its address or headers change, and when the user asks for it
 to be checked again. It also keeps the tool list the same from one request to the next,
 which a prompt cache needs, and costs no request to the server when a reply starts.
+The kinds of event are copied with the tools, at the same moments, for the same reason:
+a gem watches only what the user was shown.
 
 Who may use a connection is said on the connection, in two steps:
 
@@ -73,6 +76,7 @@ from app.adapters.mcp_adp import (
     McpAdapterClass,
     McpAuthServer,
     McpChallenge,
+    McpEventType,
     McpFailure,
     McpListing,
     McpRegistration,
@@ -91,6 +95,7 @@ __all__ = [
     "SIGN_IN_CALLBACK_PATH",
     "Connection",
     "ConnectionEntityClass",
+    "ConnectionEvent",
     "ConnectionHeader",
     "ConnectionHeaders",
     "ConnectionIcon",
@@ -118,6 +123,8 @@ _OFFERED_NAME_MAX_LENGTH = 64
 _TOOLS_MAX = 128
 _DESCRIPTION_MAX_LENGTH = 1_024
 _SCHEMA_MAX_LENGTH = 20_000
+# How many of a server's kinds of event are kept.
+_EVENTS_MAX = 64
 # A result is kept whole in the conversation and sent with every request after it, so one
 # is cut at this length. A FIRST NUMBER, TO BE TRIED OUT.
 _RESULT_MAX_LENGTH = 20_000
@@ -218,6 +225,17 @@ class ConnectionTool(BaseModel):
     input_schema: str
 
 
+class ConnectionEvent(BaseModel):
+    """One kind of event the connection's server serves, as it was listed when last asked."""
+
+    name: str
+    description: str = ""
+    # How it may be delivered: any of "poll", "push" and "webhook".
+    delivery: list[str]
+    # The JSON schema of the arguments a watch gives it, kept as text as a tool's is.
+    input_schema: str
+
+
 class ConnectionIcon(BaseModel):
     """One of the server's own icons, as it stated it when last asked.
 
@@ -263,6 +281,9 @@ class Connection(BaseModel):
     tools: list[ConnectionTool] = Field(default_factory=list[ConnectionTool])
     # How many tools the server listed that were not kept (see `_kept`).
     tools_left_out: int = 0
+    # The kinds of event the server serves, copied with the tools (see `_kept_events`).
+    # Empty for a server without the events extension.
+    events: list[ConnectionEvent] = Field(default_factory=list[ConnectionEvent])
     # How the server shows itself, as it said when it was last asked: its icons, and its
     # website. Empty when it said nothing.
     icons: list[ConnectionIcon] = Field(default_factory=list[ConnectionIcon])
@@ -473,8 +494,58 @@ def _sendable(schema: Mapping[str, object]) -> bool:
     return len(text) <= _SCHEMA_MAX_LENGTH
 
 
+def _kept_events(listed: Sequence[McpEventType]) -> list[ConnectionEvent]:
+    """The kinds of event kept of a server's list, in its order.
+
+    Left out: a kind with no name or a name listed twice, one whose schema is not an
+    object's, is not a valid JSON schema or is too long, one that has an argument
+    marked to go in a header (`x-mcp-header`), which the SDK does not send for events,
+    and whatever comes after the first `_EVENTS_MAX`.
+    """
+    kept: dict[str, ConnectionEvent] = {}
+    for kind in listed:
+        if not kind.name or kind.name in kept or len(kept) >= _EVENTS_MAX:
+            continue
+        schema = kind.input_schema
+        if schema.get("type") != "object" or _in_headers(schema):
+            continue
+        try:
+            Draft202012Validator.check_schema(schema)
+            text = json.dumps(schema, ensure_ascii=False)
+        except (SchemaError, TypeError, ValueError):
+            continue
+        if len(text) > _SCHEMA_MAX_LENGTH:
+            continue
+        kept[kind.name] = ConnectionEvent(
+            name=kind.name,
+            description=kind.description.strip()[:_DESCRIPTION_MAX_LENGTH],
+            delivery=list(kind.delivery),
+            input_schema=text,
+        )
+    return list(kept.values())
+
+
+def _in_headers(schema: Mapping[str, object]) -> bool:
+    """Whether a schema marks one of its arguments to be sent in a header too."""
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return False
+    return any(
+        isinstance(one, dict) and "x-mcp-header" in one
+        for one in cast("dict[str, object]", properties).values()
+    )
+
+
 # The fields that hold what a server listed. Asking it again writes these and no others.
-_LISTED = ("tools", "tools_left_out", "icons", "website_url", "checked_at", "updated_at")
+_LISTED = (
+    "tools",
+    "tools_left_out",
+    "events",
+    "icons",
+    "website_url",
+    "checked_at",
+    "updated_at",
+)
 # The fields that hold a sign-in.
 _SIGN_IN = ("oauth", "oauth_client", "oauth_tokens")
 
@@ -499,6 +570,7 @@ def _with_tools(connection: Connection, listed: McpListing) -> Connection:
         update={
             "tools": tools,
             "tools_left_out": left_out,
+            "events": _kept_events(listed.events),
             "icons": icons,
             "website_url": listed.about.website_url,
             "checked_at": now,
@@ -637,10 +709,12 @@ class ConnectionEntityClass:
                 updated = updated.model_copy(update={"oauth": asked})
                 written.add("oauth")
                 if new_address:
-                    # The copy is of the old server's tools, and so are its icons.
+                    # The copy is of the old server's tools and events, and so are its
+                    # icons.
                     cleared: dict[str, object] = {
                         "tools": [],
                         "tools_left_out": 0,
+                        "events": [],
                         "icons": [],
                         "website_url": None,
                     }
@@ -799,7 +873,7 @@ class ConnectionEntityClass:
             await self._store(signed, _SIGN_IN)
         await self._mcp.forget(current.server)
         try:
-            listed = await self._on_server(signed, self._mcp.list_tools)
+            listed = await self.on_server(signed, self._mcp.list_tools)
         except McpFailure as exc:
             self._tell(signed.id)
             return SignInOutcome(
@@ -881,7 +955,7 @@ class ConnectionEntityClass:
                 return "This tool is not available to you now."
             sent = cast("dict[str, object]", given)
             try:
-                result = await self._on_server(
+                result = await self.on_server(
                     now, lambda server: self._mcp.call_tool(server, tool.name, sent)
                 )
             except McpFailure as exc:
@@ -905,7 +979,7 @@ class ConnectionEntityClass:
         Raises `UpstreamError` otherwise.
         """
         try:
-            return await self._on_server(connection, self._mcp.list_tools)
+            return await self.on_server(connection, self._mcp.list_tools)
         except McpFailure as exc:
             failure = exc
         if failure.sign_in_needed and not connection.own_authorization:
@@ -927,7 +1001,7 @@ class ConnectionEntityClass:
             f"The server at {connection.url} could not be asked for its tools: {failure.reason}"
         ) from failure
 
-    async def _on_server[T](
+    async def on_server[T](
         self, connection: Connection, ask: Callable[[McpServer], Awaitable[T]]
     ) -> T:
         """Make one request of the connection's server, with its pass kept good.

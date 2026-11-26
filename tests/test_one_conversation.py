@@ -24,6 +24,7 @@ from app.entities.gem_log import Recording
 from app.entities.history import Mode, TimeTold
 from app.entities.late_results import LateResults
 from app.entities.model import Item
+from app.entities.pending_events import PendingEvents
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation
 from tests.test_chat import _docdb, _kept, _NoKey, _said
@@ -107,6 +108,7 @@ class _Line:
         sent: Callable[[bool], Sequence[Item]] | None = None,
         last_mode: Mode = "chat",
         late: LateResults | None = None,
+        events: PendingEvents | None = None,
         connected: Sequence[Tool] = (),
         record: Recording | None = None,
         time_told: TimeTold | None = None,
@@ -125,6 +127,7 @@ class _Line:
             sent=sent,
             last_mode=last_mode,
             late=late,
+            events=events,
             connected=connected,
             record=record,
             time_told=time_told,

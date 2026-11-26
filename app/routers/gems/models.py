@@ -77,7 +77,9 @@ class GemsModels:
 
             class ChatMessage(BaseModel):
                 # `tool`: the gem used a tool. `text` is what its `chat.tool` frame said.
-                role: Literal["user", "gem", "tool"]
+                # `event`: an event one of the gem's watches caught. `text` is what its
+                # `chat.event` frame said.
+                role: Literal["user", "gem", "tool", "event"]
                 # A reply that was cut ends in "…".
                 text: str
                 at: datetime

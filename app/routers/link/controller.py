@@ -10,7 +10,7 @@ router = APIRouter(prefix="/v1/link", tags=["link"])
 async def link(websocket: WebSocket, service: LinkServiceRegistry.V1) -> None:
     """The app's standing socket. It carries written chat with the gems, and calls.
 
-    The server sends `{"type": "link.ready", "version": 3}` once it is open.
+    The server sends `{"type": "link.ready", "version": 7}` once it is open.
 
     Chat: send `{"type": "chat.send", "gem": <id>, "text": ...}` to write to a gem: a
     reply still being written to that gem is cut first. The reply comes as `chat.text`

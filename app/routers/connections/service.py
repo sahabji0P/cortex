@@ -50,6 +50,12 @@ class ConnectionsServiceV1Class:
                 for tool in connection.tools
             ],
             tools_left_out=connection.tools_left_out,
+            events=[
+                ConnectionsModels.V1.Output.Event(
+                    name=event.name, description=event.description, delivery=event.delivery
+                )
+                for event in connection.events
+            ],
             icons=[
                 ConnectionsModels.V1.Output.Icon(
                     src=icon.src, mime_type=icon.mime_type, sizes=icon.sizes, theme=icon.theme

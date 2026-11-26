@@ -10,11 +10,11 @@ the gem's conversation as it is stored, and adds its turns to it. The standing s
 (`app/routers/link`) holds the call from there.
 
 What the call adds is stored as it is added, in order, after what was stored before:
-our own lines, what the user says, the gem's replies as they were heard, and tool calls
-with their results. A reply that can still be cut is never stored. The database is the
-truth: if what the call added cannot be stored, the call is not to carry on unsaved,
-and fails. Everything it added is stored by the time the call is closed, and only then
-is the gem let go.
+our own lines, what the user says, the gem's replies as they were heard, tool calls
+with their results, and the events it was told. A reply that can still be cut is never
+stored. The database is the truth: if what the call added cannot be stored, the call is
+not to carry on unsaved, and fails. Everything it added is stored by the time the call
+is closed, and only then is the gem let go.
 
 Two kinds of "no" are told apart, because the app is told them apart:
 
@@ -36,12 +36,14 @@ from pydantic import ValidationError
 from app.core.errors import NotFoundError
 from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass
+from app.entities.conversation_store import EVENT_RECEIVED
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import Recording
 from app.entities.history import TimeTold
 from app.entities.tools import Tool
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass, VoiceEvent, VoiceLine
+from app.entities.watch_ent import WatchEntityClass
 
 __all__ = ["CallEntityClass", "CallFault", "CallRefused", "OpenCall"]
 
@@ -95,7 +97,7 @@ class OpenCall:
         self._record = record
 
     def results_came(self) -> None:
-        """A late result of the gem's has come in: it is told in the call."""
+        """A late result of the gem's, or an event, has come in: it is told in the call."""
         if self._conversation is not None:
             self._conversation.results_came()
 
@@ -167,7 +169,12 @@ class OpenCall:
                 if entry.kind == "tool.result" and entry.data.get("mark") == "placeholder"
             }
             calls = [call for call in conversation.left_running if call.call_id in unstored]
-            self._conversations.gem(self._key).late.forget(calls)
+            kept = self._conversations.gem(self._key)
+            kept.late.forget(calls)
+            if any(entry.kind == EVENT_RECEIVED for entry in dropped):
+                # The events it was told are not stored: they wait in the log, and are
+                # read again from it the next time the conversation is read.
+                kept.events.lost()
             raise
         if await self._conversations.gone(self._gem_id):
             # The gem was deleted during the call, and its conversation with it.
@@ -195,6 +202,7 @@ class CallEntityClass:
         voice: VoiceEntityClass,
         conversations: ConversationEntityClass,
         connections: ConnectionEntityClass | None = None,
+        watches: WatchEntityClass | None = None,
     ) -> None:
         self._gems = gems
         self._darbar = darbar
@@ -202,6 +210,8 @@ class CallEntityClass:
         self._conversations = conversations
         # The tool servers gems can use. Without it, no gem is offered a connection's tools.
         self._connections = connections
+        # A gem's watches. Without it, no gem is offered the tools to watch with.
+        self._watches = watches
 
     async def open(
         self, gem: str, *, speaks_first: bool | None = None, time_zone: str | None = None
@@ -238,6 +248,8 @@ class CallEntityClass:
             connected = (
                 [] if self._connections is None else await self._connections.tools_for(config.id)
             )
+            if self._watches is not None:
+                connected = [*connected, *self._watches.tools_for(config.id)]
         except Exception as exc:
             raise CallFault("the gem's connections could not be read", exc) from exc
         try:
@@ -296,6 +308,7 @@ class CallEntityClass:
                     sent=lambda changed: self._conversations.sent(record, stored, changed=changed),
                     last_mode=stored.mode,
                     late=kept.late,
+                    events=kept.events,
                     connected=connected,
                     record=record,
                     time_told=TimeTold(time_zone),

@@ -19,6 +19,9 @@ That is what makes the database the truth.
 - `tool.result`   a call's result, as the gem was given it: the result itself, the
                   placeholder of a call that went on in the background, or what a stub
                   carries (`delivers` says for which call)
+- `event.received`  an event a watch of the gem's caught, as the gem is told it: a user
+                  message in an event tag, outside data and not the user's words
+                  (`delivers` says which `event.came` it tells)
 
 Every other kind is something that happened: a turn opened, a request was sent, a tool
 finished. Those are never sent to a model. They are there to be looked at (see
@@ -33,6 +36,10 @@ such entry.
 
 A conversation can start cold (`cache.cold`, see `cold_start.py`): from then on, long
 tool results before its line are sent expired. What is stored stays as it was.
+
+An event that comes in is written down at once (`event.came`), before the gem is told it,
+and it waits until an `event.received` delivers it. The events waiting are those since
+the latest reset that no `event.received` delivers yet (`pending_events`).
 
 What is kept in memory is in `conversation_ent.py` and `gem_log.py`. A gem's log goes
 when the gem does (see `GemEntityClass.delete`).
@@ -56,6 +63,8 @@ from app.entities.model import Item
 
 __all__ = [
     "COLD",
+    "EVENT_CAME",
+    "EVENT_RECEIVED",
     "REMEMBERED",
     "RESET",
     "ConversationStoreClass",
@@ -78,6 +87,7 @@ REMEMBERED: tuple[str, ...] = (
     "gem.said",
     "tool.called",
     "tool.result",
+    "event.received",
 )
 
 # The kind of entry that resets a gem: its conversation starts again after it.
@@ -86,11 +96,23 @@ RESET = "gem.reset"
 # The kind of entry that says a conversation started cold (see `cold_start.py`).
 COLD = "cache.cold"
 
+# The kind of entry that says an event came in, for a watch of the gem's.
+EVENT_CAME = "event.came"
+
+# The kind of entry that remembers an event, as the gem is told it.
+EVENT_RECEIVED = "event.received"
+
 _KIND_BY_ROLE = {"user": "user.said", "developer": "note.written", "assistant": "gem.said"}
 
 
-def kind_of(item: Item) -> str:
-    """The kind of entry that remembers this item."""
+def kind_of(item: Item, source: Source | None = None) -> str:
+    """The kind of entry that remembers this item, written by `source`.
+
+    An event is told to the gem as a user message, but it is not the user's: its kind
+    is said by who wrote it, never by its role.
+    """
+    if source == "event":
+        return EVENT_RECEIVED
     if "role" in item:
         return _KIND_BY_ROLE[item["role"]]
     return "tool.called" if item["type"] == "function_call" else "tool.result"
@@ -112,8 +134,9 @@ class Kept(BaseModel):
     # stored is read by this, never by the result's wording.
     mark: ResultMark | None = None
     # For a stub call of ours and its result: the id of the call whose result they
-    # carry, which went on in the background or was lost.
-    delivers: str | None = None
+    # carry, which went on in the background or was lost. For an event: the number of
+    # the `event.came` it tells.
+    delivers: str | int | None = None
 
 
 class LogEntry(BaseModel):
@@ -168,7 +191,7 @@ def remembered(gem_id: ObjectId, seq: int, added: Added, mode: Mode) -> LogEntry
     )
     return LogEntry(
         gem_id=gem_id,
-        kind=kind_of(added.item),
+        kind=kind_of(added.item, added.source),
         seq=seq,
         at=added.at,
         turn=added.turn,
@@ -237,6 +260,26 @@ class ConversationStoreClass:
             before=None if started_cold is None else int(started_cold.data["before"]),
         )
 
+    async def pending_events(self, gem_id: ObjectId) -> list[LogEntry]:
+        """The events that came in since the gem was last reset and wait to be told, in order.
+
+        Those no `event.received` delivers.
+        """
+        since = await self._since(gem_id, None)
+        came, received = [
+            await self._docdb.get_many(
+                LogEntry, filters={"gem_id": gem_id, "kind": kind, "seq": since}, sort=[("seq", 1)]
+            )
+            for kind in (EVENT_CAME, EVENT_RECEIVED)
+        ]
+        told = {entry.data.get("delivers") for entry in received}
+        return [entry for entry in came if entry.seq not in told]
+
+    async def gems_with_events(self) -> list[ObjectId]:
+        """Every gem an event ever came in for, in the order each first had one."""
+        found = await self._docdb.get_many(LogEntry, filters={"kind": EVENT_CAME}, sort=[("at", 1)])
+        return list(dict.fromkeys(ObjectId(entry.gem_id) for entry in found))
+
     async def _since(self, gem_id: ObjectId, before: int | None) -> dict[str, int]:
         """The numbers of the gem's entries since it was last reset, before `before` if given."""
         upto: dict[str, int] = {} if before is None else {"$lt": before}
@@ -283,6 +326,19 @@ class ConversationStoreClass:
             limit=1,
         )
         return found[0].turn or 0 if found else 0
+
+    async def event_came(self, gem_id: ObjectId, watch_id: str, event_id: str) -> bool:
+        """Whether the gem's log already holds that event of that watch, by its own id."""
+        found = await self._docdb.get(
+            LogEntry,
+            filters={
+                "gem_id": gem_id,
+                "kind": EVENT_CAME,
+                "data.watch_id": watch_id,
+                "data.event_id": event_id,
+            },
+        )
+        return found is not None
 
     async def of_kind(self, gem_id: ObjectId, kind: str) -> list[LogEntry]:
         """Every entry of one kind, oldest first."""

@@ -8,7 +8,7 @@ import asyncio
 import base64
 import contextlib
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -18,6 +18,7 @@ from bson import ObjectId
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from mcp import Client
+from mcp.client import ClientExtension
 from mcp.server.mcpserver import MCPServer
 from mcp.types import Icon
 from pydantic import ValidationError
@@ -31,9 +32,19 @@ from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
+from app.entities.gem_event import (
+    GemEvent,
+    McpEventKind,
+    McpWatch,
+    OnMcpCursor,
+    OnMcpDelivery,
+    OnMcpEvent,
+)
+from app.entities.gem_log import LogEntityClass
 from app.entities.late_results import CANCEL_TOOL
 from app.entities.model import Item, ToolSpec, to_messages
 from app.entities.tools import Tool, gem_toolbox
+from app.entities.watch_ent import WatchEntityClass
 from app.main import app
 from app.routers.connections.controller import router
 from app.routers.connections.models import ConnectionsModels
@@ -90,11 +101,13 @@ class _Servers:
         self.opened: list[McpServer] = []
 
     @contextlib.asynccontextmanager
-    async def open(self, server: McpServer) -> AsyncGenerator[Client]:
+    async def open(
+        self, server: McpServer, extensions: Sequence[ClientExtension]
+    ) -> AsyncGenerator[Client]:
         self.opened.append(server)
         if server.url not in self.at:
             raise ConnectionError("All connection attempts failed")
-        async with Client(self.at[server.url]) as client:
+        async with Client(self.at[server.url], extensions=extensions) as client:
             yield client
 
 
@@ -933,7 +946,7 @@ class _World(SimpleNamespace):
         return client
 
 
-def _world(setup: _Setup, *rounds: list[Any]) -> _World:
+def _world(setup: _Setup, *rounds: list[Any], watches: WatchEntityClass | None = None) -> _World:
     adapter = cast("Any", setup.docdb)
     store = ConversationStoreClass(adapter)
     conversations = ConversationEntityClass(gems=setup.gems, store=store)
@@ -947,6 +960,7 @@ def _world(setup: _Setup, *rounds: list[Any]) -> _World:
         anthropic=cast("Any", _NoKey()),
         search=cast("Any", search),
         connections=setup.connections,
+        watches=watches,
     )
     voice = _Voice(llm, search)
     calls = CallEntityClass(
@@ -955,6 +969,7 @@ def _world(setup: _Setup, *rounds: list[Any]) -> _World:
         voice=cast("Any", voice),
         conversations=conversations,
         connections=setup.connections,
+        watches=watches,
     )
     return _World(setup=setup, llm=llm, store=store, chat=chat, calls=calls, voice=voice)
 
@@ -1050,6 +1065,81 @@ async def test_a_call_offers_the_tools_the_gem_s_connections_had_when_it_opened(
     assert all(len(_tool_names(request)) == 4 for request in requests)
     assert requests[1]["input"][-1]["output"] == "Closed #4."
     assert requests[3]["input"][-1]["output"] == "This tool is not available to you now."
+
+
+class _NoEvents:
+    """Neither keeps an event nor serves MCP events: only the tools are looked at here."""
+
+    async def arrived(self, event: GemEvent) -> None:
+        raise AssertionError("no event comes in here")
+
+    async def kinds_for(self, gem_id: ObjectId) -> list[McpEventKind]:
+        return []
+
+    async def watch(
+        self,
+        watch: McpWatch,
+        on_event: OnMcpEvent,
+        hook_url: str | None,
+        on_cursor: OnMcpCursor | None = None,
+        on_delivery: OnMcpDelivery | None = None,
+    ) -> None:
+        raise AssertionError("no watch runs here")
+
+    async def posted(
+        self, watch: McpWatch, headers: Mapping[str, str], body: bytes, on_event: OnMcpEvent
+    ) -> bool:
+        raise AssertionError("nothing is posted here")
+
+
+def _watches(setup: _Setup) -> WatchEntityClass:
+    none = _NoEvents()
+    return WatchEntityClass(
+        docdb=cast("Any", setup.docdb),
+        gems=setup.gems,
+        log=LogEntityClass(ConversationStoreClass(cast("Any", setup.docdb))),
+        sink=none,
+        mcp_events=none,
+    )
+
+
+_WATCH_TOOLS = ["watch", "unwatch", "watches", "watchable"]
+
+
+async def test_every_gem_is_offered_the_tools_to_watch_with_after_its_connections(
+    setup: _Setup,
+) -> None:
+    await setup.connections.create(
+        name="Tracker", url=_URL, gems=[str(setup.one.id)], deferred=False
+    )
+    world = _world(setup, _said("Hello."), watches=_watches(setup))
+    elsewhere = _world(setup, _said("Hello."), watches=_watches(setup))
+
+    await world.write(setup.one, "hello")
+    await elsewhere.write(setup.two, "hello")
+
+    ((first,), (other,)) = world.llm.requests, elsewhere.llm.requests
+    assert _tool_names(first) == [
+        "cancel_tool_call",
+        "tracker__find_issues",
+        "tracker__close_issue",
+        "tracker__files_read_601e4e",
+        *_WATCH_TOOLS,
+    ]
+    # A gem with no connection is offered them too, and can stop what they leave running.
+    assert _tool_names(other) == ["cancel_tool_call", *_WATCH_TOOLS]
+
+
+async def test_a_call_offers_the_tools_to_watch_with(setup: _Setup) -> None:
+    world = _world(setup, _spoken("Hello."), watches=_watches(setup))
+
+    call = await world.calls.open(str(setup.two.id))
+    f, keeping = world.voice.calls[-1], asyncio.create_task(call.keep())
+    await _said_and_heard(f, "hello")
+    await _hang_up(call, keeping)
+
+    (request,) = world.llm.requests
+    assert _tool_names(request) == ["cancel_tool_call", *_WATCH_TOOLS]
 
 
 async def test_a_call_whose_connections_cannot_be_read_fails_in_words(setup: _Setup) -> None:
@@ -1399,9 +1489,9 @@ async def test_a_forgotten_server_s_client_in_use_is_closed_when_the_adapter_clo
     closed: list[str] = []
 
     @contextlib.asynccontextmanager
-    async def opener(_: McpServer) -> AsyncGenerator[Client]:
+    async def opener(_: McpServer, extensions: Sequence[ClientExtension]) -> AsyncGenerator[Client]:
         try:
-            async with Client(server) as client:
+            async with Client(server, extensions=extensions) as client:
                 yield client
         finally:
             closed.append("closed")

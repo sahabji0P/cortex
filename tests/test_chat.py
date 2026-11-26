@@ -125,10 +125,14 @@ class _DocDB:
                 )
             return found == wanted
 
-        return all(
-            same(document.get("_id" if key == "id" else key), value)
-            for key, value in filters.items()
-        )
+        def at(key: str) -> Any:
+            # As in Mongo, a dotted name reaches into a document's fields.
+            found: Any = document
+            for part in ("_id" if key == "id" else key).split("."):
+                found = found.get(part) if isinstance(found, dict) else None
+            return found
+
+        return all(same(at(key), value) for key, value in filters.items())
 
     @staticmethod
     def _stored(data: BaseModel) -> dict[str, Any]:
@@ -508,7 +512,7 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
 
-    assert socket.frames[0] == {"type": "link.ready", "version": 6}
+    assert socket.frames[0] == {"type": "link.ready", "version": 7}
     assert socket.frames[1:] == [
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "Hi "},
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "there."},

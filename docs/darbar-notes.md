@@ -74,7 +74,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The log is the base. A new thing a gem does is a new kind of entry in it, never a store of its own.
 - Nothing is hidden in it: every request, what it was sent, its tokens, its cost, every tool call, every change of model, instructions or tools.
 - One log, one shape of entry: seq, at, kind, turn, and its own fields. Each thing is written once, as the kind it is, at the moment it is final.
-- What the gem remembers is five kinds of entry: user.said, note.written, gem.said, tool.called, tool.result. Its conversation is those, in order, since the latest reset.
+- What the gem remembers is six kinds of entry: user.said, note.written, gem.said, tool.called, tool.result, event.received. Its conversation is those, in order, since the latest reset.
 - A request holds a count only: it was sent every remembered entry before it, since the latest reset.
 - What a reply produced before a tool call joins the history when it is sent back to the model, before the request that carries it.
 - A cut reply shows what was heard. Its tokens and cost are the whole of what the provider charged. Cut while the model was still producing, no count is read yet: shown as unknown.
@@ -90,6 +90,45 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - When it is written: as a call opens, and in writing before a message when there is none yet, the last is over ten minutes old, or the date has changed.
 - The Darbar text does not mention the time line: the line explains itself.
 - To watch: a zone changed by the user may show only once the ten minutes are up.
+
+### Watches (decided 2026-11-26)
+
+- A gem can watch things: something that happens wakes it, and it does what its instructions say.
+- Waking on an event is not memory. It does not wait for Gyan Kosh.
+- Three sources: a connection's MCP events, a plain webhook, a timer.
+- MCP events (SEP-3415, extension `io.modelcontextprotocol/events`): Cortex listens, the server publishes. All three deliveries: poll, stream, webhook.
+- The gem never picks the delivery. Cortex does, from what the server offers: stream, then webhook, then poll.
+- Webhooks work before we are hosted: a tunnel to the Mac is enough.
+- A plain webhook, such as GitHub's own, is for anything with no MCP events. GitHub's MCP server sends none yet.
+- The gem makes a watch itself, with a tool call. Every watch belongs to one gem: none is free.
+- The app shows each gem's watches, and the user can remove one.
+- A gem woken by an event keeps all its tools. No special mode.
+- An event reaches the model as a user message in an event tag: outside data, not the user's words. Never as a made-up tool call.
+- An event never cuts a reply and is never an interruption. It waits for the next turn and goes in ahead of what the user says.
+- A gem that is quiet is woken by the event itself: a reply nobody asked for, stored even with the app closed.
+- Events that come while a turn runs all go into the next one: a burst is one turn, not one each.
+- "Notify me" is the gem writing in the chat. Notifications on the Mac come later.
+- Cortex publishing events of its own (its own MCP server) is a separate, later piece.
+- Built 2026-11-26: all three sources, the gem's tools (watch, unwatch, watches, watchable), the app's routes, and the hook route. Proven live on a real model.
+- An event is written down the moment it comes (`event.came`), and joins what the gem remembers at its next turn (`event.received`). A restart loses none.
+- A reply an event woke goes to every socket that is open, not only the latest one to write.
+- The hook route is the only one meant to be reached from outside. Expose only `/v1/hooks/` through the tunnel.
+- A watch says how its events reach us (`delivery`): push, webhook or poll, the spec's words. Optional: none until its server answers.
+- A watch that breaks, is paused or works again is told to its gem as an ordinary event (`watch.failing`, `watch.paused`, `watch.recovered`), once per change. No special case.
+- A watch the user removes in the app is told to its gem as `watch.ended`, an ordinary event. Not on a reset, a deleted gem, or its own unwatch.
+- A watch works again only once its server answers, never by time alone: a server that hangs keeps it failing, and it does not flip.
+- T3 watches a PR by polling GitHub itself every 2 minutes and waking only on a change. Cortex's way to that: "watch a tool" (next, not built).
+
+### Watches: not ruled yet (the owner's to decide)
+
+- The fuse: a watch with more than 60 events in an hour is paused. Against a gem waking itself in a loop.
+- A timer goes off at most every 5 minutes.
+- An event is cut at 20,000 characters, like a tool result.
+- The gem sees a webhook's address and its secret, so it can register it itself. Against "the model never sees a secret".
+- A reset ends the gem's watches and drops its waiting events.
+- The watch tools are offered to every gem. No switch per gem.
+- The event tag's wording, and the short line the app is sent (`about: name`).
+- A webhook post with no signature is taken: the token in the address is enough.
 
 ## Base (next, order not fixed, no rush)
 
@@ -110,7 +149,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 
 - Gyan Kosh: what context a gem carries, and how much. The main work, and the important one.
 - Homes and the Darbar are part of the memory design too: what is private to a gem, what is common.
-- Proactivity: gems calling or messaging first, routines. Comes with memory.
+- Proactivity beyond watches: a gem calling you first. Waking on an event is decided (see Watches).
 - Gem to gem samvaad, and several gems in one call.
 - Workers: a worker returns to its parent gem. A shared worker that is triggered is a new idea.
 - Vault: secrets per gem, and shared ones. The model never sees a secret.

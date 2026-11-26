@@ -20,12 +20,13 @@ a change here needs a matching change there:
 | The standing socket `/v1/link` (`app/routers/link`; its frames in `docs/chat-contract.md`) | `src/link.rs`, `src/chat.rs`, `src/voice.rs`, `src/audio.rs` | Written chat, and calls: `call.start` and its settings, the call's audio and how it is played, `call.playback`, and the frames a call ends with |
 | `VoiceEvent` in `app/entities/voice_ent.py` | `src/protocol.rs` | A call's events, sent on the link with `call.` put before their type |
 | `/v1/gems` (`app/routers/gems`, `GemConfig` in `app/entities/gem_ent.py`) | `src/gem_routes.rs` | The gems and their configs |
-| `GET /v1/gems/{id}/chat`, `POST /v1/gems/{id}/reset` | `src/chat.rs` | A gem's conversation so far, a call's turns included, and resetting the gem so it starts again |
+| `GET /v1/gems/{id}/chat`, `POST /v1/gems/{id}/reset` | `src/chat.rs` | A gem's conversation so far, a call's turns and the events it was told included, and resetting the gem so it starts again |
 | `GET /v1/gems/{id}/log`, `GET /v1/gems/{id}/log/{seq}`, `GET /v1/gems/{id}/log/{seq}/sent`, and the frames `log.watch`, `log.unwatch` and `log.entry` on the link (the entries are written down in `app/entities/gem_log.py`) | `src/trajectory.rs`, `src/log_store.rs`, and Home's figures in `src/ui/stats.rs` | A gem's log: every turn, every request to the model with its tokens and cost, every tool call, every change of model, instructions or tools, and what the gem remembers, as entries of one shape in the order they happened |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
-| `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | `src/connections.rs`, `src/ui/connections_view.rs` | The tool servers gems can use, their tools, which gem may use which, whether a gem finds its tools by searching (`deferred`), each server's own icons and website, and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
+| `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | `src/connections.rs`, `src/ui/connections_view.rs` | The tool servers gems can use, their tools, which gem may use which, whether a gem finds its tools by searching (`deferred`), the kinds of event each server serves (`events`), each server's own icons and website, and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
 | `/v1/providers/openai` | `src/providers.rs` | How OpenAI is reached, with the API key or through a proxy on a ChatGPT login: the way in use, which ways are set up, and the user's switch. Also the proxy's ChatGPT accounts (email, plan, whether usable), and a sign-in that replaces them: a route that gives the address to open in the browser, and one the app asks until it says `ok` or `error` |
 | `GET /v1/voice/models` | `src/models.rs` | The models a call can be held with |
+| `GET /v1/gems/{id}/watches`, `DELETE /v1/gems/{id}/watches/{watch_id}` (`app/routers/watches`, `Watch` in `app/entities/watch_ent.py`), and the frame `watch.changed` on the link | `src/watches.rs`, `src/ui/watches_view.rs` | A gem's watches: what each is for, its source, how its events reach the backend (`delivery`), its state and why, and how many events it brought. The user can remove one. Never a webhook's address or secret |
 
 What that means in practice:
 
@@ -65,6 +66,15 @@ What that means in practice:
   conversation, in the time zone the app sends on `chat.send` and `call.start`.
 - **A call is always with a gem.** `call.start` names the gem, and may say who speaks
   first. The gem's config says which model answers: a call cannot ask for another.
+- **An event wakes a gem.** A watch's event is handed to the sink
+  (`app/entities/events_ent.py`), written down as `event.came`, and told to the gem at
+  its next turn as a user message in an event tag (`event.received`): never as the
+  user's words, and never as a tool call. It never cuts a reply. A quiet gem is woken by
+  it, in a call or in writing, and its reply is stored even with no app connected. The
+  app is sent `chat.event` before such a reply, and shows an event in the history as
+  role `event`. A watch that starts failing, is paused or works again is told to its gem
+  the same way, once, as an event named `watch.failing`, `watch.paused` or
+  `watch.recovered`, and one the user removes in the app as `watch.ended`.
 - **A gem has one conversation, called or written to.** A call starts from what is
   stored and stores what it adds as it goes; the history route shows them as `user`
   and `gem` messages. One writer at a time: while a call holds a gem, a `chat.send` to it
@@ -75,9 +85,9 @@ What that means in practice:
   through is a user message of its own, and the next one follows it.
 - **A gem has a log, and it is the base for anything that looks at what a gem did.**
   Everything that happens with a gem is written down in one list, in order, each thing
-  once, as the kind of entry it is. Five kinds (`user.said`, `note.written`,
-  `gem.said`, `tool.called`, `tool.result`) are what the gem remembers, and its
-  conversation is those entries, since the latest `gem.reset`:
+  once, as the kind of entry it is. Six kinds (`user.said`, `note.written`,
+  `gem.said`, `tool.called`, `tool.result`, `event.received`) are what the gem
+  remembers, and its conversation is those entries, since the latest `gem.reset`:
   `docs/chat-contract.md` says every kind and its fields.
   A new thing a gem does (a new step of the loop, a new paid service) is a new kind of
   entry there, written through `gem_log.py`, and never a store of its own. Adding a
@@ -119,6 +129,7 @@ Each fact has one home. Write it there, and link to it from anywhere else: never
 | `docs/gems.md` | A gem's config and its versions, the instructions and how they are put together, the Darbar text, the gem routes |
 | `docs/models.md` | The models, how the providers differ, the ChatGPT proxy, and cost |
 | `docs/connections.md` | How the backend keeps, checks and runs connections, and signs in to them |
+| `docs/watches.md` | What a watch is, its three sources and how each runs, the webhook's address and secret, the fuse, and exposing only `/v1/hooks/` through a tunnel |
 | `docs/chat-contract.md` | Every route, frame and field the app relies on. The app's code cites it by name, and its sections "Connections" and "A gem's log" by heading: keep those names |
 | `docs/voice-spec.md` | A call in full, the texts the model is told, live measurements, known gaps |
 | `docs/darbar-notes.md` | The plan, in short lines. The app's repo links to it by name |
@@ -139,7 +150,7 @@ Split it into small commits, one for each step a reader would follow:
 - A test goes with the code it tests. A test file that needs every layer at once is a
   commit of its own, after the last layer.
 - The docs are split by what they are: the contract and this file, the README and the
-  topic documents (architecture, observability, gems, models, connections) and the spec, the notes.
+  topic documents (architecture, observability, gems, models, connections, watches) and the spec, the notes.
 - Each commit passes `uv run pytest` and `uv run ruff check app tests` by itself. Check
   that at each commit, not only at the last one.
 - A commit that changes the contract says "Contract change:" in its message, and what.

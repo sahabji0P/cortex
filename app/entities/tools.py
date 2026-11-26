@@ -125,13 +125,15 @@ def gem_toolbox(
     `names` are the tools the gem's config names, `cancel` is `cancel_tool_call` for
     the gem's calls that outlive their replies, `history` is the conversation the tools
     are offered in, and `connected` are the tools of the connections the gem may use
-    (see `connection_ent.py`). Web search is offered when the config names it and its
-    key is set. `cancel_tool_call` is offered with any other tool. `tool_search` is
-    offered when any connected tool is deferred. A name with no tool behind it here is
-    passed over, so a config saved before a tool went still works.
+    (see `connection_ent.py`), followed by its tools to watch with (see
+    `watch_ent.py`). Web search is offered when the config names it and its key is set.
+    `cancel_tool_call` is offered with any other tool. `tool_search` is offered when
+    any connected tool is deferred. A name with no tool behind it here is passed over,
+    so a config saved before a tool went still works.
 
     The order is always the same: web search, `cancel_tool_call`, `tool_search`, the
-    connections' tools, then the tools that are only declared (below).
+    connections' tools, the tools to watch with, then the tools that are only declared
+    (below).
     """
     search_tool = web_search_tool(search)
     searches = search.configured and "web_search" in names
