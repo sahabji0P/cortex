@@ -136,7 +136,7 @@ Settings are read from the environment, or from `.env`, by
 | `MONGODB_URL`, `MONGODB_DB_NAME` | the database | `mongodb://localhost:27017`, `cortex` |
 | `REDIS_URL` | Redis, connected at start-up. Only the user login (`/v1/users`) writes to it | `redis://localhost:6379` |
 | `ENVIRONMENT`, `DEBUG` | `local`, `staging` or `production`; `DEBUG` opens the API to any web origin | `local`, `true` |
-| `SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `JWT_ALGORITHM` | the user login (`/v1/users`) | see `.env.example` |
+| `SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `JWT_ALGORITHM` | the user login (`/v1/users`); `SECRET_KEY` also makes the secret each MCP event webhook is signed with | see `.env.example` |
 
 Never commit credentials.
 
@@ -164,7 +164,7 @@ FastAPI also serves its own schema at `/docs` while the backend runs.
 | [docs/observability.md](docs/observability.md) | A gem's log: what it records, what it answers, what it promises, and how to read or watch it |
 | [docs/gems.md](docs/gems.md) | A gem's config, its versions, and what a gem is told (the Darbar text and its instructions) |
 | [docs/models.md](docs/models.md) | The models, how the two providers differ, the ChatGPT proxy, and cost |
-| [docs/connections.md](docs/connections.md) | MCP tool servers: permissions, the copy of their tools, deferred tools, and browser sign-in |
+| [docs/connections.md](docs/connections.md) | MCP tool servers: permissions, the copy of their tools, deferred tools, browser sign-in, and watching their events |
 | [docs/chat-contract.md](docs/chat-contract.md) | The contract with the app: every route, frame and field, and the rules for a call's audio |
 | [docs/voice-spec.md](docs/voice-spec.md) | What a call does and what the model is sent, rule by rule, with what was measured live and the known gaps. [voice-context.excalidraw](docs/voice-context.excalidraw) is the same as a picture |
 | [docs/darbar-notes.md](docs/darbar-notes.md) | The plan: the project's words, what is decided, what comes next, what is put off |

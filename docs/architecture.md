@@ -34,7 +34,7 @@ config ← core ← adapters ← entities ← routers ← main
 | `cartesia_stt_adp.py` | Cartesia speech-to-text, which also detects turns |
 | `cartesia_tts_adp.py` | Cartesia text-to-speech, with each word's timing |
 | `parallel_adp.py` | Parallel web search |
-| `mcp_adp.py` | MCP tool servers, over Streamable HTTP, with their sign-in and their icons |
+| `mcp_adp.py` | MCP tool servers, over Streamable HTTP, with their sign-in, their icons and their events |
 | `cliproxy_adp.py` | CLIProxyAPI's management API: the proxy's ChatGPT logins |
 | `docdb_adp.py` | MongoDB |
 | `redis_adp.py` | Redis: only the user login writes to it |
@@ -62,6 +62,7 @@ config ← core ← adapters ← entities ← routers ← main
 | `instructions.py` | what the model is told, in layers |
 | `tools.py` | the tools a model may call, each a small object, and which a gem is offered |
 | `connection_ent.py` | the tool servers, which gem may use which, and signing in to them |
+| `mcp_events_ent.py` | the kinds of event a gem's connections serve, and running a watch on one |
 | `gem_ent.py` | a gem's config and its versions |
 | `darbar_ent.py` | the Darbar text every gem is told first |
 | `user_ent.py` | the user account behind `/v1/users` |
