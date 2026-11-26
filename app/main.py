@@ -21,6 +21,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     await adapter.initialize()
 
     await EntitiesRegistry.initialize(adapter)
+    # Gems with events waiting since before the restart are woken.
+    await EntitiesRegistry.resume()
 
     _app.state.adapter = adapter
 

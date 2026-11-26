@@ -275,6 +275,11 @@ class ConversationStoreClass:
         told = {entry.data.get("delivers") for entry in received}
         return [entry for entry in came if entry.seq not in told]
 
+    async def gems_with_events(self) -> list[ObjectId]:
+        """Every gem an event ever came in for, in the order each first had one."""
+        found = await self._docdb.get_many(LogEntry, filters={"kind": EVENT_CAME}, sort=[("at", 1)])
+        return list(dict.fromkeys(ObjectId(entry.gem_id) for entry in found))
+
     async def _since(self, gem_id: ObjectId, before: int | None) -> dict[str, int]:
         """The numbers of the gem's entries since it was last reset, before `before` if given."""
         upto: dict[str, int] = {} if before is None else {"$lt": before}

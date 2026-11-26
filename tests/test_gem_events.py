@@ -7,16 +7,30 @@ gem, which wakes it (`_came_in`).
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any, cast
 
+import pytest
+from bson import ObjectId
+
+from app.core.errors import NotFoundError
+from app.entities.chat_ent import ChatEntityClass
+from app.entities.conversation_ent import ConversationEntityClass
+from app.entities.conversation_store import ConversationStoreClass
+from app.entities.darbar_ent import DarbarEntityClass
+from app.entities.events_ent import EventsEntityClass
+from app.entities.gem_ent import GemEntityClass
+from app.entities.gem_event import GemEvent
 from app.entities.pending_events import PendingEvent, pending
-from tests.test_chat import _said
+from tests.test_chat import _NoKey, _said
 from tests.test_one_conversation import (
     _CALLED,
     _ENDED,
     _Client,
     _gem_said,
     _hang_up,
+    _Model,
     _spoken,
     _user,
     _World,
@@ -366,3 +380,112 @@ async def test_events_waiting_when_a_call_ends_are_told_in_writing_after_it() ->
         _gem_said("New commits are in."),
     ]
     assert await world.modes() == ["call", "call", "chat", "chat", "chat"]
+
+
+# ---- the sink every source hands its events to
+
+
+def _gem_event(world: _World, name: str = "push", data: str = "") -> GemEvent:
+    return GemEvent(
+        gem_id=world.gem.id,
+        watch_id="w1",
+        source="webhook",
+        name=name,
+        about="the main branch",
+        data=data,
+        at=datetime(2026, 11, 26, 9, 30, tzinfo=UTC),
+    )
+
+
+def _sink(world: _World) -> EventsEntityClass:
+    return EventsEntityClass(
+        gems=world.conversations._gems,  # pyright: ignore[reportPrivateUsage]
+        conversations=world.conversations,
+        store=world.store,
+    )
+
+
+async def test_an_event_handed_to_the_sink_is_stored_before_it_returns_then_answered() -> None:
+    world = await _world(_said("New commits are in."))
+    sink = _sink(world)
+
+    await sink.arrived(_gem_event(world))
+
+    log = await _log(world)
+    assert [e["kind"] for e in log] == ["event.came"]
+    assert {key: log[0][key] for key in ("watch_id", "source", "name", "about", "data")} == {
+        "watch_id": "w1",
+        "source": "webhook",
+        "name": "push",
+        "about": "the main branch",
+        "data": "",
+    }
+    assert (log[0]["happened_at"], log[0]["event_id"]) == ("2026-11-26T09:30:00.000Z", None)
+    await _quiet(world)
+    assert await world.stored() == [_event("push"), _gem_said("New commits are in.")]
+
+
+async def test_the_sink_raises_when_the_event_could_not_be_stored_and_keeps_nothing() -> None:
+    world = await _world(_said("Never said."))
+    docdb: Any = world.store._docdb  # pyright: ignore[reportPrivateUsage]
+    docdb.breaks_on_kind = "event.came"
+
+    with pytest.raises(ConnectionError):
+        await _sink(world).arrived(_gem_event(world))
+
+    await asyncio.sleep(0)
+    assert world.conversations.find(str(world.gem.id)) is None
+    assert _requests(world) == []
+    with pytest.raises(NotFoundError):
+        await _sink(world).arrived(replace(_gem_event(world), gem_id=ObjectId()))
+
+
+async def test_an_event_waiting_when_the_backend_stopped_is_answered_after_a_restart() -> None:
+    world = await _world()
+    await world.conversations.log.open(world.gem.id)
+    # Written down and never told, as when the backend stopped in between.
+    await world.conversations.log.record_event(world.gem.id, _fields("push"))
+    adapter: Any = world.store._docdb  # pyright: ignore[reportPrivateUsage]
+
+    # New entities over the same database, as after a restart.
+    gems = GemEntityClass(adapter)
+    store = ConversationStoreClass(adapter)
+    conversations = ConversationEntityClass(gems=gems, store=store)
+    llm = _Model(_said("New commits are in."))
+    ChatEntityClass(
+        gems=gems,
+        darbar=DarbarEntityClass(adapter),
+        conversations=conversations,
+        openai=cast("Any", llm),
+        anthropic=cast("Any", _NoKey()),
+        search=cast("Any", world.search),
+    )
+    await EventsEntityClass(gems=gems, conversations=conversations, store=store).resume()
+    await _until(lambda: conversations.find(str(world.gem.id)) is None)
+
+    assert [entry.data.item for entry in await store.load(world.gem.id)] == [
+        _event("push"),
+        _gem_said("New commits are in."),
+    ]
+    assert await conversations.pending_events(world.gem.id) == []
+
+
+async def test_a_reset_drops_an_event_waiting_for_a_reply_and_says_so() -> None:
+    gate = asyncio.Event()
+    world = await _world([gate, *_said("Never said.")])
+    reset: list[ObjectId] = []
+    world.conversations.when_reset(reset.append)
+    client = _Client()
+    world.chat.send(str(world.gem.id), "hi", client.deliver)
+    await _until(lambda: bool(_requests(world)))
+    await _sink(world).arrived(_gem_event(world))
+
+    await world.conversations.reset(str(world.gem.id))
+    await _quiet(world)
+
+    assert reset == [world.gem.id]
+    assert client.frames == [("chat.cut", "…")]
+    # It was never told, and it is not waiting to be: not now, and not after a restart.
+    assert len(_requests(world)) == 1
+    assert await world.stored() == []
+    assert await world.conversations.pending_events(world.gem.id) == []

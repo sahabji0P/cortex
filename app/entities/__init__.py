@@ -5,6 +5,7 @@ from app.entities.connection_ent import Connection, ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationStoreClass, LogEntry
 from app.entities.darbar_ent import DarbarEntityClass
+from app.entities.events_ent import EventsEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.gem_log import LogEntityClass
 from app.entities.providers_ent import ProviderEntityClass
@@ -57,6 +58,10 @@ class EntitiesRegistry:
             search=adapter.Parallel,
             connections=cls.Connections,
         )
+        # Where the events a gem watches for come in. After chat, which tells them.
+        cls.Events = EventsEntityClass(
+            gems=cls.Gems, conversations=cls.Conversations, store=cls.ConversationStore
+        )
         cls.Voice = VoiceEntityClass(
             stt=adapter.CartesiaSTT,
             tts=adapter.CartesiaTTS,
@@ -71,6 +76,11 @@ class EntitiesRegistry:
             conversations=cls.Conversations,
             connections=cls.Connections,
         )
+
+    @classmethod
+    async def resume(cls) -> None:
+        """Take up what was left waiting when the app last stopped: a gem's events."""
+        await cls.Events.resume()
 
 
 __all__ = ["EntitiesRegistry"]
