@@ -44,8 +44,9 @@ bytes, in URL-safe base64: it cannot be guessed, and it is the secret too.
 - **The gem registers it itself.** The `watch` tool's result gives the gem the address,
   the secret (the same token) and the content type, `application/json`, so it can add the
   webhook where the events come from, such as with GitHub's tools. So the secret is in
-  the gem's conversation, and in its log, and is sent to its model. The app's routes
-  never send it.
+  the gem's conversation, and in its log, and is sent to its model. The watches routes
+  never send it, but the log routes do, in that tool's result, as they send everything
+  the gem remembers.
 - **A signed post must be signed with it.** A post with `X-Hub-Signature-256` (GitHub's
   way: `sha256=` and the HMAC-SHA256 of the body) is refused unless it matches, compared
   in constant time. A post with no signature is taken: the address is the secret.

@@ -277,12 +277,16 @@ server offers for the kind:
 - **Cursors.** A watch starts from its last cursor, or from now. After a drop, or a
   connection that did not answer, it comes back after a pause that doubles from one
   second to five minutes, from the last cursor it had, so what happened in between is
-  sent then. A heartbeat, a poll and a renewal move the cursor on while nothing happens.
+  sent then. A heartbeat, a poll and a renewal move the cursor on while nothing happens,
+  and the watch keeps it then too, so one that has brought no event yet resumes from
+  there after a restart, not from now. One that comes with no cursor leaves the last.
+- **A server that does not answer.** After five failures in a row the watch is failing,
+  says why, and is tried again from its cursor (see [Watches](watches.md)).
   When the server says events were skipped (`truncated`, or a `gap` post), a line is
   logged.
 - **Each event once.** An event whose id was told before is not told again (the last
-  1,000 ids of a watch are kept in memory), and a webhook post whose id was seen before
-  is not either. An event that cannot be kept is asked for again from the last cursor.
+  1,000 ids of a watch are kept in memory, and the gem's log knows every one it was
+  told, after a restart too), and a webhook post whose id was seen before is not either. An event that cannot be kept is asked for again from the last cursor.
 - **What the model gets.** The event's data as compact JSON, cut at 20,000 characters
   with a line saying how long it was. It is outside data, like a tool's result.
 - **When it stops.** The connection is read again before each event is told and each
