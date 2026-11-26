@@ -139,6 +139,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A long conversation is sent whole at the start of every call. Trimming comes with Gyan Kosh.
 - Compaction: a summary in place of the older part. Next, with the caching work.
 - OpenAI's explicit cache marks: put off until they can be run on the API key. They need a mark on every message, not one at the end. The proxy takes them and they do nothing.
+- A round's calls as one message, and their results as one: the cache counts each run as one block, so no round is too long for it. Needs a round's id in what is stored. Put off.
 - Rewind to a turn, instead of resetting everything: put off.
 
 ## Learned from Docker Agent (read 2026-11-16, config version 16)
