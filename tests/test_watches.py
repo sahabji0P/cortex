@@ -7,6 +7,7 @@ so a timer's hours pass at once and nothing reaches the internet.
 import asyncio
 import hashlib
 import hmac
+import json
 from collections.abc import AsyncGenerator, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from app.entities.gem_event import (
     OnMcpEvent,
 )
 from app.entities.gem_log import LogEntityClass
+from app.entities.tools import Toolbox
 from app.entities.watch_ent import Watch, WatchEntityClass
 from app.main import app
 from app.routers.hooks.service import HooksServiceV1Class, get_hooks_service_v1
@@ -796,3 +798,190 @@ async def test_a_paused_mcp_watch_stops_running_and_does_not_run_again(setup: _S
     await setup.clock.advance(minutes=30)
     assert len(setup.mcp.runs) == 1
     await again.close()
+
+
+# ---- the gem's tools
+
+
+async def _call(setup: _Setup, name: str, **arguments: object) -> tuple[str, bool]:
+    """Call one of Gem One's watch tools as the loop does: its text, and whether it failed."""
+    box = Toolbox(setup.watches.tools_for(setup.one.id))
+    shown: list[str] = []
+    result = await box.attempt(name, json.dumps(arguments), show=shown.append)
+    assert len(shown) == 1
+    return result
+
+
+async def test_the_tools_are_the_same_four_for_every_gem(setup: _Setup) -> None:
+    one = [tool.spec for tool in setup.watches.tools_for(setup.one.id)]
+    two = [tool.spec for tool in setup.watches.tools_for(setup.two.id)]
+
+    assert one == two
+    assert [spec.name for spec in one] == ["watch", "unwatch", "watches", "watchable"]
+    for spec in one:
+        # Flat objects, with nothing at the top a provider refuses there.
+        assert spec.parameters["type"] == "object"
+        assert not {"anyOf", "oneOf", "allOf", "enum", "not"} & set(spec.parameters)
+        json.dumps(spec.parameters)
+
+
+async def test_a_gem_sets_a_timer(setup: _Setup) -> None:
+    text, failed = await _call(
+        setup, "watch", about="Check the inbox.", source="timer", every_minutes=30
+    )
+
+    [made] = await setup.watches.list_for(setup.one.id)
+    assert not failed
+    assert text == (
+        f"Watching, under the id {made.id}: a timer every 30 minutes. It first goes off at "
+        "2026-11-26 09:30 UTC."
+    )
+    assert (made.source, made.every_minutes, made.about) == ("timer", 30, "Check the inbox.")
+
+
+async def test_a_timer_too_often_or_without_minutes_is_refused_in_words(setup: _Setup) -> None:
+    assert await _call(setup, "watch", about="Nag.", source="timer", every_minutes=1) == (
+        "watch failed: A timer goes off at most every 5 minutes",
+        True,
+    )
+    for every in [None, "10", 2.5, True]:
+        text, failed = await _call(
+            setup, "watch", about="Nag.", source="timer", every_minutes=every
+        )
+        assert failed and "`every_minutes`" in text
+    assert setup.stored() == []
+
+
+async def test_a_gem_is_given_a_webhook_to_register(setup: _Setup) -> None:
+    text, failed = await _call(
+        setup, "watch", about="Review each new pull request.", source="webhook"
+    )
+
+    [made] = await setup.watches.list_for(setup.one.id)
+    assert not failed and made.token is not None
+    assert text == (
+        f"Watching, under the id {made.id}. Register this webhook where its events come from:\n"
+        f"Address: {_PUBLIC}/v1/hooks/{made.token}\n"
+        f"Secret: {made.token}\n"
+        "Content type: application/json\n"
+        "Each post to it wakes you. The secret is for that registration only: do not show it "
+        "to anyone."
+    )
+
+
+async def test_a_webhook_with_no_public_address_is_refused_in_words(
+    setup: _Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "public_url", "")
+
+    text, failed = await _call(setup, "watch", about="Review pull requests.", source="webhook")
+
+    assert failed
+    assert text == (
+        "watch failed: This backend has no public address (PUBLIC_URL), so nothing outside "
+        "can post to it"
+    )
+
+
+async def test_a_gem_watches_an_event_of_a_connection_open_to_it(setup: _Setup) -> None:
+    setup.mcp.open[setup.one.id] = [_OPENED]
+
+    text, failed = await _call(
+        setup,
+        "watch",
+        about="Triage new issues.",
+        source="event",
+        connection="issue_tracker",
+        event="issue.opened",
+        arguments={"repo": "example/app"},
+    )
+
+    [made] = await setup.watches.list_for(setup.one.id)
+    assert (text, failed) == (
+        f"Watching issue_tracker's issue.opened events, under the id {made.id}.",
+        False,
+    )
+    assert made.mcp.arguments == {"repo": "example/app"}
+    await _until(lambda: str(made.id) in setup.mcp.running)
+
+
+async def test_an_event_not_open_to_the_gem_is_refused_in_words(setup: _Setup) -> None:
+    setup.mcp.open[setup.two.id] = [_OPENED]
+
+    for connection, event in [("issue_tracker", "issue.opened"), ("other", "issue.opened")]:
+        text, failed = await _call(
+            setup, "watch", about="Triage.", source="event", connection=connection, event=event
+        )
+        assert failed
+        assert text == (
+            f"watch failed: No connection open to you sends the event 'issue.opened' of "
+            f"{connection!r}: `watchable` lists the ones you can watch"
+        )
+    assert setup.stored() == []
+
+
+async def test_a_watch_with_no_about_or_source_is_refused_in_words(setup: _Setup) -> None:
+    assert await _call(setup, "watch", about=" ", source="timer", every_minutes=5) == (
+        "watch failed: Say what the watch is for, in `about`",
+        True,
+    )
+    assert await _call(setup, "watch", about="Nag.", source="email") == (
+        'watch failed: `source` is "event", "webhook" or "timer"',
+        True,
+    )
+
+
+async def test_a_gem_lists_its_watches(setup: _Setup) -> None:
+    assert await _call(setup, "watches") == ("You watch nothing now.", False)
+    timer = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    hook = await setup.watches.add_webhook(setup.one.id, "Review pull requests.")
+    await setup.watches.add_webhook(setup.two.id, "Not mine.")
+    setup.mcp.fails = RuntimeError("the server did not answer")
+    event = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await _until(lambda: setup.watch(event).state == "failing")
+    await setup.clock.advance(minutes=5)
+
+    text, failed = await _call(setup, "watches")
+
+    assert not failed
+    assert text == "\n".join(
+        [
+            f"- {event.id}: issue_tracker's issue.opened events. For: Triage new issues. "
+            "State: failing: the server did not answer. 0 events so far.",
+            f"- {hook.id}: a webhook. For: Review pull requests. State: active. 0 events so far.",
+            f"- {timer.id}: a timer every 5 minutes, next at 2026-11-26 09:10 UTC. For: Check "
+            "the inbox. State: active. 1 event so far, the last at 2026-11-26 09:05 UTC.",
+        ]
+    )
+    assert hook.token is not None and hook.token not in text
+
+
+async def test_a_gem_removes_a_watch_of_its_own_only(setup: _Setup) -> None:
+    mine = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    theirs = await setup.watches.add_timer(setup.two.id, "Check the post.", 5)
+
+    assert await _call(setup, "unwatch", id=str(theirs.id)) == (
+        f"unwatch failed: You have no watch with the id '{theirs.id}': `watches` lists yours",
+        True,
+    )
+    assert await _call(setup, "unwatch", id=str(mine.id)) == (
+        f"Removed the watch {mine.id}: it wakes you no more.",
+        False,
+    )
+    assert [d["_id"] for d in setup.stored()] == [theirs.id]
+    assert ("watch.removed", {"watch": str(mine.id), "by": "gem"}) in await setup.logged(setup.one)
+
+
+async def test_a_gem_lists_what_it_can_watch(setup: _Setup) -> None:
+    assert await _call(setup, "watchable") == (
+        "No connection open to you sends events you can watch. A webhook or a timer can still "
+        "be watched.",
+        False,
+    )
+    setup.mcp.open[setup.one.id] = [_OPENED]
+
+    assert await _call(setup, "watchable") == (
+        "- connection issue_tracker, event issue.opened: An issue was opened. Arguments: "
+        '{"type": "object", "properties": {"repo": {"type": "string"}}}',
+        False,
+    )

@@ -35,6 +35,10 @@ fails again, up to ten minutes. One that runs again for a minute, or brings an e
 is active again. Whoever listens (the app's sockets) is told when a watch
 is added, removed, or changes state.
 
+The gem has four tools for its watches (`tools_for`): `watch` makes one, `unwatch`
+removes one, `watches` lists its own, and `watchable` lists the MCP events it may watch:
+those of the connections open to it.
+
 A watch added or removed is written in the gem's log, as `watch.added` and
 `watch.removed`. The gem does not remember either: they are things that happened.
 
@@ -54,7 +58,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -63,7 +67,7 @@ from pydantic_mongo import PydanticObjectId
 
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.config import settings
-from app.core.errors import InvalidError, NotFoundError
+from app.core.errors import AppError, InvalidError, NotFoundError
 from app.core.times import UtcDatetime
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_event import (
@@ -77,6 +81,8 @@ from app.entities.gem_event import (
     WatchSource,
 )
 from app.entities.gem_log import LogEntityClass
+from app.entities.model import ToolSpec
+from app.entities.tools import Tool
 
 __all__ = [
     "HOOKS_PATH",
@@ -193,6 +199,89 @@ class _Running:
 
     gem_id: ObjectId
     task: asyncio.Task[None]
+
+
+_WATCH = ToolSpec(
+    name="watch",
+    description=(
+        "Watch for something, so that it wakes you when it happens: you are told the event, "
+        "and do what your instructions say. A watch is one of three: an event a connection "
+        "sends (`watchable` lists the ones you can watch), a webhook (an address of ours "
+        "that something outside, such as a GitHub repo, posts to: you are given its address "
+        "and secret, to register it there yourself), or a timer. It runs until it is removed "
+        "with `unwatch`."
+    ),
+    # Not strict: what a watch needs differs by its source, and an event's arguments are
+    # whatever that event takes. NOT YET TRIED AGAINST EITHER PROVIDER.
+    parameters={
+        "type": "object",
+        "properties": {
+            "about": {
+                "type": "string",
+                "description": (
+                    "What the watch is for, and what to do when it wakes you, in a sentence. "
+                    "You are told it with every event."
+                ),
+            },
+            "source": {
+                "type": "string",
+                "enum": ["event", "webhook", "timer"],
+                "description": (
+                    "event: an event a connection sends. webhook: posts to an address of "
+                    "ours. timer: every so many minutes."
+                ),
+            },
+            "connection": {
+                "type": "string",
+                "description": "For an event: its connection, as `watchable` names it.",
+            },
+            "event": {
+                "type": "string",
+                "description": "For an event: its name, as `watchable` names it.",
+            },
+            "arguments": {
+                "type": "object",
+                "description": "For an event: its arguments, as `watchable` says it takes.",
+            },
+            "every_minutes": {
+                "type": "integer",
+                "description": f"For a timer: how often, in minutes. At least {TIMER_MIN_MINUTES}.",
+            },
+        },
+        "required": ["about", "source"],
+    },
+    strict=False,
+)
+
+_UNWATCH = ToolSpec(
+    name="unwatch",
+    description="Remove one of your watches: it wakes you no more.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "The watch's id, as `watches` lists it."}
+        },
+        "required": ["id"],
+        "additionalProperties": False,
+    },
+)
+
+_WATCHES = ToolSpec(
+    name="watches",
+    description="List your watches: what each is for, its id, and whether it works.",
+    parameters={"type": "object", "properties": {}},
+    strict=False,
+)
+
+_WATCHABLE = ToolSpec(
+    name="watchable",
+    description=(
+        "List the events of your connections that you can watch, with the arguments each "
+        "takes. A webhook or a timer can always be watched."
+    ),
+    parameters={"type": "object", "properties": {}},
+    strict=False,
+)
 
 
 def _watch_id(value: str) -> PydanticObjectId:
@@ -343,6 +432,89 @@ class WatchEntityClass:
         for watch in await self.list_for(gem_id):
             with contextlib.suppress(NotFoundError):
                 await self.remove(gem_id, str(watch.id), by="user")
+
+    def tools_for(self, gem_id: ObjectId) -> list[Tool]:
+        """The gem's tools for its watches: `watch`, `unwatch`, `watches` and `watchable`.
+
+        They are the same for every gem, every time. A refusal raises, with words the gem
+        can act on.
+        """
+
+        async def watch(arguments: str) -> str:
+            return await self._refused_in_words(self._watch(gem_id, _arguments(arguments)))
+
+        async def unwatch(arguments: str) -> str:
+            watch_id = str(_arguments(arguments).get("id", ""))
+            try:
+                await self.remove(gem_id, watch_id, by="gem")
+            except NotFoundError as err:
+                raise ValueError(
+                    f"You have no watch with the id {watch_id!r}: `watches` lists yours"
+                ) from err
+            return f"Removed the watch {watch_id}: it wakes you no more."
+
+        async def watches(arguments: str) -> str:
+            return _listed(await self.list_for(gem_id))
+
+        async def watchable(arguments: str) -> str:
+            return _kinds(await self._mcp_events.kinds_for(gem_id))
+
+        return [
+            Tool(_WATCH, watch, shown=lambda arguments: "Setting up a watch"),
+            Tool(_UNWATCH, unwatch, shown=lambda arguments: "Removing a watch"),
+            Tool(_WATCHES, watches, shown=lambda arguments: "Looking at its watches"),
+            Tool(_WATCHABLE, watchable, shown=lambda arguments: "Looking at what it can watch"),
+        ]
+
+    async def _refused_in_words(self, work: Coroutine[Any, Any, str]) -> str:
+        """`work`'s result, or its refusal in the words the gem is to read."""
+        try:
+            return await work
+        except AppError as err:
+            raise ValueError(err.message) from err
+
+    async def _watch(self, gem_id: ObjectId, given: Mapping[str, Any]) -> str:
+        """Make the watch a `watch` call asks for, and say what it is."""
+        about = given.get("about")
+        if not isinstance(about, str) or not about.strip():
+            raise ValueError("Say what the watch is for, in `about`")
+        source = given.get("source")
+        if source == "timer":
+            every = given.get("every_minutes")
+            if not isinstance(every, int) or isinstance(every, bool):
+                raise ValueError("A timer needs `every_minutes`, a whole number of minutes")
+            made = await self.add_timer(gem_id, about.strip(), every)
+            return (
+                f"Watching, under the id {made.id}: a timer every {every} minutes. It first "
+                f"goes off at {_shown_time(made.due_at)}."
+            )
+        if source == "webhook":
+            made = await self.add_webhook(gem_id, about.strip())
+            return (
+                f"Watching, under the id {made.id}. Register this webhook where its events come "
+                f"from:\nAddress: {made.hook_url}\nSecret: {made.token}\nContent type: "
+                "application/json\nEach post to it wakes you. The secret is for that "
+                "registration only: do not show it to anyone."
+            )
+        if source == "event":
+            connection, event = given.get("connection"), given.get("event")
+            arguments = given.get("arguments") or {}
+            if not isinstance(arguments, dict):
+                raise ValueError("An event's `arguments` are an object")
+            kinds = await self._mcp_events.kinds_for(gem_id)
+            kind = next(
+                (k for k in kinds if (k.connection_key, k.name) == (connection, event)), None
+            )
+            if kind is None:
+                raise ValueError(
+                    f"No connection open to you sends the event {event!r} of {connection!r}: "
+                    "`watchable` lists the ones you can watch"
+                )
+            made = await self.add_mcp(
+                gem_id, about.strip(), kind, cast("dict[str, Any]", arguments)
+            )
+            return f"Watching {kind.connection_key}'s {kind.name} events, under the id {made.id}."
+        raise ValueError('`source` is "event", "webhook" or "timer"')
 
     async def find_hook(self, token: str) -> Watch | None:
         """The watch whose webhook address ends in this token, or None."""
@@ -633,6 +805,58 @@ class WatchEntityClass:
         self._chores.add(chore)
         chore.add_done_callback(_done)
         chore.add_done_callback(self._chores.discard)
+
+
+def _arguments(text: str) -> dict[str, Any]:
+    given = json.loads(text) if text.strip() else {}
+    if not isinstance(given, dict):
+        raise ValueError("the arguments are not an object")
+    return cast("dict[str, Any]", given)
+
+
+def _shown_time(at: datetime | None) -> str:
+    return "an unknown time" if at is None else at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _listed(watches: list[Watch]) -> str:
+    """The gem's watches, as the gem reads them."""
+    if not watches:
+        return "You watch nothing now."
+    lines: list[str] = []
+    for watch in watches:
+        if watch.source == "timer":
+            what = (
+                f"a timer every {watch.every_minutes} minutes, next at {_shown_time(watch.due_at)}"
+            )
+        elif watch.source == "mcp":
+            what = f"{watch.connection_key}'s {watch.event} events"
+        else:
+            what = "a webhook"
+        state = watch.state if watch.reason is None else f"{watch.state}: {watch.reason}"
+        last = (
+            ""
+            if watch.last_event_at is None
+            else f", the last at {_shown_time(watch.last_event_at)}"
+        )
+        lines.append(
+            f"- {watch.id}: {what}. For: {watch.about} State: {state}. "
+            f"{watch.events} event{'' if watch.events == 1 else 's'} so far{last}."
+        )
+    return "\n".join(lines)
+
+
+def _kinds(kinds: list[McpEventKind]) -> str:
+    """The MCP events a gem may watch, as the gem reads them."""
+    if not kinds:
+        return (
+            "No connection open to you sends events you can watch. A webhook or a timer can "
+            "still be watched."
+        )
+    return "\n".join(
+        f"- connection {kind.connection_key}, event {kind.name}: {kind.description} "
+        f"Arguments: {json.dumps(kind.input_schema, ensure_ascii=False)}"
+        for kind in kinds
+    )
 
 
 def _signed(secret: str, body: bytes, signature: str) -> bool:
