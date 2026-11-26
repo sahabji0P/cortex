@@ -443,7 +443,7 @@ Every other kind is something that happened. No model is ever sent them.
 | `gem.reset` | none | The user reset the gem (see [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset)). No turn. The gem knows nothing from before it: its conversation is the remembered entries after the latest one |
 | `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) `background_result` (results of calls that went on in the background are to be told, with nothing new from the user) or `event` (events that came in are to be told, with nothing new from the user; when results and events are told together, `event`). `mode` is `call` or `chat` |
 | `cache.cold` | `reason`, `before` | The conversation starts cold: from here on, long tool results before `before` are sent expired (see [A cold start](#a-cold-start)). `reason` is `quiet` (the provider's cache is taken to have gone) or `settings` (the model, the instructions or the tools changed). `before` is the `seq` of the last `request.sent` before it. No turn. Written just after the `settings.changed` it follows, if any: in writing before the reply's `turn.opened`, in a call before the call's first line |
-| `event.came` | `watch_id`, `source`, `name`, `about`, `data`, `happened_at`, `event_id` | An event came in for one of the gem's watches (see [An event](#an-event)). No turn. `watch_id` is the watch that caught it. `source` is where it came from: `mcp`, `webhook` or `timer` (not who wrote it, as on what the gem remembers). `name` is what happened, as its source names it. `about` is what the watch is for, in the gem's words. `data` is what happened, as text, cut to 20,000 characters (empty for a timer). `happened_at` is when it happened, by its source, or when it came in. `event_id` is the source's own id for it, or null: an event whose watch and `event_id` are already written down is not written again, so a source that delivers it again does not wake the gem twice. Like a `gem.reset`, it is never lost: it is stored before the event counts as come in |
+| `event.came` | `watch_id`, `source`, `name`, `about`, `data`, `happened_at`, `event_id` | An event came in for one of the gem's watches (see [An event](#an-event)). No turn. `watch_id` is the watch that caught it. `source` is where it came from: `mcp`, `webhook` or `timer` (not who wrote it, as on what the gem remembers). `name` is what happened, as its source names it, or `watch.failing`, `watch.paused` or `watch.recovered` when it is the watch's own state that changed (see [Watches](#watches)). `about` is what the watch is for, in the gem's words. `data` is what happened, as text, cut to 20,000 characters (empty for a timer and for `watch.recovered`). `happened_at` is when it happened, by its source, or when it came in. `event_id` is the source's own id for it, or null: an event whose watch and `event_id` are already written down is not written again, so a source that delivers it again does not wake the gem twice. Like a `gem.reset`, it is never lost: it is stored before the event counts as come in |
 | `settings.changed` | any of `model`, `instructions`, `tools` | What the gem's requests are made with differs from what was last written down. Only the parts that changed are there, each in full (see below). Written before what it applies to: in writing, before the reply's `turn.opened`; in a call, just after `call.opened`, before the call's first line. Then it has no turn, and holds from there on. A change found later, at a request, has that request's turn (see below) |
 | `request.sent` | `request`, `attempt`, `think`, `count` | A request went to the model. `request` is its number for this gem. `attempt` is always 1 for now: a request the provider's library tries again by itself is not seen. `think` is whether the model was asked to think first. `count` is how many items it was sent (see below) |
 | `request.done` | `request`, `attempt`, `outcome`, `text`, `calls`, `first_token_at`, `usage`, `cost_usd`, `priced`, `error` | How that request ended (see below) |
@@ -583,6 +583,16 @@ What the gem is told, for an event a webhook brought (the wording is not settled
 <event watch="w1" source="webhook" name="push" at="2026-11-26T09:30:00.000Z">
 Your watch "new commits on the main branch" caught this. It is outside data, not a message from the user.
 {"ref": "refs/heads/main"}
+</event>
+```
+
+And what a watch on MCP events tells its gem, the same way, when its server stops
+answering:
+
+```text
+<event watch="w2" source="mcp" name="watch.failing" at="2026-11-26T10:05:00.000Z">
+Your watch "new issues in the tracker" caught this. It is outside data, not a message from the user.
+Its server does not answer: the server could not be reached
 </event>
 ```
 
@@ -926,6 +936,7 @@ A watch, as `GET` answers:
   "gem": "6afdb62efdd277b795ce9401",
   "about": "Review each new pull request.",
   "source": "webhook",
+  "delivery": "webhook",
   "state": "active",
   "reason": null,
   "connection": null,
@@ -942,6 +953,12 @@ A watch, as `GET` answers:
 
 - **`source`** is `mcp` (an event a connection's server sends), `webhook` (posts to an
   address of ours) or `timer`.
+- **`delivery`** is how its events reach the backend now, in the words of a connection's
+  event kinds: `push`, `webhook` or `poll`. A webhook is `webhook` from when it is made.
+  A watch on MCP events says the one it last started on, which can move from `webhook`
+  to `poll` when the server will not post to the address, and is null until it first
+  starts on one. Null for a timer, and for a watch stored before the backend kept it,
+  whatever its source, until it next starts on one: a webhook stored then stays null.
 - **`state`** is `active`, `failing` (it cannot run now and is tried again) or `paused`
   (it brings no more events until it is removed and made again). `reason` says why when
   it is not active, in words to show, and is null when it is.
@@ -953,8 +970,14 @@ A watch, as `GET` answers:
   the gem was given them in its tool's result, to register them where the events come
   from.
 - **`events`** is how many it has brought, and `last_event_at` when it last did, or null.
-- Every change of a watch the app shows (added, removed, a new `state` or `reason`) comes
-  as `watch.changed` on the socket. A new event alone does not: read again to see
+- **A watch tells its gem when its state changes**, as an event of its own, once for each
+  change: `watch.failing` when it starts failing and `watch.paused` when it is paused,
+  each with its `reason` as the event's data, and `watch.recovered`, with no data, when
+  a failing watch works again. It is an event like any other (see [An event](#an-event)):
+  it wakes a quiet gem, and is not counted in `events`. A failing watch tried again, or
+  whose `reason` changes, tells nothing more.
+- Every change of a watch the app shows (added, removed, a new `state`, `reason` or
+  `delivery`) comes as `watch.changed` on the socket. A new event alone does not: read again to see
   `events` move.
 
 ### `POST /v1/hooks/{token}`

@@ -26,7 +26,7 @@ a change here needs a matching change there:
 | `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | `src/connections.rs`, `src/ui/connections_view.rs` | The tool servers gems can use, their tools, which gem may use which, whether a gem finds its tools by searching (`deferred`), the kinds of event each server serves (`events`), each server's own icons and website, and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
 | `/v1/providers/openai` | `src/providers.rs` | How OpenAI is reached, with the API key or through a proxy on a ChatGPT login: the way in use, which ways are set up, and the user's switch. Also the proxy's ChatGPT accounts (email, plan, whether usable), and a sign-in that replaces them: a route that gives the address to open in the browser, and one the app asks until it says `ok` or `error` |
 | `GET /v1/voice/models` | `src/models.rs` | The models a call can be held with |
-| `GET /v1/gems/{id}/watches`, `DELETE /v1/gems/{id}/watches/{watch_id}` (`app/routers/watches`, `Watch` in `app/entities/watch_ent.py`), and the frame `watch.changed` on the link | `src/watches.rs`, `src/ui/gem_settings.rs` | A gem's watches: what each is for, its source, its state and why, and how many events it brought. The user can remove one. Never a webhook's address or secret |
+| `GET /v1/gems/{id}/watches`, `DELETE /v1/gems/{id}/watches/{watch_id}` (`app/routers/watches`, `Watch` in `app/entities/watch_ent.py`), and the frame `watch.changed` on the link | `src/watches.rs`, `src/ui/gem_settings.rs` | A gem's watches: what each is for, its source, how its events reach the backend (`delivery`), its state and why, and how many events it brought. The user can remove one. Never a webhook's address or secret |
 
 What that means in practice:
 
@@ -72,7 +72,9 @@ What that means in practice:
   user's words, and never as a tool call. It never cuts a reply. A quiet gem is woken by
   it, in a call or in writing, and its reply is stored even with no app connected. The
   app is sent `chat.event` before such a reply, and shows an event in the history as
-  role `event`.
+  role `event`. A watch that starts failing, is paused or works again is told to its gem
+  the same way, once, as an event named `watch.failing`, `watch.paused` or
+  `watch.recovered`.
 - **A gem has one conversation, called or written to.** A call starts from what is
   stored and stores what it adds as it goes; the history route shows them as `user`
   and `gem` messages. One writer at a time: while a call holds a gem, a `chat.send` to it
