@@ -8,6 +8,10 @@ They are kept in the `Watches` collection.
 
 A watch has one of three sources (see `gem_event.py`):
 
+- `mcp`: an event a connection's server sends (MCP events). It runs in a task of its
+  own, through `McpEvents.watch`, for as long as the watch does. The cursor after each
+  event is kept, so after a restart it goes on from there. It has a webhook address too,
+  for a server that delivers by posting to one.
 - `webhook`: posts to an address of ours, `{PUBLIC_URL}/v1/hooks/{token}`, such as a
   GitHub repo's own webhook. The token is random and cannot be guessed, and it is the
   secret the posts are signed with too. Nothing runs for it: a post comes to the hooks
@@ -22,7 +26,8 @@ gem's conversation.
 A watch is `active`, `failing` (it cannot run now, and is tried again: `reason` says
 why) or `paused` (it brings no more events until it is removed and made again: `reason`
 says why). A watch that fails is tried again after a while, twice as long each time it
-fails again, up to ten minutes. Whoever listens (the app's sockets) is told when a watch
+fails again, up to ten minutes. One that runs again for a minute, or brings an event,
+is active again. Whoever listens (the app's sockets) is told when a watch
 is added, removed, or changes state.
 
 A watch added or removed is written in the gem's log, as `watch.added` and
@@ -35,6 +40,7 @@ paused runs from `start` until `close`.
 
 import asyncio
 import contextlib
+import json
 import logging
 import secrets
 from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
@@ -52,7 +58,16 @@ from app.config import settings
 from app.core.errors import InvalidError, NotFoundError
 from app.core.times import UtcDatetime
 from app.entities.gem_ent import GemEntityClass
-from app.entities.gem_event import EVENT_TEXT_LIMIT, EventSink, GemEvent, WatchSource
+from app.entities.gem_event import (
+    EVENT_TEXT_LIMIT,
+    EventSink,
+    GemEvent,
+    McpEventKind,
+    McpEvents,
+    McpWatch,
+    OnMcpEvent,
+    WatchSource,
+)
 from app.entities.gem_log import LogEntityClass
 
 __all__ = [
@@ -79,6 +94,9 @@ TIMER_MIN_MINUTES = 5
 # THE FIRST WAIT; the most is his.
 _RETRY_FIRST_SECONDS = 10.0
 _RETRY_MOST_SECONDS = 600.0
+# An MCP watch that has run this long since it was last tried is taken to work again.
+# THE OWNER HAS NOT RULED ON THIS NUMBER.
+_WORKS_AFTER_SECONDS = 60.0
 
 _log = logging.getLogger(__name__)
 
@@ -103,8 +121,16 @@ class Watch(BaseModel):
     # What it is for, in the gem's own words. The gem is told it with every event.
     about: str
     source: WatchSource
-    # For a webhook: the last part of its address, and the secret its posts are signed
-    # with. Never sent to the app.
+    # For MCP events: the connection that serves them, its key as the gem named it, the
+    # event, its arguments (as JSON text: a document's fields may not have every name an
+    # argument can), and where the last event left off, or None to start from now.
+    connection_id: str | None = None
+    connection_key: str | None = None
+    event: str | None = None
+    arguments: str = "{}"
+    cursor: str | None = None
+    # For a webhook, and for MCP events posted to us: the last part of its address, and
+    # the secret its posts are signed with. Never sent to the app.
     token: str | None = None
     # For a timer: how often it goes off, and when it is next due.
     every_minutes: int | None = None
@@ -123,6 +149,20 @@ class Watch(BaseModel):
         if self.token is None or not settings.public_url:
             return None
         return f"{settings.public_url.rstrip('/')}{HOOKS_PATH}/{self.token}"
+
+    @property
+    def mcp(self) -> McpWatch:
+        """What it is as the connections run it. Only for a watch on MCP events."""
+        if self.connection_id is None or self.event is None:
+            raise ValueError("the watch is not on MCP events")
+        return McpWatch(
+            watch_id=str(self.id),
+            gem_id=self.gem_id,
+            connection_id=self.connection_id,
+            event=self.event,
+            arguments=json.loads(self.arguments),
+            cursor=self.cursor,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,12 +197,14 @@ class WatchEntityClass:
         gems: GemEntityClass,
         log: LogEntityClass,
         sink: EventSink,
+        mcp_events: McpEvents,
         now: Callable[[], datetime] = _utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._docdb = docdb
         self._log = log
         self._sink = sink
+        self._mcp_events = mcp_events
         self._now = now
         self._sleep = sleep
         # Each watch that runs, by its id, from `start` or when it is made.
@@ -227,6 +269,27 @@ class WatchEntityClass:
             )
         )
 
+    async def add_mcp(
+        self, gem_id: ObjectId, about: str, kind: McpEventKind, arguments: dict[str, Any]
+    ) -> Watch:
+        """A watch on one kind of a connection's MCP events, from now on.
+
+        Whether the gem may watch it is the caller's to check (`McpEvents.kinds_for`).
+        """
+        return await self._add(
+            Watch(
+                gem_id=gem_id,
+                about=about,
+                source="mcp",
+                connection_id=kind.connection_id,
+                connection_key=kind.connection_key,
+                event=kind.name,
+                arguments=json.dumps(arguments, ensure_ascii=False),
+                token=secrets.token_urlsafe(_TOKEN_BYTES),
+                created_at=self._now(),
+            )
+        )
+
     async def list_for(self, gem_id: ObjectId) -> list[Watch]:
         """The gem's watches, the newest first."""
         return await self._docdb.get_many(
@@ -269,10 +332,14 @@ class WatchEntityClass:
 
     def _run(self, watch: Watch) -> None:
         """Start the watch's own task, if its source needs one."""
-        if watch.source != "timer":
+        if watch.source == "timer":
+            work = self._tick(watch.id)
+        elif watch.source == "mcp":
+            work = self._follow(watch.id)
+        else:
             return
         key = str(watch.id)
-        task = asyncio.create_task(self._tick(watch.id), name=f"watch {key}")
+        task = asyncio.create_task(work, name=f"watch {key}")
         self._running[key] = _Running(watch.gem_id, task)
         task.add_done_callback(lambda ended: self._ended(key, ended))
 
@@ -336,6 +403,57 @@ class WatchEntityClass:
                 await self._failing(watch_id, exc)
                 await self._sleep(retry)
                 retry = min(retry * 2, _RETRY_MOST_SECONDS)
+
+    async def _follow(self, watch_id: PydanticObjectId) -> None:
+        """Run a watch on MCP events until it is stopped, and again whenever it fails.
+
+        The connections run it (`McpEvents.watch`). If that raises, or ends, the watch is
+        failing, and is tried again from the last cursor kept. Once a try has run for a
+        while, the watch is active again.
+        """
+        retry = _RETRY_FIRST_SECONDS
+        while True:
+            try:
+                watch = await self._docdb.get(Watch, filters={"id": watch_id})
+                if watch is None or watch.state == "paused":
+                    return
+                attempt = asyncio.create_task(
+                    self._mcp_events.watch(watch.mcp, self._on_event(watch_id), watch.hook_url)
+                )
+                try:
+                    if await self._lasts(attempt):
+                        retry = _RETRY_FIRST_SECONDS
+                        await self._change_state(watch_id, "active", None)
+                    await attempt
+                finally:
+                    if not attempt.done():
+                        attempt.cancel()
+                        await asyncio.wait([attempt])
+                raise RuntimeError("the connection stopped sending its events")
+            except Exception as exc:
+                await self._failing(watch_id, exc)
+                await self._sleep(retry)
+                retry = min(retry * 2, _RETRY_MOST_SECONDS)
+
+    async def _lasts(self, attempt: asyncio.Task[None]) -> bool:
+        """Whether a try is still running after a while, and so is taken to work."""
+        waiting = asyncio.ensure_future(self._sleep(_WORKS_AFTER_SECONDS))
+        try:
+            await asyncio.wait([attempt, waiting], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiting.cancel()
+        return not attempt.done()
+
+    def _on_event(self, watch_id: PydanticObjectId) -> OnMcpEvent:
+        """What is told each MCP event of a watch: it is handed over, then its cursor kept."""
+
+        async def on_event(
+            name: str, data: str, event_id: str | None, at: datetime | None, cursor: str | None
+        ) -> None:
+            fields = {} if cursor is None else {"cursor": cursor}
+            await self._deliver(watch_id, name, data, event_id, at or self._now(), fields)
+
+        return on_event
 
     async def _deliver(
         self,

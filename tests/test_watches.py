@@ -5,7 +5,7 @@ so a timer's hours pass at once and nothing reaches the internet.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -17,7 +17,7 @@ from app.config import settings
 from app.core.errors import InvalidError, NotFoundError
 from app.entities.conversation_store import ConversationStoreClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.gem_event import GemEvent
+from app.entities.gem_event import GemEvent, McpEventKind, McpWatch, OnMcpEvent
 from app.entities.gem_log import LogEntityClass
 from app.entities.watch_ent import Watch, WatchEntityClass
 from tests.test_chat import _DocDB, _docdb  # pyright: ignore[reportPrivateUsage]
@@ -80,6 +80,47 @@ class _Sink:
         self.events.append(event)
 
 
+_OPENED = McpEventKind(
+    connection_id="6afdb62efdd277b795ce9455",
+    connection_key="issue_tracker",
+    name="issue.opened",
+    description="An issue was opened.",
+    delivery=["push"],
+    input_schema={"type": "object", "properties": {"repo": {"type": "string"}}},
+)
+
+
+class _McpEvents:
+    """The connections' MCP events: each watch runs until it is cancelled, or fails."""
+
+    def __init__(self) -> None:
+        self.open: dict[ObjectId, list[McpEventKind]] = {}
+        # Each watch run, with the address its events may be posted to.
+        self.runs: list[tuple[McpWatch, str | None]] = []
+        self.running: dict[str, OnMcpEvent] = {}
+        self.stopped: list[str] = []
+        self.fails: Exception | None = None
+
+    async def kinds_for(self, gem_id: ObjectId) -> list[McpEventKind]:
+        return self.open.get(gem_id, [])
+
+    async def watch(self, watch: McpWatch, on_event: OnMcpEvent, hook_url: str | None) -> None:
+        self.runs.append((watch, hook_url))
+        if self.fails is not None:
+            raise self.fails
+        self.running[watch.watch_id] = on_event
+        try:
+            await asyncio.Event().wait()
+        finally:
+            del self.running[watch.watch_id]
+            self.stopped.append(watch.watch_id)
+
+    async def posted(
+        self, watch: McpWatch, headers: Mapping[str, str], body: bytes, on_event: OnMcpEvent
+    ) -> bool:
+        raise NotImplementedError
+
+
 class _Setup(SimpleNamespace):
     docdb: _DocDB
     adapter: Any
@@ -87,6 +128,7 @@ class _Setup(SimpleNamespace):
     log: LogEntityClass
     clock: _Clock
     sink: _Sink
+    mcp: _McpEvents
     watches: WatchEntityClass
     one: GemConfig
     two: GemConfig
@@ -99,6 +141,7 @@ class _Setup(SimpleNamespace):
             gems=self.gems,
             log=self.log,
             sink=self.sink,
+            mcp_events=self.mcp,
             now=self.clock.now,
             sleep=self.clock.sleep,
         )
@@ -131,6 +174,7 @@ async def setup(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[_Setup]:
         log=LogEntityClass(ConversationStoreClass(adapter)),
         clock=_Clock(),
         sink=_Sink(),
+        mcp=_McpEvents(),
         one=await gems.create(name="Gem One", model="6 Luna"),
         two=await gems.create(name="Gem Two", model="6 Luna"),
         told=[],
@@ -355,3 +399,129 @@ async def test_end_for_and_a_deleted_gem_stop_their_timers(setup: _Setup) -> Non
     assert setup.sink.events == []
     assert setup.clock.sleeping == 0
     assert setup.stored() == []
+
+
+# ---- MCP events
+
+
+async def test_an_mcp_watch_hands_over_each_event_and_keeps_its_cursor(setup: _Setup) -> None:
+    made = await setup.watches.add_mcp(
+        setup.one.id, "Triage new issues.", _OPENED, {"repo": "example/app"}
+    )
+    await _until(lambda: str(made.id) in setup.mcp.running)
+    [(run, hook_url)] = setup.mcp.runs
+    assert run == McpWatch(
+        watch_id=str(made.id),
+        gem_id=setup.one.id,
+        connection_id=_OPENED.connection_id,
+        event="issue.opened",
+        arguments={"repo": "example/app"},
+        cursor=None,
+    )
+    assert made.token is not None and hook_url == f"{_PUBLIC}/v1/hooks/{made.token}"
+
+    happened = _START - timedelta(minutes=1)
+    on_event = setup.mcp.running[str(made.id)]
+    await on_event("issue.opened", '{"number": 4}', "e1", happened, "c1")
+    await on_event("issue.opened", '{"number": 5}', None, None, None)
+
+    assert setup.sink.events == [
+        GemEvent(
+            gem_id=setup.one.id,
+            watch_id=str(made.id),
+            source="mcp",
+            name="issue.opened",
+            about="Triage new issues.",
+            data='{"number": 4}',
+            at=happened,
+            event_id="e1",
+        ),
+        GemEvent(
+            gem_id=setup.one.id,
+            watch_id=str(made.id),
+            source="mcp",
+            name="issue.opened",
+            about="Triage new issues.",
+            data='{"number": 5}',
+            at=_START,
+        ),
+    ]
+    # An event with no cursor leaves the last one kept.
+    assert (setup.watch(made).cursor, setup.watch(made).events) == ("c1", 2)
+
+    # After a restart it goes on from the cursor kept.
+    await setup.watches.close()
+    assert setup.mcp.stopped == [str(made.id)]
+    again = setup.entity()
+    await again.start()
+    await _until(lambda: len(setup.mcp.runs) == 2)
+    assert setup.mcp.runs[1][0].cursor == "c1"
+    await again.close()
+
+
+async def test_an_mcp_watch_with_no_public_address_runs_without_one(
+    setup: _Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "public_url", "")
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+
+    await _until(lambda: str(made.id) in setup.mcp.running)
+    assert setup.mcp.runs[0][1] is None
+
+
+async def test_an_mcp_watch_that_cannot_run_fails_and_comes_back(setup: _Setup) -> None:
+    setup.mcp.fails = RuntimeError("the connection is no longer open to the gem")
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await _until(lambda: setup.watch(made).state == "failing")
+    assert setup.watch(made).reason == "the connection is no longer open to the gem"
+
+    # Tried again after 10 seconds, then 20, then 40.
+    await setup.clock.advance(seconds=10)
+    await setup.clock.advance(seconds=20)
+    assert len(setup.mcp.runs) == 3
+    setup.mcp.fails = None
+    await setup.clock.advance(seconds=39)
+    assert len(setup.mcp.runs) == 3
+    await setup.clock.advance(seconds=1)
+    assert str(made.id) in setup.mcp.running
+    # Running is not yet working: it is active again once it has run a minute.
+    assert setup.watch(made).state == "failing"
+    await setup.clock.advance(seconds=60)
+
+    kept = setup.watch(made)
+    assert (kept.state, kept.reason) == ("active", None)
+    told = [watch for _, watch in setup.told]
+    assert told == [str(made.id)] * 3  # added, failing, active again
+
+
+async def test_an_mcp_watch_that_brings_an_event_is_active_again(setup: _Setup) -> None:
+    setup.mcp.fails = RuntimeError("the server did not answer")
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await _until(lambda: setup.watch(made).state == "failing")
+    setup.mcp.fails = None
+    await setup.clock.advance(seconds=10)
+
+    await setup.mcp.running[str(made.id)]("issue.opened", "{}", None, None, "c1")
+
+    assert setup.watch(made).state == "active"
+
+
+async def test_an_mcp_watch_whose_event_cannot_be_kept_keeps_no_cursor(setup: _Setup) -> None:
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await _until(lambda: str(made.id) in setup.mcp.running)
+    setup.sink.fails = ConnectionError("the database went away")
+
+    with pytest.raises(ConnectionError):
+        await setup.mcp.running[str(made.id)]("issue.opened", "{}", None, None, "c1")
+
+    assert (setup.watch(made).cursor, setup.watch(made).events) == (None, 0)
+
+
+async def test_a_removed_mcp_watch_stops_at_once(setup: _Setup) -> None:
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await _until(lambda: str(made.id) in setup.mcp.running)
+
+    await setup.watches.remove(setup.one.id, str(made.id), by="gem")
+
+    assert setup.mcp.stopped == [str(made.id)]
+    assert setup.mcp.running == {}
