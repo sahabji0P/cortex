@@ -722,6 +722,13 @@ A connection, as every route but `DELETE` answers:
     }
   ],
   "tools_left_out": 0,
+  "events": [
+    {
+      "name": "issue.opened",
+      "description": "Fires when an issue is opened in a repo",
+      "delivery": ["poll", "push", "webhook"]
+    }
+  ],
   "icons": [
     {
       "src": "data:image/png;base64,iVBORw0KGgo...",
@@ -755,6 +762,13 @@ A connection, as every route but `DELETE` answers:
 - **`tools` is a copy**, made at `checked_at`. A gem is offered the copy. It changes when
   the connection is added, when its `url` or `headers` change, and on a refresh.
   `tools_left_out` counts tools the server lists that cannot be used here.
+- **`events` are the kinds of event the server serves** (MCP events, SEP-3415), copied
+  with the tools, at the same moments: a gem can watch only these. `[]` for a server
+  that serves none, never absent. `delivery` says how the server can send each one: any
+  of `"poll"`, `"push"` and `"webhook"`. The backend chooses among them; the app only
+  shows them. Who may watch them is the connection's `gems`: a tool's limit does not
+  narrow events. A kind the backend cannot watch is left out, uncounted. How a watch on
+  one runs: [connections.md](connections.md#events).
 - **`icons` and `website_url` are the server's own** (MCP's `serverInfo`), read with the
   tools: when a connection is added, its address or headers change, a sign-in finishes,
   and on a refresh. A connection added before they were read has none until then. Only
