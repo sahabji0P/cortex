@@ -44,7 +44,7 @@ from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError
 from app.entities.cold_start import Cache, Numbered, as_sent, cold
-from app.entities.conversation_store import ConversationStoreClass, Remembered
+from app.entities.conversation_store import EVENT_RECEIVED, ConversationStoreClass, Remembered
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, Mode, stubs
@@ -73,9 +73,12 @@ _LOST = (
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """One message of a gem's conversation, as it is shown."""
+    """One message of a gem's conversation, as it is shown.
 
-    role: Literal["user", "gem", "tool"]
+    An event the gem was told is a message of its own, `event`: it is not the user's.
+    """
+
+    role: Literal["user", "gem", "tool", "event"]
     text: str
     at: datetime
 
@@ -278,7 +281,10 @@ class ConversationEntityClass:
         shown: list[Message] = []
         for stored in await self._store.load(found):
             item = stored.data.item
-            if "role" in item:
+            if stored.kind == EVENT_RECEIVED:
+                # Told as a user message, but not the user's: shown as what came in.
+                shown.append(Message("event", stored.data.shown or "", stored.at))
+            elif "role" in item:
                 if item["role"] == "user":
                     shown.append(Message("user", item["content"], stored.at))
                 elif item["role"] == "assistant":

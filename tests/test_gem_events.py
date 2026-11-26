@@ -23,6 +23,7 @@ from app.entities.events_ent import EventsEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_event import GemEvent
 from app.entities.pending_events import PendingEvent, pending
+from app.routers.gems.service import GemsServiceV1Class
 from tests.test_chat import _NoKey, _said
 from tests.test_one_conversation import (
     _CALLED,
@@ -131,6 +132,16 @@ async def test_an_event_wakes_a_quiet_gem_with_no_client_and_its_reply_is_stored
     assert log[4]["count"] == 1
     sent = await world.conversations.log_sent(str(world.gem.id), log[4]["seq"])
     assert (sent["items"], sent["exact"]) == ([_event("push", '{"ref": "main"}')], True)
+    # Shown as what came in, not as something the user wrote.
+    service = GemsServiceV1Class(
+        gems=world.conversations._gems,  # pyright: ignore[reportPrivateUsage]
+        conversations=world.conversations,
+    )
+    shown = await service.get_chat(str(world.gem.id))
+    assert [(m.role, m.text) for m in shown.messages] == [
+        ("event", "the main branch: push"),
+        ("gem", "New commits are in."),
+    ]
 
 
 async def test_an_event_is_told_to_the_latest_client_after_a_line_saying_what_came() -> None:
