@@ -58,10 +58,11 @@ class WatchesServiceV1Class:
     async def hook(self, gem_id: str, watch_id: str) -> WatchesModels.V1.Output.Hook:
         watch = await self.watches.get(await self._gem(gem_id), watch_id)
         # By its source, not by its token: a watch on MCP events has a token too.
-        if watch.source != "webhook" or watch.token is None:
+        secret = watch.hook_secret
+        if watch.source != "webhook" or secret is None:
             raise AppError(404, "not_found", _NO_HOOK)
         return WatchesModels.V1.Output.Hook(
-            address=watch.hook_url, secret=watch.token, content_type=HOOK_CONTENT_TYPE
+            address=watch.hook_url, secret=secret, content_type=HOOK_CONTENT_TYPE
         )
 
     async def remove_watch(self, gem_id: str, watch_id: str) -> None:

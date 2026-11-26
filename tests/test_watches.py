@@ -279,6 +279,10 @@ async def test_a_webhook_watch_is_kept_with_an_address_of_its_own(setup: _Setup)
     assert made.token is not None and len(made.token) >= 43
     assert made.token != other.token
     assert made.hook_url == f"{_PUBLIC}/v1/hooks/{made.token}"
+    # Its secret is another, of its own: it is not in the address.
+    assert made.secret is not None and len(made.secret) >= 43
+    assert made.secret not in (made.token, other.secret)
+    assert made.hook_secret == made.secret
     [stored, _] = setup.stored()
     assert Watch.model_validate(stored) == made
     assert (made.state, made.reason, made.events, made.last_event_at) == ("active", None, 0, None)
@@ -358,11 +362,12 @@ async def test_a_deleted_gem_s_watches_go_with_it(setup: _Setup) -> None:
     assert [d["_id"] for d in setup.stored()] == [kept.id]
 
 
-async def test_the_token_is_not_in_the_log(setup: _Setup) -> None:
+async def test_the_token_and_the_secret_are_not_in_the_log(setup: _Setup) -> None:
     made = await setup.watches.add_webhook(setup.one.id, "Review each new pull request.")
-    assert made.token is not None
+    assert made.token is not None and made.secret is not None
 
-    assert made.token not in repr(await setup.logged(setup.one))
+    logged = repr(await setup.logged(setup.one))
+    assert made.token not in logged and made.secret not in logged
 
 
 async def test_a_watch_is_not_listed_for_an_unknown_gem(setup: _Setup) -> None:
@@ -770,7 +775,7 @@ async def hooks(setup: _Setup) -> AsyncGenerator[httpx.AsyncClient]:
 
 async def _webhook(setup: _Setup) -> tuple[Watch, str]:
     made = await setup.watches.add_webhook(setup.one.id, "Review each new pull request.")
-    assert made.token is not None
+    assert made.token is not None and made.secret is not None
     return made, made.token
 
 
@@ -805,10 +810,10 @@ async def test_an_unsigned_post_wakes_the_gem(setup: _Setup, hooks: httpx.AsyncC
     assert setup.watch(made).events == 1
 
 
-async def test_a_github_post_signed_with_the_token_wakes_the_gem(
+async def test_a_github_post_signed_with_the_secret_wakes_the_gem(
     setup: _Setup, hooks: httpx.AsyncClient
 ) -> None:
-    _, token = await _webhook(setup)
+    made, token = await _webhook(setup)
     body = b'{"action": "opened", "number": 7}'
 
     answer = await hooks.post(
@@ -817,7 +822,7 @@ async def test_a_github_post_signed_with_the_token_wakes_the_gem(
         headers={
             "X-GitHub-Event": "pull_request",
             "X-GitHub-Delivery": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
-            "X-Hub-Signature-256": _signature(token, body),
+            "X-Hub-Signature-256": _signature(str(made.secret), body),
             "Content-Type": "application/json",
         },
     )
@@ -831,7 +836,7 @@ async def test_a_github_post_signed_with_the_token_wakes_the_gem(
     )
 
 
-async def test_a_post_whose_signature_is_not_the_token_s_is_401(
+async def test_a_post_whose_signature_is_not_the_secret_s_is_401(
     setup: _Setup, hooks: httpx.AsyncClient
 ) -> None:
     _, token = await _webhook(setup)
@@ -839,6 +844,8 @@ async def test_a_post_whose_signature_is_not_the_token_s_is_401(
 
     for signature in [
         _signature("another", body).encode(),
+        # The token is in the address, and is not the secret.
+        _signature(token, body).encode(),
         b"sha256=",
         b"nonsense",
         "sha256=é".encode("latin-1"),
@@ -850,16 +857,42 @@ async def test_a_post_whose_signature_is_not_the_token_s_is_401(
     assert setup.sink.events == []
 
 
+async def test_a_webhook_stored_before_it_had_a_secret_is_signed_with_its_token(
+    setup: _Setup, hooks: httpx.AsyncClient, routes: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    # As it was stored before watches kept a secret of their own.
+    for document in setup.stored():
+        document.pop("secret")
+    body = b'{"action": "opened"}'
+
+    answer = await hooks.post(
+        f"/v1/hooks/{token}", content=body, headers={"X-Hub-Signature-256": _signature(token, body)}
+    )
+
+    assert answer.status_code == 202
+    assert setup.watch(made).hook_secret == token
+    shown = await routes.get(f"/v1/gems/{setup.one.id}/watches/{made.id}/hook")
+    assert shown.json()["secret"] == token
+    other = await hooks.post(
+        f"/v1/hooks/{token}",
+        content=body,
+        headers={"X-Hub-Signature-256": _signature(str(made.secret), body)},
+    )
+    assert other.status_code == 401
+
+
 async def test_a_github_ping_is_answered_and_wakes_nobody(
     setup: _Setup, hooks: httpx.AsyncClient
 ) -> None:
     made, token = await _webhook(setup)
     body = b'{"zen": "Keep it logically awesome."}'
+    signature = _signature(str(made.secret), body)
 
     answer = await hooks.post(
         f"/v1/hooks/{token}",
         content=body,
-        headers={"X-GitHub-Event": "ping", "X-Hub-Signature-256": _signature(token, body)},
+        headers={"X-GitHub-Event": "ping", "X-Hub-Signature-256": signature},
     )
 
     assert (answer.status_code, answer.content) == (200, b"")
@@ -1115,11 +1148,11 @@ async def test_a_gem_is_given_a_webhook_to_register(setup: _Setup) -> None:
     )
 
     [made] = await setup.watches.list_for(setup.one.id)
-    assert not failed and made.token is not None
+    assert not failed and made.token is not None and made.secret is not None
     assert text == (
         f"Watching, under the id {made.id}. Register this webhook where its events come from:\n"
         f"Address: {_PUBLIC}/v1/hooks/{made.token}\n"
-        f"Secret: {made.token}\n"
+        f"Secret: {made.secret}\n"
         "Content type: application/json\n"
         "Each post to it wakes you. The secret is for that registration only: do not show it "
         "to anyone."
@@ -1211,6 +1244,7 @@ async def test_a_gem_lists_its_watches(setup: _Setup) -> None:
         ]
     )
     assert hook.token is not None and hook.token not in text
+    assert hook.secret is not None and hook.secret not in text
 
 
 async def test_a_gem_removes_a_watch_of_its_own_only(setup: _Setup) -> None:
@@ -1277,6 +1311,7 @@ async def test_the_app_lists_a_gem_s_watches_without_their_secrets(
     assert answer.status_code == 200
     for made in (hook, event):
         assert made.token is not None and made.token not in answer.text
+    assert hook.secret is not None and hook.secret not in answer.text
     assert "/v1/hooks" not in answer.text
     assert answer.json() == [
         {
@@ -1348,21 +1383,22 @@ async def test_the_app_is_shown_a_webhook_s_address_and_secret_when_asked(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     made = await setup.watches.add_webhook(setup.one.id, "Review pull requests.")
-    assert made.token is not None
+    assert made.token is not None and made.secret is not None
 
     answer = await routes.get(f"/v1/gems/{setup.one.id}/watches/{made.id}/hook")
 
     assert answer.status_code == 200
     assert answer.json() == {
         "address": f"{_PUBLIC}/v1/hooks/{made.token}",
-        "secret": made.token,
+        "secret": made.secret,
         "content_type": "application/json",
     }
     assert answer.headers["cache-control"] == "no-store"
-    # The list still never holds it, and nothing logged does.
+    # The list still never holds either, and nothing logged does.
     listed = await routes.get(f"/v1/gems/{setup.one.id}/watches")
-    assert made.token not in listed.text
-    assert made.token not in caplog.text
+    for secret in (made.token, made.secret):
+        assert secret not in listed.text
+        assert secret not in caplog.text
 
 
 async def test_a_webhook_s_secret_is_shown_with_no_public_address(
@@ -1376,7 +1412,7 @@ async def test_a_webhook_s_secret_is_shown_with_no_public_address(
     assert answer.status_code == 200
     assert answer.json() == {
         "address": None,
-        "secret": made.token,
+        "secret": made.secret,
         "content_type": "application/json",
     }
 

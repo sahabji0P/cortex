@@ -13,10 +13,10 @@ A watch has one of three sources (see `gem_event.py`):
   event is kept, so after a restart it goes on from there. It has a webhook address too,
   for a server that delivers by posting to one.
 - `webhook`: posts to an address of ours, `{PUBLIC_URL}/v1/hooks/{token}`, such as a
-  GitHub repo's own webhook. The token is random and cannot be guessed, and it is the
-  secret the posts are signed with too. Nothing runs for it: a post comes to the hooks
-  route (`hooked`). A post signed the way GitHub signs one must be signed with it. A
-  GitHub `ping` wakes nobody.
+  GitHub repo's own webhook. The token is random and cannot be guessed: it is what lets
+  a post in. The posts are signed with a secret of the watch's own (`hook_secret`).
+  Nothing runs for it: a post comes to the hooks route (`hooked`). A post signed the way
+  GitHub signs one must be signed with the secret. A GitHub `ping` wakes nobody.
 - `timer`: every so many minutes, at least `TIMER_MIN_MINUTES`, in a task of its own.
   It is first due one interval after it is made. One that came due while the backend
   was down goes off once as soon as it is up, and then keeps its rhythm.
@@ -119,7 +119,7 @@ __all__ = [
 HOOKS_PATH = "/v1/hooks"
 # What a watch's webhook is to be registered to post.
 HOOK_CONTENT_TYPE = "application/json"
-# How many random bytes a webhook's token is made of.
+# How many random bytes a webhook's token, and a plain webhook's secret, are made of.
 _TOKEN_BYTES = 32
 
 # A timer goes off at most this often. THE OWNER HAS NOT RULED ON THIS NUMBER.
@@ -181,10 +181,13 @@ class Watch(BaseModel):
     event: str | None = None
     arguments: str = "{}"
     cursor: str | None = None
-    # For a webhook, and for MCP events posted to us: the last part of its address, and
-    # the secret its posts are signed with. Never in the app's list of watches: a plain
-    # webhook's is given only by a route of its own, when the user asks to see it.
+    # For a webhook, and for MCP events posted to us: the last part of its address. Never
+    # in the app's list of watches: a plain webhook's is given only by a route of its
+    # own, when the user asks to see it.
     token: str | None = None
+    # For a plain webhook: the secret its posts are signed with, never in the list
+    # either. None for one stored before watches kept one: its token is its secret.
+    secret: str | None = None
     # For a timer: how often it goes off, and when it is next due.
     every_minutes: int | None = None
     due_at: UtcDatetime | None = None
@@ -205,6 +208,12 @@ class Watch(BaseModel):
         if self.token is None or not settings.public_url:
             return None
         return f"{settings.public_url.rstrip('/')}{HOOKS_PATH}/{self.token}"
+
+    @property
+    def hook_secret(self) -> str | None:
+        """The secret a plain webhook's posts are signed with: its own, or its token if it
+        was stored before watches kept one, so a sender set up then goes on working."""
+        return self.secret or self.token
 
     @property
     def mcp(self) -> McpWatch:
@@ -390,6 +399,7 @@ class WatchEntityClass:
                 about=about,
                 source="webhook",
                 token=secrets.token_urlsafe(_TOKEN_BYTES),
+                secret=secrets.token_urlsafe(_TOKEN_BYTES),
                 delivery="webhook",
                 created_at=self._now(),
             )
@@ -529,7 +539,7 @@ class WatchEntityClass:
             made = await self.add_webhook(gem_id, about.strip())
             return (
                 f"Watching, under the id {made.id}. Register this webhook where its events come "
-                f"from:\nAddress: {made.hook_url}\nSecret: {made.token}\nContent type: "
+                f"from:\nAddress: {made.hook_url}\nSecret: {made.hook_secret}\nContent type: "
                 f"{HOOK_CONTENT_TYPE}\nEach post to it wakes you. The secret is for that "
                 "registration only: do not show it to anyone."
             )
@@ -563,9 +573,9 @@ class WatchEntityClass:
         """A post came to the watch's webhook address: check it, and hand its event over.
 
         A watch on MCP events has the connections check it and read it. A plain webhook's
-        post must be signed with the watch's token if it says it is signed (GitHub's
-        `X-Hub-Signature-256`). Its event is named by `X-GitHub-Event`, or "webhook", and
-        its id is `X-GitHub-Delivery`. Raises if the sink cannot keep it.
+        post must be signed with the watch's secret (`hook_secret`) if it says it is
+        signed (GitHub's `X-Hub-Signature-256`). Its event is named by `X-GitHub-Event`,
+        or "webhook", and its id is `X-GitHub-Delivery`. Raises if the sink cannot keep it.
         """
         if watch.state == "paused":
             return "paused"
@@ -576,9 +586,8 @@ class WatchEntityClass:
             return "taken" if taken else "refused"
         named = {name.lower(): value for name, value in headers.items()}
         signature = named.get("x-hub-signature-256")
-        if watch.token is None or (
-            signature is not None and not _signed(watch.token, body, signature)
-        ):
+        secret = watch.hook_secret
+        if secret is None or (signature is not None and not _signed(secret, body, signature)):
             return "refused"
         name = named.get("x-github-event") or "webhook"
         if name == "ping":

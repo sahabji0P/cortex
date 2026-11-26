@@ -43,8 +43,9 @@ class WatchesModels:
             class Hook(BaseModel):
                 """A plain webhook watch's address and secret, for the user to see when they ask.
 
-                What the gem was given to register it, and the same token twice: the address
-                ends in it.
+                What the gem was given to register it. The address ends in the watch's
+                token, and the secret is another: a watch stored before watches kept a
+                secret of its own has its token as its secret.
                 """
 
                 # Null while this backend has no public address (PUBLIC_URL).
