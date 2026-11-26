@@ -171,11 +171,11 @@ writing.
    the same, so a prompt cache stays valid. One consequence: what the model said before
    a tool call is kept whole once it is sent back with the result, even if the user cut
    it off part-way. **One exception: a cold start.** Once the provider's cache has
-   certainly gone (the gem was quiet longer than the cache lasts, or its model,
+   gone (the gem was quiet longer than the cache lasts, or its model,
    instructions or tools changed), everything is sent at full price anyway. So then, and
    only then, long tool results that were sent before are sent expired: a fixed line in
-   place of their output. Searches that load tools, placeholders,
-   cancels and stub results are never expired. What is stored never changes, and from
+   place of their output. Some results are never expired
+   ([which](chat-contract.md#a-cold-start)). What is stored never changes, and from
    that request on each request again starts with the whole of the one before. It is
    checked for each reply in writing and once when a call starts, and written down as
    `cache.cold` ([`cold_start.py`](../app/entities/cold_start.py), and

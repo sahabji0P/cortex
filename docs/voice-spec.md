@@ -151,7 +151,9 @@ In this order (all Enforced):
    server and the result. Then the words join the history as an item of their own, and
    the model is called.
 
-Nothing is cleared: every search result stays in the history whole, as it does in chat.
+Nothing stored is cleared: every search result stays stored whole, as it does in chat.
+After a cold start, long ones are sent expired (see
+[A cold start](chat-contract.md#a-cold-start)).
 
 What the model then does with the interruption is Instructed, by the gem's default
 instructions:
@@ -293,10 +295,10 @@ words in the call (and with a tool result before it, if the written part ended i
   is added the moment it is final, before the request that carries it, and nothing
   stored is ever rewritten. A call checks once, as it opens, whether it starts cold: the
   gem's last request was sent longer ago than its provider keeps a cache (see
-  [Models](models.md#one-history-two-providers)), or the model, the instructions or the
+  [Caching](models.md#caching)), or the model, the instructions or the
   tools changed. If it does, the cache is gone anyway, so long tool results that were
   sent before are sent expired, for the whole call, and the log says `cache.cold`.
-  Searches that load tools, placeholders, cancels and stub results are never expired.
+  Some results are never expired ([which](chat-contract.md#a-cold-start)).
   Never during a call: from its first request on, each starts with the whole of the one
   before. The same check is made for each reply in writing (see
   [the contract](chat-contract.md#a-cold-start)).
@@ -420,7 +422,7 @@ Everything in the history that neither the user nor the model wrote (all Enforce
 | Greeting note | Note, after the stored conversation and the call-start line | The call opens with the assistant speaking first | "The call has just connected and the user has not said anything yet. Greet them in one short sentence and ask what you can do for them." |
 | Lost stub | A call written by the server, then its result | A placeholder whose search was lost to a restart, when the call opens | "This call was lost before it finished, and its result will not arrive. Make it again if it is still needed." |
 | Cut mark | The end of a reply's text | A reply was cut part-way | "…" |
-| Expired result | In place of a stored result's output, in what is sent only | A call or a reply in writing starts cold: each long tool result sent before, but no search's, placeholder, cancel or stub result (which ones: [the contract](chat-contract.md#a-cold-start)) | "[Result expired: no longer kept. If you need it, call the tool again. If it was an action, it already happened: do not repeat it.]" |
+| Expired result | In place of a stored result's output, in what is sent only | A call or a reply in writing starts cold: each tool result sent before, but some (which: [the contract](chat-contract.md#a-cold-start)) | "[Result expired: no longer kept. If you need it, call the tool again. If it was an action, it already happened: do not repeat it.]" |
 | No-words note | Note, after the cut reply | A turn with no words cut a reply the user was hearing | "The user made a sound there, with no words in it." |
 | Placeholder result | The result of the model's own call | A tool call was still running when the user spoke | "Still running in the background, under call_id {call_id}. [...]" |
 | Background result | A call written by the server, then its result | The call finished; added at the next quiet moment, or ahead of the user's words if their turn ends first | `{"deferred_result_for": "<id>"}`, then the real result |
@@ -530,7 +532,8 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
   of a run of tool results ([the guide](https://developers.openai.com/api/docs/guides/prompt-caching)).
   Here each result follows its own call, so that is some 20 results. Not measured.
 - **A long history is sent whole.** A call now starts from everything stored, so its
-  first request is as long as the gem's whole conversation. Nothing is trimmed.
+  first request is as long as the gem's whole conversation. Nothing is trimmed, but for
+  results expired at a cold start.
 - **One context with both speaking and writing in it has no recorded live run.** Whether
   a gem keeps to its call rules after a written stretch, and to its writing rules after
   a call, is to be tried out.
