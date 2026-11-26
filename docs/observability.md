@@ -25,6 +25,10 @@ it. Every kind of entry and its fields are in
 - **How did a reply end?** `finished`, `cut` or `failed`, with the error.
 - **What became of a tool call?** Started, then done; or sent to the background when its
   reply was cut, then done, then delivered to the gem, cancelled, or lost to a restart.
+- **What woke the gem?** An event a watch caught is written down as it comes in
+  (`event.came`), with all that is known of it, and again when the gem is told it
+  (`event.received`, which names the first by its `seq`). The turn it woke opens `by`
+  `event`. One written down and never told is still waiting.
 - **What changed, and when?** A new model, an edited instruction, a connection whose
   tools changed, a switch from the API key to the ChatGPT proxy: each is written down
   before the first request it applies to.
@@ -90,15 +94,17 @@ entry it is, at the moment it is final.
 
 | | Kinds | Sent to a model? |
 | --- | --- | --- |
-| **What the gem remembers** | `user.said`, `note.written`, `gem.said`, `tool.called`, `tool.result` | Yes. The gem's conversation is these entries since the latest reset, in order, and nothing else |
-| **What happened** | `call.opened`, `call.closed`, `gem.reset`, `turn.opened`, `turn.closed`, `settings.changed`, `cache.cold`, `request.sent`, `request.done`, `tool.started`, `tool.backgrounded`, `tool.done` | Never |
+| **What the gem remembers** | `user.said`, `note.written`, `gem.said`, `tool.called`, `tool.result`, `event.received` | Yes. The gem's conversation is these entries since the latest reset, in order, and nothing else |
+| **What happened** | `call.opened`, `call.closed`, `gem.reset`, `turn.opened`, `turn.closed`, `settings.changed`, `cache.cold`, `request.sent`, `request.done`, `tool.started`, `tool.backgrounded`, `tool.done`, `event.came` | Never |
 
 So the log is not a copy kept beside the conversation: it *is* the conversation, with
 everything else that happened written in between. A `gem.reset` is where the user reset
 the gem: the conversation is what the gem remembers after the latest one, and
 what came before stays in the log. A `cache.cold` is where the conversation started
 cold: from there on, long tool results before its `before` are sent expired (see
-[the contract](chat-contract.md#a-cold-start)).
+[the contract](chat-contract.md#a-cold-start)). An `event.came` is an event that came in;
+the gem knows of it only from the `event.received` that tells it, and an `event.came`
+that none tells is waiting (see [the contract](chat-contract.md#an-event)).
 
 ## What it promises
 
@@ -124,7 +130,9 @@ cold: from there on, long tool results before its `before` are sent expired (see
   happened that fails is logged and dropped: it fails no reply. What the gem remembers is
   held and written again, in order, and a reply's last frame and a call's end wait until
   it is stored. If it cannot be, the reply or the call fails. So does a `cache.cold`, and
-  a reply in writing waits for it to be stored before its first request.
+  a reply in writing waits for it to be stored before its first request. An `event.came`
+  is written at once, on its own, like a `gem.reset`: the event counts as come in only
+  once it is stored, and a reply that fails never takes it down with it.
 - **It changes nothing.** With a log or without one, the model is sent the same: a test
   sends a scripted reply both ways and compares the requests.
 
