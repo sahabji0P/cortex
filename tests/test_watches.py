@@ -851,10 +851,10 @@ async def test_a_github_post_signed_with_the_secret_wakes_the_gem(
     )
 
 
-async def test_a_post_whose_signature_is_not_the_secret_s_is_401(
+async def test_a_post_whose_signature_is_not_the_secret_s_is_401_and_counted(
     setup: _Setup, hooks: httpx.AsyncClient
 ) -> None:
-    _, token = await _webhook(setup)
+    made, token = await _webhook(setup)
     body = b'{"secret_looking": "do-not-echo"}'
 
     for signature in [
@@ -869,7 +869,9 @@ async def test_a_post_whose_signature_is_not_the_secret_s_is_401(
             f"/v1/hooks/{token}", content=body, headers={b"X-Hub-Signature-256": signature}
         )
         assert (answer.status_code, answer.content) == (401, b"")
-    assert setup.sink.events == []
+    assert setup.sink.caught == []
+    kept = setup.watch(made)
+    assert (kept.refused, kept.last_refused_at, kept.events) == (5, _START, 0)
 
 
 async def test_a_webhook_stored_before_it_had_a_secret_is_signed_with_its_token(
@@ -946,6 +948,7 @@ async def test_once_a_signed_post_is_taken_an_unsigned_one_is_401(
     answer = await hooks.post(f"/v1/hooks/{token}", content=b'{"action": "closed"}')
     assert (answer.status_code, answer.content) == (401, b"")
     assert len(setup.sink.caught) == 2
+    assert (setup.watch(made).refused, setup.watch(made).last_refused_at) == (1, _START)
     # Signed either way, it is still taken.
     other = b'{"action": "edited"}'
     for headers in [
@@ -1009,11 +1012,82 @@ async def test_a_standard_webhooks_post_that_is_forged_or_stale_is_401(
     ]:
         answer = await hooks.post(f"/v1/hooks/{token}", content=body, headers=headers)
         assert (answer.status_code, answer.content) == (401, b""), headers
-    assert setup.sink.events == []
-    assert setup.watch(made).signed is False
+    assert setup.sink.caught == []
+    assert (setup.watch(made).signed, setup.watch(made).refused) == (False, 12)
     # Within five minutes either way it holds.
     late = _standard(secret, body, at=_START - timedelta(minutes=5))
     assert (await hooks.post(f"/v1/hooks/{token}", content=body, headers=late)).is_success
+
+
+async def test_three_refused_posts_in_a_row_make_the_watch_failing_and_tell_its_gem_once(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    forged = {"X-Hub-Signature-256": _signature("another", b"{}")}
+    reason = "Posts arrive, but they are not signed with this watch's secret"
+
+    for _ in range(2):
+        await setup.clock.advance(minutes=1)
+        assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}", headers=forged)).is_error
+    assert (setup.watch(made).state, setup.watch(made).refused) == ("active", 2)
+    await setup.clock.advance(minutes=1)
+    assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}", headers=forged)).is_error
+
+    kept = setup.watch(made)
+    assert (kept.state, kept.reason, kept.refused) == ("failing", reason, 3)
+    assert kept.last_refused_at == _START + timedelta(minutes=3)
+    await _until(lambda: len(setup.sink.changes) == 1)
+    assert setup.sink.changes == [("watch.failing", reason)]
+    # A fourth tells the gem nothing more, though the app is told of each.
+    assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}", headers=forged)).is_error
+    await _until(lambda: len(setup.told) == 5)  # added, then each of the four
+    assert (setup.watch(made).state, setup.watch(made).refused) == ("failing", 4)
+    assert setup.sink.changes == [("watch.failing", reason)]
+    # Never a word of a refused post in the gem's log.
+    assert [kind for kind, _ in await setup.logged(setup.one)] == ["watch.added"]
+
+    body = b'{"action": "opened"}'
+    signed = {"X-Hub-Signature-256": _signature(str(made.secret), body)}
+    assert (await hooks.post(f"/v1/hooks/{token}", content=body, headers=signed)).is_success
+
+    kept = setup.watch(made)
+    assert (kept.state, kept.reason, kept.refused, kept.events) == ("active", None, 4, 1)
+    await _until(lambda: len(setup.sink.changes) == 2)
+    assert setup.sink.changes[1] == ("watch.recovered", "")
+    # The run starts again: two more do not make it failing.
+    for _ in range(2):
+        assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}", headers=forged)).is_error
+    assert (setup.watch(made).state, setup.watch(made).refused) == ("active", 6)
+
+
+async def test_refused_posts_with_one_taken_between_them_are_not_a_run(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    forged = {"X-Hub-Signature-256": _signature("another", b"{}")}
+
+    for post in ["forged", "forged", "taken", "forged", "forged", "taken", "forged"]:
+        headers = forged if post == "forged" else {}
+        await hooks.post(f"/v1/hooks/{token}", content=b"{}", headers=headers)
+
+    kept = setup.watch(made)
+    assert (kept.state, kept.refused, kept.events) == ("active", 5, 2)
+    assert setup.sink.changes == []
+
+
+async def test_an_unsigned_post_to_a_signed_watch_is_a_refusal_in_the_run(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    body = b'{"action": "opened"}'
+    signed = {"X-Hub-Signature-256": _signature(str(made.secret), body)}
+    assert (await hooks.post(f"/v1/hooks/{token}", content=body, headers=signed)).is_success
+
+    for _ in range(3):
+        assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 401
+
+    kept = setup.watch(made)
+    assert (kept.state, kept.refused, kept.signed) == ("failing", 3, True)
 
 
 async def test_a_post_over_a_megabyte_is_413_and_not_handed_over(

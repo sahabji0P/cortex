@@ -19,6 +19,9 @@ A watch has one of three sources (see `gem_event.py`):
   comes to the hooks route (`hooked`). A post that says it is signed must be signed with
   the secret, and once one signed post is taken, every post must be (`signed`). A sender
   that never signs keeps working with the address alone. A GitHub `ping` wakes nobody.
+  A post refused for its signature is counted (`refused`), and never written in the
+  gem's log: after `_REFUSED_IN_A_ROW` in a row, with none taken between them, the watch
+  is failing, until a post is taken again.
 - `timer`: every so many minutes, at least `TIMER_MIN_MINUTES`, in a task of its own.
   It is first due one interval after it is made. One that came due while the backend
   was down goes off once as soon as it is up, and then keeps its rhythm.
@@ -145,6 +148,11 @@ _FUSED = (
 )
 # What the gem is told when the user removes one of its watches from the app.
 _ENDED = "The user removed this watch."
+# A plain webhook that refuses this many posts for their signature in a row, with none
+# taken between them, is failing, and says why. The gem is told once, not once a post:
+# anyone with the address could otherwise fill its log.
+_REFUSED_IN_A_ROW = 3
+_UNSIGNED = "Posts arrive, but they are not signed with this watch's secret"
 
 _log = logging.getLogger(__name__)
 
@@ -207,9 +215,14 @@ class Watch(BaseModel):
     # Why it is failing or paused. None while it is active.
     reason: str | None = None
     created_at: UtcDatetime
-    # When it last brought an event, and how many it has brought.
+    # When it last brought an event, and how many it has brought: only those kept, not
+    # one delivered again.
     last_event_at: UtcDatetime | None = None
     events: int = 0
+    # For a plain webhook: how many posts it has refused for their signature, and when
+    # it last did.
+    refused: int = 0
+    last_refused_at: UtcDatetime | None = None
 
     @property
     def hook_url(self) -> str | None:
@@ -370,6 +383,9 @@ class WatchEntityClass:
         self._locks: dict[str, asyncio.Lock] = {}
         # When each watch brought its events of the last hour, for the fuse.
         self._recent: dict[str, deque[datetime]] = {}
+        # How many posts each plain webhook has refused in a row, since one was taken.
+        # Counted in memory, as the fuse is: a restart starts the count again.
+        self._refusals: dict[str, int] = {}
         self._listeners: set[Listener] = set()
         # Telling listeners, and removing a deleted gem's watches, run on their own.
         self._chores: set[asyncio.Task[None]] = set()
@@ -478,6 +494,7 @@ class WatchEntityClass:
         await self._stop(str(watch.id))
         self._locks.pop(str(watch.id), None)
         self._recent.pop(str(watch.id), None)
+        self._refusals.pop(str(watch.id), None)
         await self._note(gem_id, "watch.removed", {"watch": str(watch.id), "by": by})
         self._tell(watch)
         if tell_gem:
@@ -602,6 +619,7 @@ class WatchEntityClass:
         now = self._now()
         signature = _signature(secret, named, body, now)
         if signature == "forged" or (signature == "unsigned" and watch.signed):
+            await self._refused(watch.id)
             return "refused"
         name = named.get("x-github-event") or "webhook"
         if name == "ping":
@@ -825,11 +843,41 @@ class WatchEntityClass:
                 update={**fields, **counted, "state": "active", "reason": None}
             )
             await self._store(changed, {*fields, *counted, "state", "reason"})
+            # A post taken ends a run of refused ones.
+            self._refusals.pop(str(watch_id), None)
             # The app is told of a change it shows, but not of a new event alone.
             if (watch.state, watch.signed) != (changed.state, changed.signed):
                 self._tell(changed)
             self._tell_gem(watch, changed)
             return True
+
+    async def _refused(self, watch_id: PydanticObjectId) -> None:
+        """A plain webhook refused a post for its signature: count it, and make the watch
+        failing if it is the last of a run of `_REFUSED_IN_A_ROW`. It never raises: the
+        post is refused all the same.
+
+        Only the count is kept, never the post. A watch failing already, or paused, stays
+        as it is, so the gem is told once however many follow.
+        """
+        try:
+            async with self._lock(watch_id):
+                watch = await self._docdb.get(Watch, filters={"id": watch_id})
+                if watch is None:
+                    return
+                key = str(watch_id)
+                self._refusals[key] = self._refusals.get(key, 0) + 1
+                update: dict[str, Any] = {
+                    "refused": watch.refused + 1,
+                    "last_refused_at": self._now(),
+                }
+                if self._refusals[key] >= _REFUSED_IN_A_ROW and watch.state == "active":
+                    update |= {"state": "failing", "reason": _UNSIGNED}
+                changed = watch.model_copy(update=update)
+                if await self._store(changed, update.keys()):
+                    self._tell(changed)
+                    self._tell_gem(watch, changed)
+        except Exception:
+            _log.warning("watch %s: a refused post could not be counted", watch_id, exc_info=True)
 
     async def _pause(self, watch: Watch, reason: str) -> None:
         """Pause the watch, and stop its task.
