@@ -27,6 +27,7 @@ from app.entities.gem_event import (
     McpEventKind,
     McpWatch,
     OnMcpCursor,
+    OnMcpDelivery,
     OnMcpEvent,
 )
 from app.entities.gem_log import LogEntityClass
@@ -137,6 +138,7 @@ class _McpEvents:
         on_event: OnMcpEvent,
         hook_url: str | None,
         on_cursor: OnMcpCursor | None = None,
+        on_delivery: OnMcpDelivery | None = None,
     ) -> None:
         self.runs.append((watch, hook_url))
         if self.fails is not None:

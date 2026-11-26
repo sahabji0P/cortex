@@ -19,7 +19,13 @@ from bson import ObjectId
 from app.adapters.mcp_adp import McpAdapterClass, McpFailure
 from app.entities.connection_ent import Connection, ConnectionEntityClass, ConnectionEvent
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.gem_event import EVENT_TEXT_LIMIT, McpEventKind, McpEvents, McpWatch
+from app.entities.gem_event import (
+    EVENT_TEXT_LIMIT,
+    McpEventKind,
+    McpEvents,
+    McpWatch,
+    WatchDelivery,
+)
 from app.entities.mcp_events_ent import McpEventsEntityClass, WatchFailed
 from app.routers.connections.models import ConnectionsModels
 from app.routers.connections.service import ConnectionsServiceV1Class
@@ -159,6 +165,19 @@ class _Told:
         return [text for _, text, _, _, _ in self.events]
 
 
+class _Deliveries:
+    """The deliveries a watch said it started on, in order. It may be made to fail."""
+
+    def __init__(self, fails: bool = False) -> None:
+        self.seen: list[WatchDelivery] = []
+        self.fails = fails
+
+    async def __call__(self, delivery: WatchDelivery) -> None:
+        self.seen.append(delivery)
+        if self.fails:
+            raise RuntimeError("the store is down")
+
+
 def _events(setup: _Setup) -> McpEvents:
     return McpEventsEntityClass(
         docdb=cast("DocDBAdapterClass", setup.docdb),
@@ -265,6 +284,36 @@ async def test_a_watch_by_stream_comes_back_from_its_cursor_after_a_drop(setup: 
     ]
     assert [cursor for *_, cursor in told.events] == ["1", "2", "4"]
     assert setup.served.server.asked.count("events/stream") >= 3
+
+
+async def test_a_watch_says_which_delivery_it_started_on(setup: _Setup) -> None:
+    setup.served.server.next_poll_ms = 10
+    events, told = _events(setup), _Told()
+    connection = await _open_to(setup, setup.one)
+    streamed, polled = _Deliveries(), _Deliveries(fails=True)
+    watches = [
+        # One the server streams, and one it only lets be polled.
+        events.watch(
+            _watch(setup.one, connection, "issue.opened", repo="owner/one"),
+            told,
+            None,
+            on_delivery=streamed,
+        ),
+        events.watch(
+            _watch(setup.one, connection, "build.finished"), told, None, on_delivery=polled
+        ),
+    ]
+    watching = [asyncio.create_task(watch) for watch in watches]
+    await _asked(setup.served.server, "events/stream")
+    await _asked(setup.served.server, "events/poll")
+
+    # One that cannot be kept stops nothing: the watch goes on, and still tells events.
+    await setup.served.server.emit("build.finished", {"ok": True})
+    await told.wait_for(1)
+    for task in watching:
+        await _stop(task)
+
+    assert (streamed.seen, polled.seen) == (["push"], ["poll"])
 
 
 async def test_a_watch_stops_and_says_why_when_it_cannot_run(setup: _Setup) -> None:
@@ -377,7 +426,10 @@ async def hooked() -> AsyncGenerator[_Hooked]:
 
 async def test_a_watch_by_webhook_is_renewed_believed_and_stopped(hooked: _Hooked) -> None:
     server = hooked.setup.served.server
-    watching = asyncio.create_task(hooked.events.watch(hooked.watch, hooked.told, _HOOK))
+    delivered = _Deliveries()
+    watching = asyncio.create_task(
+        hooked.events.watch(hooked.watch, hooked.told, _HOOK, on_delivery=delivered)
+    )
     await _asked(server, "events/subscribe")
 
     await server.emit("issue.posted", {"repo": "owner/one", "number": 1}, event_id="p1")
@@ -394,6 +446,7 @@ async def test_a_watch_by_webhook_is_renewed_believed_and_stopped(hooked: _Hooke
     ]
     assert server.asked.count("events/subscribe") >= 3
     assert hooked.answers == [200, 200]
+    assert delivered.seen == ["webhook"]
     # Stopped when the watch ends.
     assert server.asked[-1] == "events/unsubscribe"
     assert server.hooks == {}
@@ -424,7 +477,10 @@ async def test_a_server_that_will_not_post_to_the_address_is_polled(setup: _Setu
     events, told = _events(setup), _Told()
     connection = await _open_to(setup, setup.one)
     watch = _watch(setup.one, connection, "issue.posted", repo="owner/one")
-    watching = asyncio.create_task(events.watch(watch, told, "http://plain.example.com/hook"))
+    delivered = _Deliveries()
+    watching = asyncio.create_task(
+        events.watch(watch, told, "http://plain.example.com/hook", on_delivery=delivered)
+    )
     await _asked(setup.served.server, "events/poll")
 
     await setup.served.server.emit("issue.posted", {"repo": "owner/one", "number": 1})
@@ -432,6 +488,8 @@ async def test_a_server_that_will_not_post_to_the_address_is_polled(setup: _Setu
     await _stop(watching)
 
     assert setup.served.server.asked[:3] == ["events/list", "events/subscribe", "events/poll"]
+    # It said it started on the webhook, then that it polls.
+    assert delivered.seen == ["webhook", "poll"]
 
 
 async def _asked(server: EventsServer, method: str) -> None:

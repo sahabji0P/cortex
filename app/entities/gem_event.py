@@ -37,12 +37,17 @@ __all__ = [
     "McpEvents",
     "McpWatch",
     "OnMcpCursor",
+    "OnMcpDelivery",
     "OnMcpEvent",
+    "WatchDelivery",
     "WatchSource",
 ]
 
 # Where an event comes from.
 type WatchSource = Literal["mcp", "webhook", "timer"]
+# How a watch's events reach us, in the words of MCP events: pushed down a stream held
+# open, posted to an address of ours, or polled for again and again.
+type WatchDelivery = Literal["push", "webhook", "poll"]
 
 # An event's `data` is cut to this many characters, as a connection's tool result is.
 # THE OWNER HAS NOT RULED ON THIS NUMBER.
@@ -125,6 +130,11 @@ type OnMcpEvent = Callable[[str, str, str | None, datetime | None, str | None], 
 type OnMcpCursor = Callable[[str], Awaitable[None]]
 
 
+# Is told how a watch on MCP events gets them, each time it starts on a delivery: the
+# one chosen, and poll after a server would not take a webhook.
+type OnMcpDelivery = Callable[[WatchDelivery], Awaitable[None]]
+
+
 class McpEvents(Protocol):
     """The connections' side of MCP events: what they serve, and running a watch on one."""
 
@@ -138,17 +148,19 @@ class McpEvents(Protocol):
         on_event: OnMcpEvent,
         hook_url: str | None,
         on_cursor: OnMcpCursor | None = None,
+        on_delivery: OnMcpDelivery | None = None,
     ) -> None:
         """Run a watch until it is cancelled, telling `on_event` of each event in order,
         and `on_cursor` of the cursor when it moves with none.
 
         The delivery is chosen here from what the server offers: stream, then webhook
         (only with a `hook_url`, the public address its events are to be posted to),
-        then poll. Runs for as long as the watch does, and comes back to the server
-        after a drop from the last cursor. Raises if the watch cannot run at all, such
-        as when the connection is gone, is no longer open to the gem, or does not serve
-        the event, and when the server has not answered for a while: the watch is then
-        failing, and says why.
+        then poll. `on_delivery` is told each one the watch starts on: poll, after a
+        server would not take a webhook. Runs for as long as the watch does, and comes
+        back to the server after a drop from the last cursor. Raises if the watch cannot
+        run at all, such as when the connection is gone, is no longer open to the gem, or
+        does not serve the event, and when the server has not answered for a while: the
+        watch is then failing, and says why.
         """
         ...
 
