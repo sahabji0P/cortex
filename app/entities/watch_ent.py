@@ -182,7 +182,8 @@ class Watch(BaseModel):
     arguments: str = "{}"
     cursor: str | None = None
     # For a webhook, and for MCP events posted to us: the last part of its address, and
-    # the secret its posts are signed with. Never sent to the app.
+    # the secret its posts are signed with. Never in the app's list of watches: a plain
+    # webhook's is given only by a route of its own, when the user asks to see it.
     token: str | None = None
     # For a timer: how often it goes off, and when it is next due.
     every_minutes: int | None = None

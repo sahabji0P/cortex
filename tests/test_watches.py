@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 from collections.abc import AsyncGenerator, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -1283,6 +1284,80 @@ async def test_the_watches_of_a_gem_that_is_not_there_are_404(
 ) -> None:
     for gem in [str(ObjectId()), "nope"]:
         assert (await routes.get(f"/v1/gems/{gem}/watches")).status_code == 404
+
+
+async def test_the_app_is_shown_a_webhook_s_address_and_secret_when_asked(
+    setup: _Setup, routes: httpx.AsyncClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    made = await setup.watches.add_webhook(setup.one.id, "Review pull requests.")
+    assert made.token is not None
+
+    answer = await routes.get(f"/v1/gems/{setup.one.id}/watches/{made.id}/hook")
+
+    assert answer.status_code == 200
+    assert answer.json() == {
+        "address": f"{_PUBLIC}/v1/hooks/{made.token}",
+        "secret": made.token,
+        "content_type": "application/json",
+    }
+    assert answer.headers["cache-control"] == "no-store"
+    # The list still never holds it, and nothing logged does.
+    listed = await routes.get(f"/v1/gems/{setup.one.id}/watches")
+    assert made.token not in listed.text
+    assert made.token not in caplog.text
+
+
+async def test_a_webhook_s_secret_is_shown_with_no_public_address(
+    setup: _Setup, routes: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made = await setup.watches.add_webhook(setup.one.id, "Review pull requests.")
+    monkeypatch.setattr(settings, "public_url", "")
+
+    answer = await routes.get(f"/v1/gems/{setup.one.id}/watches/{made.id}/hook")
+
+    assert answer.status_code == 200
+    assert answer.json() == {
+        "address": None,
+        "secret": made.token,
+        "content_type": "application/json",
+    }
+
+
+async def test_only_a_plain_webhook_has_a_hook_to_show(
+    setup: _Setup, routes: httpx.AsyncClient
+) -> None:
+    timer = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    event = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    # A watch on MCP events has a token of its own, and still no hook to show.
+    assert event.token is not None
+
+    for made in (timer, event):
+        answer = await routes.get(f"/v1/gems/{setup.one.id}/watches/{made.id}/hook")
+        assert answer.status_code == 404
+        assert answer.json() == {
+            "code": "not_found",
+            "message": "This watch has no Cortex webhook: only a plain webhook watch has one",
+        }
+    assert event.token not in answer.text
+
+
+async def test_the_hook_of_a_watch_that_is_not_the_gem_s_is_404(
+    setup: _Setup, routes: httpx.AsyncClient
+) -> None:
+    theirs = await setup.watches.add_webhook(setup.two.id, "Not hers.")
+    assert theirs.token is not None
+
+    for gem, watch in [
+        (str(setup.one.id), str(theirs.id)),
+        (str(setup.one.id), str(ObjectId())),
+        (str(setup.one.id), "x"),
+        (str(ObjectId()), str(theirs.id)),
+        ("nope", str(theirs.id)),
+    ]:
+        answer = await routes.get(f"/v1/gems/{gem}/watches/{watch}/hook")
+        assert answer.status_code == 404
+        assert theirs.token not in answer.text
 
 
 async def test_the_user_removes_a_watch_and_it_stops(

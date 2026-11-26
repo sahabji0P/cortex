@@ -13,8 +13,8 @@ class WatchesModels:
             class Watch(BaseModel):
                 """One of a gem's watches, as the app shows it: the contract says each field.
 
-                Never with its webhook's address or secret: those are the gem's, and lie in
-                its conversation.
+                Never with its webhook's address or secret: those come only from `Hook`,
+                when the user asks to see them.
                 """
 
                 id: str
@@ -39,3 +39,15 @@ class WatchesModels:
                 created_at: datetime
                 last_event_at: datetime | None
                 events: int
+
+            class Hook(BaseModel):
+                """A plain webhook watch's address and secret, for the user to see when they ask.
+
+                What the gem was given to register it, and the same token twice: the address
+                ends in it.
+                """
+
+                # Null while this backend has no public address (PUBLIC_URL).
+                address: str | None
+                secret: str
+                content_type: str

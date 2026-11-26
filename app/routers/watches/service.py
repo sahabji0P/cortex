@@ -4,11 +4,15 @@ from typing import Annotated
 from bson import ObjectId
 from fastapi import Depends
 
-from app.core.errors import NotFoundError
+from app.core.errors import AppError, NotFoundError
 from app.entities import EntitiesRegistry
 from app.entities.gem_ent import GemEntityClass
-from app.entities.watch_ent import Watch, WatchEntityClass
+from app.entities.watch_ent import HOOK_CONTENT_TYPE, Watch, WatchEntityClass
 from app.routers.watches.models import WatchesModels
+
+# Why a timer, or a watch on MCP events, has no hook to show. A watch on MCP events has
+# an address too, but only its connection's server posts to it, signed its own way.
+_NO_HOOK = "This watch has no Cortex webhook: only a plain webhook watch has one"
 
 
 class WatchesServiceV1Class:
@@ -50,6 +54,15 @@ class WatchesServiceV1Class:
     async def list_watches(self, gem_id: str) -> list[WatchesModels.V1.Output.Watch]:
         watches = await self.watches.list_for(await self._gem(gem_id))
         return [self._watch_out(watch) for watch in watches]
+
+    async def hook(self, gem_id: str, watch_id: str) -> WatchesModels.V1.Output.Hook:
+        watch = await self.watches.get(await self._gem(gem_id), watch_id)
+        # By its source, not by its token: a watch on MCP events has a token too.
+        if watch.source != "webhook" or watch.token is None:
+            raise AppError(404, "not_found", _NO_HOOK)
+        return WatchesModels.V1.Output.Hook(
+            address=watch.hook_url, secret=watch.token, content_type=HOOK_CONTENT_TYPE
+        )
 
     async def remove_watch(self, gem_id: str, watch_id: str) -> None:
         # The user removes it from the app: the gem is told, so it stops counting on it.
