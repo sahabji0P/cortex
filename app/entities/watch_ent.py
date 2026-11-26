@@ -69,6 +69,8 @@ paused runs from `start` until `close`.
 """
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import hashlib
 import hmac
@@ -128,6 +130,10 @@ HOOKS_PATH = "/v1/hooks"
 HOOK_CONTENT_TYPE = "application/json"
 # How many random bytes a webhook's token, and a plain webhook's secret, are made of.
 _TOKEN_BYTES = 32
+# How a plain webhook's secret is written, as Standard Webhooks writes one: this, then
+# its random bytes in base64. A sender's Standard Webhooks library signs with those
+# bytes; GitHub, and a sender signing by hand, with the whole text as it is.
+_SECRET_PREFIX = "whsec_"
 
 # A timer goes off at most this often. THE OWNER HAS NOT RULED ON THIS NUMBER.
 TIMER_MIN_MINUTES = 5
@@ -426,7 +432,7 @@ class WatchEntityClass:
                 about=about,
                 source="webhook",
                 token=secrets.token_urlsafe(_TOKEN_BYTES),
-                secret=secrets.token_urlsafe(_TOKEN_BYTES),
+                secret=_new_secret(),
                 delivery="webhook",
                 created_at=self._now(),
             )
@@ -1050,10 +1056,10 @@ def _kinds(kinds: list[McpEventKind]) -> str:
 def _signature(secret: str, headers: Mapping[str, str], body: bytes, now: datetime) -> _Signature:
     """What a plain webhook's post says of its signature, checked with the watch's secret.
 
-    Two ways of signing are known: GitHub's (`X-Hub-Signature-256`) and Standard
-    Webhooks' (`webhook-signature`, with `webhook-id` and `webhook-timestamp`), with the
-    secret as it is for the key. A post that carries both must hold for both. `headers`
-    are named in lower case.
+    Two ways of signing are known: GitHub's (`X-Hub-Signature-256`), keyed with the
+    secret's text as it is, and Standard Webhooks' (`webhook-signature`, with `webhook-id`
+    and `webhook-timestamp`), keyed as that scheme keys one (`_standard_key`). A post that
+    carries both must hold for both. `headers` are named in lower case.
     """
     github = headers.get("x-hub-signature-256")
     standard = headers.get("webhook-signature")
@@ -1061,9 +1067,30 @@ def _signature(secret: str, headers: Mapping[str, str], body: bytes, now: dateti
         return "unsigned"
     if github is not None and not _github_signed(secret, body, github):
         return "forged"
-    if standard is not None and standard_webhook_id(secret.encode(), headers, body, now) is None:
+    if (
+        standard is not None
+        and standard_webhook_id(_standard_key(secret), headers, body, now) is None
+    ):
         return "forged"
     return "signed"
+
+
+def _new_secret() -> str:
+    """A new plain webhook's secret, written as Standard Webhooks writes one."""
+    return _SECRET_PREFIX + base64.b64encode(secrets.token_bytes(_TOKEN_BYTES)).decode()
+
+
+def _standard_key(secret: str) -> bytes:
+    """The key a Standard Webhooks signature of this secret is made with.
+
+    A `whsec_` secret is keyed with the bytes after the prefix, as the scheme's libraries
+    key it. Any other (a watch stored before secrets were written so, whose secret is its
+    token) is keyed with its text as it is.
+    """
+    if secret.startswith(_SECRET_PREFIX):
+        with contextlib.suppress(binascii.Error, ValueError):
+            return base64.b64decode(secret.removeprefix(_SECRET_PREFIX), validate=True)
+    return secret.encode()
 
 
 def _github_signed(secret: str, body: bytes, signature: str) -> bool:

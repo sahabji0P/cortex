@@ -281,7 +281,9 @@ async def test_a_webhook_watch_is_kept_with_an_address_of_its_own(setup: _Setup)
     assert made.token != other.token
     assert made.hook_url == f"{_PUBLIC}/v1/hooks/{made.token}"
     # Its secret is another, of its own: it is not in the address.
-    assert made.secret is not None and len(made.secret) >= 43
+    # Written as Standard Webhooks writes one: `whsec_` and 32 random bytes in base64.
+    assert made.secret is not None and made.secret.startswith("whsec_")
+    assert len(base64.b64decode(made.secret.removeprefix("whsec_"))) == 32
     assert made.secret not in (made.token, other.secret)
     assert made.hook_secret == made.secret
     [stored, _] = setup.stored()
@@ -767,10 +769,18 @@ def _signature(secret: str, body: bytes) -> str:
 def _standard(
     secret: str, body: bytes, message_id: str = "msg_1", at: datetime = _START
 ) -> dict[str, str]:
-    """The headers of a post signed as Standard Webhooks signs one, with the secret as it is."""
+    """The headers of a post signed as a Standard Webhooks library signs one.
+
+    A `whsec_` secret is keyed with its bytes after the prefix, any other with its text.
+    """
     stamp = str(int(at.timestamp()))
     signed = f"{message_id}.{stamp}.".encode() + body
-    mac = hmac.new(secret.encode(), signed, hashlib.sha256).digest()
+    key = (
+        base64.b64decode(secret.removeprefix("whsec_"))
+        if secret.startswith("whsec_")
+        else secret.encode()
+    )
+    mac = hmac.new(key, signed, hashlib.sha256).digest()
     return {
         "webhook-id": message_id,
         "webhook-timestamp": stamp,
