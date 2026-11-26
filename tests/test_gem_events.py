@@ -164,6 +164,45 @@ async def test_an_event_is_told_to_the_latest_client_after_a_line_saying_what_ca
     ]
 
 
+async def test_a_reply_about_an_event_goes_to_every_open_client_written_or_not() -> None:
+    world = await _world(_said("Hello."), _said("New commits are in."))
+    writer = await world.write("hi")
+    # An app that is open and has written nothing yet, and one that has gone.
+    idle, gone = _Client(), _Client()
+    world.chat.joined(idle.deliver)
+    world.chat.joined(gone.deliver)
+    world.chat.left(gone.deliver)
+
+    await _came_in(world, "push")
+    await writer.until("chat.done", 2)
+    await idle.until("chat.done")
+
+    told = [
+        ("chat.event", "the main branch: push"),
+        ("chat.text", "New commits are in."),
+        ("chat.done", "New commits are in."),
+    ]
+    assert writer.frames[2:] == told
+    assert idle.frames == told
+    assert gone.frames == []
+
+
+async def test_a_reply_about_an_event_reaches_a_client_that_never_wrote() -> None:
+    world = await _world(_said("New commits are in."))
+    idle = _Client()
+    world.chat.joined(idle.deliver)
+
+    await _came_in(world, "push")
+    await idle.until("chat.done")
+    await _quiet(world)
+
+    assert idle.frames == [
+        ("chat.event", "the main branch: push"),
+        ("chat.text", "New commits are in."),
+        ("chat.done", "New commits are in."),
+    ]
+
+
 async def test_a_client_that_goes_does_not_cut_a_reply_about_an_event() -> None:
     gate = asyncio.Event()
     world = await _world(_said("Hello."), [gate, *_said("New commits are in.")])

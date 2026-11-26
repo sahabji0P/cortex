@@ -36,8 +36,9 @@ a call, from the marks stored with them.
 An event that came in for one of the gem's watches (see `pending_events.py`) is told the
 same way, after the late results waiting with it, with one difference: nobody has to be
 there. A gem that is quiet is woken by the event itself, and its reply is written and
-stored even when no client has written to it: it is sent to the client of the latest
-message if there is one, and to nobody otherwise. A client that goes does not cut it.
+stored even when no client is there: it is sent to every client that is open, whether
+it has written to the gem or not, and to nobody if none is. A client that goes does not
+cut it.
 Events that come while a reply is being written all wait for the next turn, and are told
 in one reply. An event waiting when a message comes goes in ahead of the message, and
 the reply to the message tells it.
@@ -45,7 +46,7 @@ the reply to the message tells it.
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -182,6 +183,9 @@ class ChatEntityClass:
         # The latest message to each gem, by `gem_key`: its id as the client spelled it,
         # and its client. A late result, or an event, is told to that client.
         self._latest: dict[str, tuple[str, Deliver]] = {}
+        # Every client that is open, in the order they came. A reply an event woke goes
+        # to all of them.
+        self._open: list[Deliver] = []
         # A gem's late results and events are told here, in writing.
         conversations.tell_results_with(self._tell_when_quiet)
 
@@ -386,6 +390,13 @@ class ChatEntityClass:
         self._tell_when_quiet(key)
         self._conversations.let_go(key)
 
+    def joined(self, deliver: Deliver) -> None:
+        """A client has come: `deliver` is the function its frames are sent with.
+
+        A reply an event wakes a gem with is sent to it, until it goes (`left`).
+        """
+        self._open.append(deliver)
+
     def left(self, deliver: Deliver) -> None:
         """A client has gone: `deliver` is the function its frames were sent with.
 
@@ -393,6 +404,8 @@ class ChatEntityClass:
         for it is cut, as its replies to messages are cut by whoever holds them, and
         later results for the gems it wrote to are only stored until someone writes again.
         """
+        # By equality: a bound method is a new object each time it is read.
+        self._open = [client for client in self._open if client != deliver]
         for key, (_, client) in list(self._latest.items()):
             if client is deliver:
                 del self._latest[key]
@@ -423,8 +436,8 @@ class ChatEntityClass:
         The reply has no new message. It goes to the client of the latest message to the
         gem, if that client is still there. If it is not, results alone are only stored:
         the gem's instructions tell it to bring them up when it next answers. An event
-        wakes the gem whoever is there: its reply is written and stored all the same,
-        and sent to nobody. Nor does a client that goes cut it.
+        wakes the gem whoever is there: its reply goes to every client that is open, and
+        is written and stored all the same with none. No client that goes cuts it.
         """
         kept = self._conversations.gem(key)
         # The client the reply is for, once `chat.result` has reached it: it is then owed
@@ -445,15 +458,18 @@ class ChatEntityClass:
             if await self._conversations.gone(gem_oid):
                 return  # deleted while they were stored
             latest = self._latest.get(key)
-            if latest is None and not events:
+            if events:
+                # An event wakes the gem whoever is there: its reply goes to every client
+                # open now (the latest to write to the gem among them), and is not cut by
+                # one going. With none, it goes to nobody, and is stored all the same.
+                clients = list(self._open)
+                if latest is not None:
+                    gem_id = latest[0]
+                    if all(client is not latest[1] for client in clients):
+                        clients.append(latest[1])
+                deliver = _to_all(clients)
+            elif latest is None:
                 return  # nobody is there to read a reply: the results are only stored
-            if latest is None:
-                # An event wakes the gem whoever is there: its reply goes to nobody.
-                deliver = _nowhere
-            elif events:
-                # A reply about an event is not cut by its client going: it goes on to
-                # nobody, and is stored all the same.
-                gem_id, deliver = latest[0], _quietly(latest[1])
             else:
                 gem_id, deliver = latest
                 # Noted with no `await` since the client was read, so that if it goes
@@ -535,20 +551,18 @@ def _teller(
     return tell
 
 
-async def _nowhere(event: ChatEvent) -> None:
-    """Where a reply goes when nobody is there to read it: it is only stored."""
+def _to_all(clients: Sequence[Deliver]) -> Deliver:
+    """Send frames to each of `clients` for as long as it is there, and then to nobody.
 
-
-def _quietly(deliver: Deliver) -> Deliver:
-    """Send frames to a client for as long as it is there, and then to nobody.
-
-    A reply sent so is not ended by its client going: it is written and stored all the
-    same.
+    The clients are those open when the reply begins. A reply sent so is not ended by a
+    client going, nor by every one of them going: it is written and stored all the same.
     """
+    clients = list(clients)
 
     async def send(event: ChatEvent) -> None:
-        with contextlib.suppress(Exception):
-            await deliver(event)
+        for deliver in clients:
+            with contextlib.suppress(Exception):
+                await deliver(event)
 
     return send
 

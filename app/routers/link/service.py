@@ -136,6 +136,8 @@ class LinkServiceV1Class:
 
         try:
             await send(LinkModels.V1.Output.Ready())
+            # A reply an event wakes a gem with is sent to every socket that is open.
+            self.chat.joined(send)
             if self.connections is not None:
                 self.connections.listen(connection_changed)
             if self.log is not None:
