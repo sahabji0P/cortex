@@ -119,6 +119,14 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A watch works again only once its server answers, never by time alone: a server that hangs keeps it failing, and it does not flip.
 - T3 watches a PR by polling GitHub itself every 2 minutes and waking only on a change. Cortex's way to that: "watch a tool" (next, not built).
 
+- Decided 2026-11-27: each webhook has its own address (the token in it) and its own secret. A sender can only carry an address and a secret, and the secret never travels, so the address must say which watch.
+- A webhook's secret is a `whsec_` secret (Standard Webhooks' way). GitHub's signature and Standard Webhooks' are both checked: not tied to one sender.
+- Once a webhook has taken one signed post, it takes only signed posts.
+- Refused posts are counted on the watch. Three in a row make it failing, told to the gem once. Never one event per refused post.
+- A watch's `events` counts only events the gem was told: a repeat is not counted, nor seen by the fuse.
+- The app shows a webhook's address and secret only when asked, from a route of its own. Never in the list.
+- Removing a watch does not remove the webhook at the sender: the gem does it if it has the tool, else the user.
+
 ### Watches: not ruled yet (the owner's to decide)
 
 - The fuse: a watch with more than 60 events in an hour is paused. Against a gem waking itself in a loop.
@@ -128,7 +136,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A reset ends the gem's watches and drops its waiting events.
 - The watch tools are offered to every gem. No switch per gem.
 - The event tag's wording, and the short line the app is sent (`about: name`).
-- A webhook post with no signature is taken: the token in the address is enough.
+- A webhook post with no signature is taken while the watch has never had a signed one: the token in the address is enough.
 
 ## Base (next, order not fixed, no rush)
 
