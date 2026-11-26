@@ -59,7 +59,13 @@ from app.adapters.mcp_adp import (
 )
 from app.config import settings
 from app.entities.connection_ent import Connection, ConnectionEntityClass, ConnectionEvent
-from app.entities.gem_event import EVENT_TEXT_LIMIT, McpEventKind, McpWatch, OnMcpEvent
+from app.entities.gem_event import (
+    EVENT_TEXT_LIMIT,
+    McpEventKind,
+    McpWatch,
+    OnMcpCursor,
+    OnMcpEvent,
+)
 
 __all__ = ["McpEventsEntityClass", "WatchFailed"]
 
@@ -95,6 +101,23 @@ class _Seen:
     # Set when the server ends the subscription, with why.
     ended: asyncio.Event = field(default_factory=asyncio.Event)
     reason: str = ""
+    # Told the cursor when it moves with no event, so the watch keeps it.
+    on_cursor: OnMcpCursor | None = None
+
+    async def moved(self, cursor: str | None) -> None:
+        """The cursor has moved with no event. None leaves the last one: no place is lost.
+
+        The watch is told it, so that it resumes from here, not from now. Failing to keep
+        it costs nothing but a replay, so it never stops the watch.
+        """
+        if cursor is None or cursor == self.cursor:
+            return
+        self.cursor = cursor
+        if self.on_cursor is not None:
+            try:
+                await self.on_cursor(cursor)
+            except Exception as exc:
+                _log.info("a watch's cursor could not be kept: %s", exc)
 
 
 class _Again(Exception):
@@ -146,9 +169,15 @@ class McpEventsEntityClass:
             for event in connection.events
         ]
 
-    async def watch(self, watch: McpWatch, on_event: OnMcpEvent, hook_url: str | None) -> None:
+    async def watch(
+        self,
+        watch: McpWatch,
+        on_event: OnMcpEvent,
+        hook_url: str | None,
+        on_cursor: OnMcpCursor | None = None,
+    ) -> None:
         """Run a watch until it is cancelled. Raises `WatchFailed` when it cannot run."""
-        seen = self._seen[watch.watch_id] = _Seen(watch.cursor)
+        seen = self._seen[watch.watch_id] = _Seen(watch.cursor, on_cursor=on_cursor)
         try:
             connection, kind = await self._check(watch)
             seen.url = connection.url
@@ -196,7 +225,7 @@ class McpEventsEntityClass:
                 raise (cause if isinstance(cause, Exception) else again) from None
         elif isinstance(item, McpMark):
             _log.warning("watch %s: the server says events were skipped", watch.watch_id)
-            seen.cursor = item.cursor
+            await seen.moved(item.cursor)
         elif isinstance(item, McpEnded):
             seen.reason = item.reason
             seen.ended.set()
@@ -229,7 +258,7 @@ class McpEventsEntityClass:
                     # watch that stops among them asks for them again, and skips none.
                     cursor = polled.cursor if number == last else asked_from
                     await self._tell(watch, seen, on_event, occurrence, cursor)
-                seen.cursor = polled.cursor
+                await seen.moved(polled.cursor)
             except _Again:
                 failures += 1
                 await asyncio.sleep(self._pause_for(failures))
@@ -255,7 +284,7 @@ class McpEventsEntityClass:
                 )
                 if stream.start.truncated:
                     _log.warning("watch %s: the server says events were skipped", watch.watch_id)
-                seen.cursor = stream.start.cursor
+                await seen.moved(stream.start.cursor)
                 async for item in _dropping(stream):
                     # Only a stream that sends something counts as working: one the
                     # server confirms and closes at once is come back to ever more slowly.
@@ -268,7 +297,7 @@ class McpEventsEntityClass:
                             _log.warning(
                                 "watch %s: the server says events were skipped", watch.watch_id
                             )
-                        seen.cursor = item.cursor
+                        await seen.moved(item.cursor)
                 raise WatchFailed(f"The server ended the watch: {stream.ended}")
             except _Again:
                 failures += 1
@@ -316,7 +345,7 @@ class McpEventsEntityClass:
                 failures = 0
                 if granted.truncated:
                     _log.warning("watch %s: the server says events were skipped", watch.watch_id)
-                seen.cursor = granted.cursor
+                await seen.moved(granted.cursor)
                 # Asked for again before it lapses, and now and then when it never does: a
                 # renewal is where the cursor moves on while nothing is posted.
                 left = _HOOK_TTL_MS / 1000

@@ -77,6 +77,7 @@ from app.entities.gem_event import (
     McpEventKind,
     McpEvents,
     McpWatch,
+    OnMcpCursor,
     OnMcpEvent,
     WatchSource,
 )
@@ -651,7 +652,12 @@ class WatchEntityClass:
                 if watch is None or watch.state == "paused":
                     return
                 attempt = asyncio.create_task(
-                    self._mcp_events.watch(watch.mcp, self._on_event(watch_id), watch.hook_url)
+                    self._mcp_events.watch(
+                        watch.mcp,
+                        self._on_event(watch_id),
+                        watch.hook_url,
+                        self._on_cursor(watch_id),
+                    )
                 )
                 try:
                     if await self._lasts(attempt):
@@ -676,6 +682,15 @@ class WatchEntityClass:
         finally:
             waiting.cancel()
         return not attempt.done()
+
+    def _on_cursor(self, watch_id: PydanticObjectId) -> OnMcpCursor:
+        """What is told an MCP watch's cursor when it moves with no event: it is kept, so
+        a watch that has brought nothing yet resumes from there after a restart."""
+
+        async def on_cursor(cursor: str) -> None:
+            await self._docdb.update(Watch, {"id": watch_id}, {"cursor": cursor})
+
+        return on_cursor
 
     def _on_event(self, watch_id: PydanticObjectId) -> OnMcpEvent:
         """What is told each MCP event of a watch: it is handed over, then its cursor kept."""

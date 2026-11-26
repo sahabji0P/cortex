@@ -32,7 +32,7 @@ from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.gem_event import GemEvent, McpEventKind, McpWatch, OnMcpEvent
+from app.entities.gem_event import GemEvent, McpEventKind, McpWatch, OnMcpCursor, OnMcpEvent
 from app.entities.gem_log import LogEntityClass
 from app.entities.late_results import CANCEL_TOOL
 from app.entities.model import Item, ToolSpec, to_messages
@@ -1069,7 +1069,13 @@ class _NoEvents:
     async def kinds_for(self, gem_id: ObjectId) -> list[McpEventKind]:
         return []
 
-    async def watch(self, watch: McpWatch, on_event: OnMcpEvent, hook_url: str | None) -> None:
+    async def watch(
+        self,
+        watch: McpWatch,
+        on_event: OnMcpEvent,
+        hook_url: str | None,
+        on_cursor: OnMcpCursor | None = None,
+    ) -> None:
         raise AssertionError("no watch runs here")
 
     async def posted(

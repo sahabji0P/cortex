@@ -447,3 +447,24 @@ async def _stop(watching: asyncio.Task[None]) -> None:
     watching.cancel()
     with pytest.raises(asyncio.CancelledError):
         await watching
+
+
+async def test_a_watch_tells_where_it_has_got_to_when_no_event_comes(setup: _Setup) -> None:
+    setup.served.server.next_poll_ms = 10
+    events, told = _events(setup), _Told()
+    connection = await _open_to(setup, setup.one)
+    moved: list[str] = []
+
+    async def on_cursor(cursor: str) -> None:
+        moved.append(cursor)
+
+    watching = asyncio.create_task(
+        events.watch(_watch(setup.one, connection, "build.finished"), told, None, on_cursor)
+    )
+    await _asked(setup.served.server, "events/poll")
+    await asyncio.sleep(0.1)
+    await _stop(watching)
+
+    # The first poll from now gives a place: it is told once, though asked from again.
+    assert moved == ["0"]
+    assert told.events == []

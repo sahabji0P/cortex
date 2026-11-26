@@ -36,6 +36,7 @@ __all__ = [
     "McpEventKind",
     "McpEvents",
     "McpWatch",
+    "OnMcpCursor",
     "OnMcpEvent",
     "WatchSource",
 ]
@@ -118,6 +119,12 @@ class McpWatch:
 type OnMcpEvent = Callable[[str, str, str | None, datetime | None, str | None], Awaitable[None]]
 
 
+# Is told a watch's cursor when it moves with no event: a poll that brought none, a
+# stream's start or heartbeat, a webhook's renewal. The watch keeps it, so that it
+# resumes from there and not from now.
+type OnMcpCursor = Callable[[str], Awaitable[None]]
+
+
 class McpEvents(Protocol):
     """The connections' side of MCP events: what they serve, and running a watch on one."""
 
@@ -125,8 +132,15 @@ class McpEvents(Protocol):
         """The kinds of event served by the connections open to the gem."""
         ...
 
-    async def watch(self, watch: McpWatch, on_event: OnMcpEvent, hook_url: str | None) -> None:
-        """Run a watch until it is cancelled, telling `on_event` of each event in order.
+    async def watch(
+        self,
+        watch: McpWatch,
+        on_event: OnMcpEvent,
+        hook_url: str | None,
+        on_cursor: OnMcpCursor | None = None,
+    ) -> None:
+        """Run a watch until it is cancelled, telling `on_event` of each event in order,
+        and `on_cursor` of the cursor when it moves with none.
 
         The delivery is chosen here from what the server offers: stream, then webhook
         (only with a `hook_url`, the public address its events are to be posted to),

@@ -26,6 +26,7 @@ from app.entities.gem_event import (
     GemEvent,
     McpEventKind,
     McpWatch,
+    OnMcpCursor,
     OnMcpEvent,
 )
 from app.entities.gem_log import LogEntityClass
@@ -119,6 +120,8 @@ class _McpEvents:
         # Each watch run, with the address its events may be posted to.
         self.runs: list[tuple[McpWatch, str | None]] = []
         self.running: dict[str, OnMcpEvent] = {}
+        # What each watch running is told its cursor with, when it moves with no event.
+        self.cursors: dict[str, OnMcpCursor] = {}
         self.stopped: list[str] = []
         self.fails: Exception | None = None
         # Whether a post is one the server signed, and what each was posted with.
@@ -128,15 +131,24 @@ class _McpEvents:
     async def kinds_for(self, gem_id: ObjectId) -> list[McpEventKind]:
         return self.open.get(gem_id, [])
 
-    async def watch(self, watch: McpWatch, on_event: OnMcpEvent, hook_url: str | None) -> None:
+    async def watch(
+        self,
+        watch: McpWatch,
+        on_event: OnMcpEvent,
+        hook_url: str | None,
+        on_cursor: OnMcpCursor | None = None,
+    ) -> None:
         self.runs.append((watch, hook_url))
         if self.fails is not None:
             raise self.fails
         self.running[watch.watch_id] = on_event
+        if on_cursor is not None:
+            self.cursors[watch.watch_id] = on_cursor
         try:
             await asyncio.Event().wait()
         finally:
             del self.running[watch.watch_id]
+            self.cursors.pop(watch.watch_id, None)
             self.stopped.append(watch.watch_id)
 
     async def posted(
@@ -532,6 +544,26 @@ async def test_an_mcp_watch_that_brings_an_event_is_active_again(setup: _Setup) 
     await setup.mcp.running[str(made.id)]("issue.opened", "{}", None, None, "c1")
 
     assert setup.watch(made).state == "active"
+
+
+async def test_an_mcp_watch_keeps_a_cursor_that_moved_with_no_event(setup: _Setup) -> None:
+    made = await setup.watches.add_mcp(
+        setup.one.id, "Triage new issues.", _OPENED, {"repo": "example/app"}
+    )
+    await _until(lambda: str(made.id) in setup.mcp.cursors)
+
+    # A poll that brought nothing, or a stream's start: the place moves, no event comes.
+    await setup.mcp.cursors[str(made.id)]("c3")
+
+    assert (setup.watch(made).cursor, setup.watch(made).events) == ("c3", 0)
+    assert setup.sink.events == []
+    # So after a restart it goes on from there, not from now.
+    await setup.watches.close()
+    again = setup.entity()
+    await again.start()
+    await _until(lambda: len(setup.mcp.runs) == 2)
+    assert setup.mcp.runs[1][0].cursor == "c3"
+    await again.close()
 
 
 async def test_an_mcp_watch_whose_event_cannot_be_kept_keeps_no_cursor(setup: _Setup) -> None:
