@@ -35,8 +35,9 @@ when it is made, a watch on MCP events by whichever its connection started on la
 A watch is `active`, `failing` (it cannot run now, and is tried again: `reason` says
 why) or `paused` (it brings no more events until it is removed and made again: `reason`
 says why). A watch that fails is tried again after a while, twice as long each time it
-fails again, up to ten minutes. One that runs again for a minute, or brings an event,
-is active again. Whoever listens (the app's sockets) is told when a watch
+fails again, up to ten minutes. An MCP watch is active again once its server answers (a
+stream opened, a webhook granted, a poll answered): one that is reached but never
+answers stays failing. Whoever listens (the app's sockets) is told when a watch
 is added, removed, or changes state.
 
 The gem is told too, once for each change of state, as an event of the watch's own:
@@ -123,9 +124,6 @@ TIMER_MIN_MINUTES = 5
 # THE FIRST WAIT; the most is his.
 _RETRY_FIRST_SECONDS = 10.0
 _RETRY_MOST_SECONDS = 600.0
-# An MCP watch that has run this long since it was last tried is taken to work again.
-# THE OWNER HAS NOT RULED ON THIS NUMBER.
-_WORKS_AFTER_SECONDS = 60.0
 
 # The fuse: a watch that brings more than this many events within this long is paused.
 # THE OWNER HAS NOT RULED ON THIS. What it has brought is counted in memory, so a
@@ -663,11 +661,13 @@ class WatchEntityClass:
         """Run a watch on MCP events until it is stopped, and again whenever it fails.
 
         The connections run it (`McpEvents.watch`). If that raises, or ends, the watch is
-        failing, and is tried again from the last cursor kept. Once a try has run for a
-        while, the watch is active again.
+        failing, and is tried again from the last cursor kept. Once the server has
+        answered (`on_delivery`), the watch is active again: a server that is reached but
+        never answers keeps it failing, and does not make it flip back and forth.
         """
         retry = _RETRY_FIRST_SECONDS
         while True:
+            answered = asyncio.Event()
             try:
                 watch = await self._docdb.get(Watch, filters={"id": watch_id})
                 if watch is None or watch.state == "paused":
@@ -678,13 +678,10 @@ class WatchEntityClass:
                         self._on_event(watch_id),
                         watch.hook_url,
                         self._on_cursor(watch_id),
-                        self._on_delivery(watch_id),
+                        self._on_delivery(watch_id, answered),
                     )
                 )
                 try:
-                    if await self._lasts(attempt):
-                        retry = _RETRY_FIRST_SECONDS
-                        await self._change_state(watch_id, "active", None)
                     await attempt
                 finally:
                     if not attempt.done():
@@ -692,18 +689,12 @@ class WatchEntityClass:
                         await asyncio.wait([attempt])
                 raise RuntimeError("the connection stopped sending its events")
             except Exception as exc:
+                if answered.is_set():
+                    # It worked for a while: it is tried again soon.
+                    retry = _RETRY_FIRST_SECONDS
                 await self._failing(watch_id, exc)
                 await self._sleep(retry)
                 retry = min(retry * 2, _RETRY_MOST_SECONDS)
-
-    async def _lasts(self, attempt: asyncio.Task[None]) -> bool:
-        """Whether a try is still running after a while, and so is taken to work."""
-        waiting = asyncio.ensure_future(self._sleep(_WORKS_AFTER_SECONDS))
-        try:
-            await asyncio.wait([attempt, waiting], return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            waiting.cancel()
-        return not attempt.done()
 
     def _on_cursor(self, watch_id: PydanticObjectId) -> OnMcpCursor:
         """What is told an MCP watch's cursor when it moves with no event: it is kept, so
@@ -714,11 +705,14 @@ class WatchEntityClass:
 
         return on_cursor
 
-    def _on_delivery(self, watch_id: PydanticObjectId) -> OnMcpDelivery:
-        """What is told how an MCP watch gets its events, each time it starts on a
-        delivery: it is kept, and listeners are told when it changes."""
+    def _on_delivery(self, watch_id: PydanticObjectId, answered: asyncio.Event) -> OnMcpDelivery:
+        """What is told how an MCP watch gets its events, each time the server answers on
+        a delivery: the watch works, so it is active, and the delivery is kept, with
+        listeners told when it changes. `answered` is set for the try."""
 
         async def on_delivery(delivery: WatchDelivery) -> None:
+            answered.set()
+            await self._change_state(watch_id, "active", None)
             watch = await self._docdb.get(Watch, filters={"id": watch_id})
             if watch is None or watch.delivery == delivery:
                 return

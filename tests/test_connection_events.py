@@ -488,8 +488,8 @@ async def test_a_server_that_will_not_post_to_the_address_is_polled(setup: _Setu
     await _stop(watching)
 
     assert setup.served.server.asked[:3] == ["events/list", "events/subscribe", "events/poll"]
-    # It said it started on the webhook, then that it polls.
-    assert delivered.seen == ["webhook", "poll"]
+    # The server never took the webhook, so the watch only says it polls.
+    assert delivered.seen == ["poll"]
 
 
 async def _asked(server: EventsServer, method: str) -> None:

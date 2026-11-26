@@ -555,14 +555,17 @@ async def test_an_mcp_watch_that_cannot_run_fails_and_comes_back(setup: _Setup) 
     assert len(setup.mcp.runs) == 3
     await setup.clock.advance(seconds=1)
     assert str(made.id) in setup.mcp.running
-    # Running is not yet working: it is active again once it has run a minute.
+    # Running is not yet working, however long: a server reached that never answers
+    # keeps it failing. It is active again once the server answers.
+    await setup.clock.advance(seconds=600)
     assert setup.watch(made).state == "failing"
-    await setup.clock.advance(seconds=60)
+    await setup.mcp.deliveries[str(made.id)]("push")
 
     kept = setup.watch(made)
-    assert (kept.state, kept.reason) == ("active", None)
-    told = [watch for _, watch in setup.told]
-    assert told == [str(made.id)] * 3  # added, failing, active again
+    assert (kept.state, kept.reason, kept.delivery) == ("active", None, "push")
+    # Added, failing, active again, and how its events now reach us.
+    await _until(lambda: len(setup.told) == 4)
+    assert [watch for _, watch in setup.told] == [str(made.id)] * 4
 
 
 async def test_an_mcp_watch_that_brings_an_event_is_active_again(setup: _Setup) -> None:
@@ -605,14 +608,14 @@ async def test_a_watch_that_breaks_and_recovers_tells_its_gem_once_each_time(
     assert len(setup.told) == told + 1
     assert len(setup.sink.events) == 1
 
-    # It works again once it has run a minute.
+    # It works again once the server answers.
     setup.mcp.fails = None
     await setup.clock.advance(seconds=40)
-    await setup.clock.advance(seconds=60)
+    await setup.mcp.deliveries[str(made.id)]("push")
     await _until(lambda: len(setup.sink.changes) == 2)
     recovered = setup.sink.events[1]
     assert (recovered.name, recovered.data, recovered.source) == ("watch.recovered", "", "mcp")
-    assert recovered.at == _START + timedelta(seconds=130)
+    assert recovered.at == _START + timedelta(seconds=70)
 
     # It breaks again later: told again, under an id of its own.
     setup.mcp.fail(str(made.id), RuntimeError("Its server does not answer: timed out"))

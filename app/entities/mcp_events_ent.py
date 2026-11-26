@@ -21,8 +21,9 @@ When the connection cannot be reached, or the stream drops, the watch comes back
 server after a pause that grows, from the last cursor it had, so what happened in
 between is sent then. An event is told once: one whose id was told before is not told
 again. A server that will not take a webhook (it cannot reach the address, say) is
-watched by poll instead, if it offers that. Each delivery the watch starts on is told to
-the watch (`on_delivery`), so that it can be shown: poll, after such a webhook.
+watched by poll instead, if it offers that. Each time the server answers on a delivery
+(a stream opened, a webhook granted, a poll answered), the watch is told it
+(`on_delivery`): it shows it, and takes it as the sign the watch works.
 
 The connection is read again before each event is told and each time the server is
 come back to: a watch whose connection is gone, turned off, closed to its gem, needing
@@ -110,12 +111,18 @@ class _Seen:
     reason: str = ""
     # Told the cursor when it moves with no event, so the watch keeps it.
     on_cursor: OnMcpCursor | None = None
-    # Told the delivery the watch starts on, so the watch shows it.
+    # Told the delivery the server answers on, so the watch shows it and knows it works.
     on_delivery: OnMcpDelivery | None = None
+    # The delivery it was last told: it is told again only when that changes.
+    delivery: WatchDelivery | None = None
 
     async def using(self, delivery: WatchDelivery) -> None:
-        """The watch starts on this delivery. Failing to show it is no harm, so it never
-        stops the watch."""
+        """The server has answered on this delivery: a stream opened, a webhook granted,
+        a poll answered. It is told once for each delivery, not for every answer. Failing
+        to keep it is no harm, so it never stops the watch."""
+        if delivery == self.delivery:
+            return
+        self.delivery = delivery
         if self.on_delivery is not None:
             try:
                 await self.on_delivery(delivery)
@@ -260,7 +267,6 @@ class McpEventsEntityClass:
     # ---- the deliveries
 
     async def _poll(self, watch: McpWatch, seen: _Seen, on_event: OnMcpEvent) -> None:
-        await seen.using("poll")
         failures = 0
         while True:
             try:
@@ -272,6 +278,7 @@ class McpEventsEntityClass:
                         server, watch.event, watch.arguments, seen.cursor
                     ),
                 )
+                await seen.using("poll")
                 if polled.truncated:
                     _log.warning("watch %s: the server says events were skipped", watch.watch_id)
                 last = len(polled.events) - 1
@@ -295,7 +302,6 @@ class McpEventsEntityClass:
             await asyncio.sleep(max(self._poll_floor, wait))
 
     async def _stream(self, watch: McpWatch, seen: _Seen, on_event: OnMcpEvent) -> None:
-        await seen.using("push")
         failures = 0
         while True:
             stream: McpEventStream | None = None
@@ -307,6 +313,7 @@ class McpEventsEntityClass:
                         server, watch.event, watch.arguments, seen.cursor
                     ),
                 )
+                await seen.using("push")
                 if stream.start.truncated:
                     _log.warning("watch %s: the server says events were skipped", watch.watch_id)
                 await seen.moved(stream.start.cursor)
@@ -335,7 +342,6 @@ class McpEventsEntityClass:
     async def _webhook(
         self, watch: McpWatch, seen: _Seen, on_event: OnMcpEvent, url: str, *, poll: bool
     ) -> None:
-        await seen.using("webhook")
         secret = self._secret(watch, seen.url)
         subscribed = False
         failures = 0
@@ -370,6 +376,7 @@ class McpEventsEntityClass:
                     await self._poll(watch, seen, on_event)
                     return
                 subscribed = True
+                await seen.using("webhook")
                 failures = 0
                 if granted.truncated:
                     _log.warning("watch %s: the server says events were skipped", watch.watch_id)

@@ -158,12 +158,13 @@ class McpEvents(Protocol):
 
         The delivery is chosen here from what the server offers: stream, then webhook
         (only with a `hook_url`, the public address its events are to be posted to),
-        then poll. `on_delivery` is told each one the watch starts on: poll, after a
-        server would not take a webhook. Runs for as long as the watch does, and comes
-        back to the server after a drop from the last cursor. Raises if the watch cannot
-        run at all, such as when the connection is gone, is no longer open to the gem, or
-        does not serve the event, and when the server has not answered for a while: the
-        watch is then failing, and says why.
+        then poll. `on_delivery` is told the delivery once the server answers on it (a
+        stream opened, a webhook granted, a poll answered): the sign the watch works,
+        and poll after a server would not take a webhook. Runs for as long as the watch
+        does, and comes back to the server after a drop from the last cursor. Raises if
+        the watch cannot run at all, such as when the connection is gone, is no longer
+        open to the gem, or does not serve the event, and when the server has not
+        answered for a while: the watch is then failing, and says why.
         """
         ...
 
