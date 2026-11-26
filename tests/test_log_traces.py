@@ -217,7 +217,7 @@ async def test_a_second_reply_made_with_the_same_settings_says_nothing_of_them()
     await _close(socket, linked)
 
 
-async def test_a_message_the_next_day_keeps_the_cache_and_says_no_change_of_settings(
+async def test_a_message_the_next_day_keeps_the_start_of_the_request_and_no_change_of_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     move = set_clock(monkeypatch, datetime(2026, 11, 20, 22, 0, tzinfo=UTC))
@@ -230,8 +230,9 @@ async def test_a_message_the_next_day_keeps_the_cache_and_says_no_change_of_sett
     socket.send(setup.gem.id, "hello again")
     await socket.until("chat.done", 2)
 
-    # The start of the request stays the same from one day to the next, so a prompt
-    # cache holds: the same instructions and tools, and the whole of the first request.
+    # The start of the request stays the same from one day to the next: the same
+    # instructions and tools, and the whole of the first request, with nothing in it
+    # long enough to be expired. The cache itself is gone by then: a cold start.
     first, second = setup.llm.requests
     assert second["instructions"] == first["instructions"]
     assert second["tools"] == first["tools"]
@@ -251,6 +252,7 @@ async def test_a_message_the_next_day_keeps_the_cache_and_says_no_change_of_sett
     # A new day is no change of settings.
     log = await _log(setup)
     assert len(_of(log, "settings.changed")) == 1
+    assert [cold["reason"] for cold in _of(log, "cache.cold")] == ["quiet"]
     lines = [entry for entry in _of(log, "note.written") if entry["source"] == "time-line"]
     assert len(lines) == 2
     await _close(socket, linked)
@@ -269,10 +271,13 @@ async def test_an_edited_gem_says_its_new_instructions_before_the_next_turn_open
 
     first, edited = (e for e in log if e["kind"] == "settings.changed")
     _, second_turn = (e for e in log if e["kind"] == "turn.opened")
+    [cold] = (e for e in log if e["kind"] == "cache.cold")
     # Only the instructions changed, and they are said before the turn they are used in.
+    # The change starts the conversation cold, and that is said between the two.
     assert set(edited["data"]) == {"instructions"}
     assert edited["turn"] is None
-    assert edited["seq"] + 1 == second_turn["seq"]
+    assert edited["seq"] + 1 == cold["seq"] == second_turn["seq"] - 1
+    assert cold["data"]["reason"] == "settings"
     assert edited["data"]["instructions"] != first["data"]["instructions"]
     assert "You are terse." in "".join(layer["text"] for layer in edited["data"]["instructions"])
     await _close(socket, linked)

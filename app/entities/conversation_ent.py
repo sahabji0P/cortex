@@ -18,6 +18,10 @@ The user can reset a gem (`reset`): it starts again, knowing nothing from before
 reset takes the gem as a reply does, so a message sent meanwhile is answered by the
 gem as it is after the reset.
 
+Every reply in writing, and every call when it starts, checks first whether the
+conversation starts cold, and is sent it as the latest cold start has it sent (`sent`,
+see `cold_start.py`).
+
 A gem with none of these is not kept. Running calls live in this process's memory, so a
 restart loses them. A placeholder whose call is gone is closed with a stub saying so,
 before the next reply is made.
@@ -26,13 +30,14 @@ before the next reply is made.
 import asyncio
 import json
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
 from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError
+from app.entities.cold_start import Cache, Numbered, as_sent, cold
 from app.entities.conversation_store import ConversationStoreClass, Remembered
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
@@ -99,13 +104,22 @@ class _Resetting:
 
 @dataclass(frozen=True, slots=True)
 class Stored:
-    """A gem's conversation as it is stored: its items, and the mode of the last."""
+    """A gem's conversation as it is stored: what it remembers, and the mode of the last."""
 
-    items: list[Item]
+    # Each item with its number and what decides how it is sent. One added after the
+    # conversation was read has no number: it comes after every request so far.
+    entries: list[Numbered]
     # "chat" for an empty conversation: it counts as written.
     mode: Mode = "chat"
     # When the last line of ours that gave the time was written, if one was.
     last_time: datetime | None = None
+    # Where the gem's cache stood when the conversation was read (see `cold_start.py`).
+    cache: Cache = field(default_factory=Cache)
+
+    @property
+    def items(self) -> list[Item]:
+        """The items as they are stored."""
+        return [entry.item for entry in self.entries]
 
 
 class GemConversation:
@@ -263,7 +277,7 @@ class ConversationEntityClass:
         found = await self._store.load(gem_id)
         mode = found[-1].data.mode if found else "chat"
         last_time = next((e.at for e in reversed(found) if e.data.source == "time-line"), None)
-        stored = Stored([entry.data.item for entry in found], mode, last_time)
+        stored = Stored(_numbered(found), mode, last_time, await self._store.cache(gem_id))
         lost = self._lost(str(gem_id), found, told)
         return await self.add(gem_id, stored, stubs(lost, "lost-call"), stored.mode)
 
@@ -286,7 +300,25 @@ class ConversationEntityClass:
         await self.stored(gem_id)
         times = [one.at for one in added if one.source == "time-line"]
         last_time = times[-1] if times else stored.last_time
-        return Stored([*stored.items, *(one.item for one in added)], mode, last_time)
+        numbered = [Numbered(None, one.item, one.mark, one.delivers) for one in added]
+        return Stored([*stored.entries, *numbered], mode, last_time, stored.cache)
+
+    def sent(self, record: Recording, stored: Stored, *, changed: bool) -> list[Item]:
+        """The conversation as the model is to be sent it, once it is checked for a cold start.
+
+        Asked once for each reply in writing and once when a call starts, right after
+        `record` is described: `changed` is what that said. A cold start is written down
+        (`cache.cold`), and must be stored like what the gem remembers. Long results
+        before its line are sent expired, as they are after the latest cold start before
+        it (see `cold_start.py`).
+        """
+        before = stored.cache.before
+        if record.provider is not None and stored.cache.sent is not None:
+            reason = cold(stored.cache, record.provider, changed=changed, now=datetime.now(UTC))
+            if reason is not None:
+                before = stored.cache.sent
+                record.cold(reason, before)
+        return as_sent(stored.entries, before)
 
     async def stored(self, gem_id: ObjectId) -> None:
         """Wait until what the gem remembers so far is stored.
@@ -327,10 +359,11 @@ class ConversationEntityClass:
         """Everything the request written down as entry `seq` was sent.
 
         Its items are what the gem remembered by then: every remembered entry before
-        the request's own since the gem was last reset, in order. With them
-        come the model, instructions and tools in force. `exact` is False if the items
-        do not come to the count the request wrote down: an entry before it was lost.
-        Raises `NotFoundError` if `seq` is not a request of this gem.
+        the request's own since the gem was last reset, in order, as the latest cold
+        start before it had them sent (see `cold_start.py`). With them come the model,
+        instructions and tools in force. `exact` is False if the items do not come to the
+        count the request wrote down: an entry before it was lost. Raises
+        `NotFoundError` if `seq` is not a request of this gem.
         """
         if not await self._gems.exists(gem_id):
             raise NotFoundError("Gem")
@@ -339,7 +372,9 @@ class ConversationEntityClass:
         request = await self._store.one(found, seq)
         if request is None or request.kind != "request.sent":
             raise NotFoundError("Request")
-        items = [entry.data.item for entry in await self._store.load(found, before=seq)]
+        remembered = await self._store.load(found, before=seq)
+        cache = await self._store.cache(found, before=seq)
+        items = as_sent(_numbered(remembered), cache.before)
         return {
             "request": request.data.get("request"),
             "items": items,
@@ -423,6 +458,11 @@ class ConversationEntityClass:
             call = calls[call_id]
             lost.append(late_stub(ToolCall(call_id, call["name"], call["arguments"]), _LOST))
         return lost
+
+
+def _numbered(found: Sequence[Remembered]) -> list[Numbered]:
+    """Stored entries, with what decides how each is sent."""
+    return [Numbered(e.seq, e.data.item, e.data.mark, e.data.delivers) for e in found]
 
 
 def gem_key(gem_id: str) -> str:

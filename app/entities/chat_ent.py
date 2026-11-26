@@ -298,21 +298,25 @@ class ChatEntityClass:
         # What happens in the reply is written down in the gem's log. Any change to what
         # its requests are made with is written first, before the reply's turn opens.
         record = self._conversations.recording(gem.id, "chat")
-        record.describe(
+        changed = record.describe(
             model=ready.name,
             via=lambda: getattr(ready.llm, "via", "api"),
             layers=layers,
             tools=tools.tools,
         )
+        # A FIRST RULE, TO BE TRIED OUT, NOT A SETTLED ONE: the whole stored conversation
+        # is sent to the model every time. Nothing is trimmed or summed up, so the
+        # context only grows, and quickly when searches are used. Only once the cache is
+        # gone (a cold start) are old long tool results sent expired (see `cold_start.py`).
+        sent = self._conversations.sent(record, history, changed=changed)
+        if record.started_cold:
+            # Stored before the first request that is sent by it.
+            await self._conversations.stored(gem.id)
         conversation = WrittenConversation(
             model=model,
             tools=tools,
             instructions=joined(layers),
-            # A FIRST RULE, TO BE TRIED OUT, NOT A SETTLED ONE: the whole stored
-            # conversation is sent to the model every time. Nothing is trimmed or
-            # summed up, and old search results are not cleared, so the context
-            # only grows, and quickly when searches are used.
-            history=history.items,
+            history=sent,
             last_mode=history.mode,
             late=late,
             record=record,

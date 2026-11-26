@@ -447,6 +447,8 @@ class Recording:
         self._model: ModelName | None = None
         # The provider of the model, once the conversation is described.
         self.provider: Provider | None = None
+        # Whether the conversation started cold (`cold`).
+        self.started_cold = False
         self._settings: Callable[[], dict[str, Any]] | None = None
 
     def describe(
@@ -507,6 +509,7 @@ class Recording:
 
     def cold(self, reason: Reason, before: int) -> None:
         """The conversation starts cold: results before `before` are sent expired from here on."""
+        self.started_cold = True
         if self._log is not None and self._gem_id is not None:
             self._log.record_cold(self._gem_id, reason, before)
 

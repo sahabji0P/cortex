@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.cartesia_tts_adp import CartesiaTTSSession, CartesiaTTSWord
+from app.entities.cold_start import EXPIRED
 from app.entities.gem_ent import GEM_CONFIG_VERSION, GemConfig
 from app.entities.voice_ent import VoiceConversation, VoiceEvent, _is_stray, _without_stray_tail
 from app.entities.voice_speech import Playback, Speech, Utterance
@@ -176,16 +177,23 @@ class _LLM:
     """The model: each call plays the next scripted list of stream events.
 
     A script entry of `asyncio.Event` pauses the stream there until the test sets it.
+    A test that expects the next request to start cold says so (`starts_cold`).
     """
 
     def __init__(self, *rounds: list) -> None:
         self._rounds = list(rounds)
         self.requests: list[dict] = []
+        self._cold = False
+
+    def starts_cold(self) -> None:
+        """The next request may send results of the one before it expired, and only it."""
+        self._cold = True
 
     async def stream_response(self, **request):
         sent = [dict(item) for item in request["input"]]
         if self.requests:
-            _assert_only_grew(self.requests[-1]["input"], sent)
+            _assert_only_grew(self.requests[-1]["input"], sent, cold=self._cold)
+        self._cold = False
         self.requests.append({**request, "input": sent})
         script = self._rounds.pop(0)
 
@@ -199,13 +207,22 @@ class _LLM:
         return stream()
 
 
-def _assert_only_grew(before: list[dict], after: list[dict]) -> None:
+def _assert_only_grew(before: list[dict], after: list[dict], *, cold: bool = False) -> None:
     """Each request has to start with the whole of the one before it.
 
     Changing anything the model has already been sent would break a prompt cache from
     that point on. One change is allowed: the user's open turn, which is always the last
-    item, can gain a line.
+    item, can gain a line. At a cold start (`cold`), the cache is gone anyway, and a
+    result the request before was sent may be sent expired.
     """
+    if cold:
+        before = [
+            {**item, "output": EXPIRED}
+            if item.get("type") == "function_call_output"
+            and after[index : index + 1] == [{**item, "output": EXPIRED}]
+            else item
+            for index, item in enumerate(before)
+        ]
     *settled, last = before
     assert after[: len(settled)] == settled, "an earlier item was changed or removed"
     same_slot = after[len(settled)]

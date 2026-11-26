@@ -18,7 +18,8 @@ moment. That is what the history keeps, by the same rules everywhere:
   its delivered words, ending in "…".
 - Nothing the model has been sent is changed afterwards. So text that was sent back to
   the model, in a later round of the same reply, is kept in full however much of it was
-  delivered.
+  delivered. (Only at a cold start, between replies, are old long tool results sent
+  expired: see `cold_start.py`.)
 - Every tool call keeps a valid result. A call still running at a cut is left running
   with a placeholder as its result, the same in a call and in writing (see
   `late_results.py`).
