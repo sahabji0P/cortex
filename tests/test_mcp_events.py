@@ -5,8 +5,12 @@ and reached through the SDK's own client with nothing faked between them.
 """
 
 import asyncio
+import base64
 import contextlib
-from collections.abc import AsyncGenerator, Sequence
+import json
+import time
+from collections.abc import AsyncGenerator, Mapping, Sequence
+from datetime import UTC, datetime
 
 import pytest
 from mcp import Client
@@ -15,14 +19,17 @@ from mcp.server.mcpserver import MCPServer
 
 from app.adapters.mcp_adp import (
     McpAdapterClass,
+    McpEnded,
     McpEventStream,
     McpEventType,
     McpFailure,
+    McpMark,
     McpOccurrence,
+    McpPost,
     McpServer,
-    McpStreamMark,
+    McpVerification,
 )
-from tests.mcp_events_server import EventsServer, Running, running
+from tests.mcp_events_server import EventsServer, Running, running, sign
 
 _REPO = {"repo": "owner/one"}
 
@@ -139,7 +146,7 @@ async def test_a_poll_of_a_kind_the_server_does_not_serve_is_refused(
     assert not failed.value.sign_in_needed
 
 
-async def _next(stream: McpEventStream) -> McpOccurrence | McpStreamMark:
+async def _next(stream: McpEventStream) -> McpOccurrence | McpMark:
     async with asyncio.timeout(5):
         return await anext(aiter(stream))
 
@@ -150,7 +157,7 @@ async def test_a_stream_sends_each_event_as_it_happens(
     await served.server.emit("issue.opened", _REPO)
     stream = await mcp.open_stream(McpServer(served.url), "issue.opened", _REPO, None)
     try:
-        assert stream.start == McpStreamMark("1")
+        assert stream.start == McpMark("1")
         assert stream.heartbeat_ms == 30_000
         await served.server.emit("issue.opened", {"repo": "owner/two"})
         opened = await served.server.emit("issue.opened", {**_REPO, "number": 3})
@@ -191,7 +198,7 @@ async def test_a_quiet_stream_sends_where_it_has_got_to() -> None:
         stream = await mcp.open_stream(McpServer(served.url), "issue.opened", _REPO, None)
         await served.server.emit("issue.opened", {"repo": "owner/two"})
 
-        assert await _next(stream) == McpStreamMark("1")
+        assert await _next(stream) == McpMark("1")
         await mcp.close()
 
 
@@ -225,7 +232,7 @@ async def test_a_dropped_stream_raises_and_is_taken_up_again_from_its_cursor(
     got = await _next(again)
     await again.aclose()
 
-    assert again.start == McpStreamMark("1")
+    assert again.start == McpMark("1")
     assert isinstance(got, McpOccurrence)
     assert got.data["number"] == 2
 
@@ -241,7 +248,7 @@ async def test_a_stream_from_a_cursor_too_old_says_events_were_skipped(
     got = await _next(stream)
     await stream.aclose()
 
-    assert stream.start == McpStreamMark("2", truncated=True)
+    assert stream.start == McpMark("2", truncated=True)
     assert isinstance(got, McpOccurrence)
     assert got.data["number"] == 2
 
@@ -268,3 +275,198 @@ async def test_a_stream_of_a_kind_not_sent_that_way_is_refused(
 
     assert failed.value.code == -32026
     assert not mcp._streams  # pyright: ignore[reportPrivateUsage]
+
+
+_HOOK = "https://hooks.example.com/w/one"
+_SECRET = "whsec_" + base64.b64encode(b"k" * 32).decode()
+
+
+class _Hooks:
+    """The address webhook posts go to: it keeps each one, and answers with `status`."""
+
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, dict[str, str], bytes]] = []
+        self.status = 200
+
+    async def post(self, url: str, headers: Mapping[str, str], body: bytes) -> int:
+        self.posts.append((url, dict(headers), body))
+        return self.status
+
+
+@pytest.fixture
+async def hooked() -> AsyncGenerator[tuple[Running, _Hooks]]:
+    hooks = _Hooks()
+    async with running(EventsServer(post=hooks.post, allow_http=False, token="t0k")) as served:
+        yield served, hooks
+
+
+def _signed_in(url: str) -> McpServer:
+    return McpServer(url, (("Authorization", "Bearer t0k"),))
+
+
+async def test_a_webhook_is_posted_each_event_signed_with_our_secret(
+    hooked: tuple[Running, _Hooks], mcp: McpAdapterClass
+) -> None:
+    served, hooks = hooked
+    granted = await mcp.subscribe_events(
+        _signed_in(served.url),
+        "issue.opened",
+        _REPO,
+        url=_HOOK,
+        secret=_SECRET,
+        cursor=None,
+        ttl_ms=60_000,
+    )
+    opened = await served.server.emit("issue.opened", {**_REPO, "number": 5})
+    await served.server.emit("issue.opened", {"repo": "owner/two"})
+
+    assert granted.id.startswith("sub_")
+    assert granted.refresh_before is not None
+    assert 50 < (granted.refresh_before - datetime.now(UTC)).total_seconds() <= 60
+    assert (granted.cursor, granted.truncated, granted.delivering) == ("0", False, None)
+    [(url, headers, body)] = hooks.posts
+    assert url == _HOOK
+    post = mcp.check_post(_SECRET, headers, body)
+    assert post is not None
+    assert post.subscription_id == granted.id
+    assert post.message_id == headers["webhook-id"]
+    assert isinstance(post.item, McpOccurrence)
+    assert (post.item.event_id, post.item.data, post.item.cursor) == (
+        opened,
+        {**_REPO, "number": 5},
+        "1",
+    )
+
+
+async def test_a_post_not_signed_with_our_secret_is_not_believed(
+    hooked: tuple[Running, _Hooks], mcp: McpAdapterClass
+) -> None:
+    served, hooks = hooked
+    await mcp.subscribe_events(
+        _signed_in(served.url),
+        "issue.opened",
+        _REPO,
+        url=_HOOK,
+        secret=_SECRET,
+        cursor=None,
+        ttl_ms=60_000,
+    )
+    await served.server.emit("issue.opened", _REPO)
+    [(_, headers, body)] = hooks.posts
+    other = "whsec_" + base64.b64encode(b"x" * 32).decode()
+    stamp = int(headers["webhook-timestamp"])
+
+    assert mcp.check_post(_SECRET, headers, body) is not None
+    assert mcp.check_post(other, headers, body) is None
+    assert mcp.check_post(_SECRET, headers, body.replace(b"one", b"two")) is None
+    assert mcp.check_post(_SECRET, {**headers, "webhook-id": "msg_other"}, body) is None
+    assert mcp.check_post(_SECRET, {**headers, "webhook-signature": ""}, body) is None
+    late = datetime.fromtimestamp(stamp + 301, UTC)
+    assert mcp.check_post(_SECRET, headers, body, now=late) is None
+    # While a secret changes, a post may carry a signature with each: one is enough.
+    both = {**headers, "webhook-signature": f"v1,bm9wZQ== {headers['webhook-signature']}"}
+    assert mcp.check_post(_SECRET, both, body) is not None
+
+
+async def test_a_webhook_is_renewed_by_asking_again_and_stopped_by_unsubscribing(
+    hooked: tuple[Running, _Hooks], mcp: McpAdapterClass
+) -> None:
+    served, hooks = hooked
+    server = _signed_in(served.url)
+    first = await mcp.subscribe_events(
+        server, "issue.opened", _REPO, url=_HOOK, secret=_SECRET, cursor=None, ttl_ms=1_000
+    )
+    await served.server.emit("issue.opened", _REPO)
+    again = await mcp.subscribe_events(
+        server, "issue.opened", _REPO, url=_HOOK, secret=_SECRET, cursor="1", ttl_ms=60_000
+    )
+
+    assert again.id == first.id
+    assert first.refresh_before is not None and again.refresh_before is not None
+    assert again.refresh_before > first.refresh_before
+    assert again.cursor == "1"
+    await mcp.unsubscribe_events(server, "issue.opened", _REPO, _HOOK)
+    await served.server.emit("issue.opened", _REPO)
+    assert len(hooks.posts) == 1
+    with pytest.raises(McpFailure) as failed:
+        await mcp.unsubscribe_events(server, "issue.opened", _REPO, _HOOK)
+    assert failed.value.code == -32023
+
+
+async def test_a_webhook_is_refused_without_a_pass_or_at_a_plain_address(
+    hooked: tuple[Running, _Hooks], mcp: McpAdapterClass
+) -> None:
+    served, _ = hooked
+    with pytest.raises(McpFailure) as unsigned:
+        await mcp.subscribe_events(
+            McpServer(served.url),
+            "issue.opened",
+            _REPO,
+            url=_HOOK,
+            secret=_SECRET,
+            cursor=None,
+            ttl_ms=60_000,
+        )
+    with pytest.raises(McpFailure) as plain:
+        await mcp.subscribe_events(
+            _signed_in(served.url),
+            "issue.opened",
+            _REPO,
+            url="http://hooks.example.com/w",
+            secret=_SECRET,
+            cursor=None,
+            ttl_ms=60_000,
+        )
+
+    assert unsigned.value.code == -32024
+    assert plain.value.code == -32602
+
+
+async def test_a_webhook_is_told_when_its_subscription_ends(
+    hooked: tuple[Running, _Hooks], mcp: McpAdapterClass
+) -> None:
+    served, hooks = hooked
+    await mcp.subscribe_events(
+        _signed_in(served.url),
+        "issue.opened",
+        _REPO,
+        url=_HOOK,
+        secret=_SECRET,
+        cursor=None,
+        ttl_ms=60_000,
+    )
+    await served.server.terminate()
+
+    [(_, headers, body)] = hooks.posts
+    post = mcp.check_post(_SECRET, headers, body)
+    assert post is not None
+    assert post.item == McpEnded("Forbidden: Access revoked")
+    assert post.message_id.startswith("msg_terminated_")
+
+
+def test_the_servers_own_posts_are_read(mcp: McpAdapterClass) -> None:
+    def signed(body: dict[str, object]) -> McpPost | None:
+        raw = json.dumps(body).encode()
+        stamp = str(int(time.time()))
+        signature = sign(_SECRET, "msg_x", stamp, raw)
+        headers = {
+            "webhook-id": "msg_x",
+            "webhook-timestamp": stamp,
+            "webhook-signature": f"v1,{signature}",
+        }
+        return mcp.check_post(_SECRET, headers, raw)
+
+    gap = signed({"type": "gap", "cursor": "9"})
+    check = signed({"type": "verification", "challenge": "n0nce"})
+
+    assert gap is not None and gap.item == McpMark("9", truncated=True)
+    assert gap.subscription_id is None
+    assert check is not None and check.item == McpVerification("n0nce")
+    assert signed({"type": "something.else"}) is None
+    assert signed({"eventId": "e1"}) is None  # an event with no name
+
+
+def test_a_webhook_secret_is_made_as_standard_webhooks_writes_one(mcp: McpAdapterClass) -> None:
+    assert mcp.webhook_secret(b"k" * 32) == _SECRET
+    with pytest.raises(ValueError):
+        mcp.webhook_secret(b"short")

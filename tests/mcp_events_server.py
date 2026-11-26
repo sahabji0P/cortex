@@ -44,7 +44,7 @@ from pydantic import ConfigDict
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-__all__ = ["EVENTS", "EventsServer", "Posted", "Running", "running"]
+__all__ = ["EVENTS", "EventsServer", "Posted", "Running", "running", "sign"]
 
 EVENTS = "io.modelcontextprotocol/events"
 _SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId"

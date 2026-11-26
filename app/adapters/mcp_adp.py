@@ -39,7 +39,10 @@ pieces are used: the metadata models, the discovery addresses, PKCE and its chec
 
 import asyncio
 import base64
+import binascii
 import contextlib
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -87,19 +90,23 @@ __all__ = [
     "McpAuthServer",
     "McpAuthorization",
     "McpChallenge",
+    "McpEnded",
     "McpEventStream",
     "McpEventType",
     "McpFailure",
     "McpIcon",
     "McpListing",
+    "McpMark",
     "McpOccurrence",
     "McpPolled",
+    "McpPost",
     "McpRegistration",
     "McpResult",
     "McpServer",
-    "McpStreamMark",
+    "McpSubscription",
     "McpTokens",
     "McpTool",
+    "McpVerification",
 ]
 
 # How long a server may take to answer the opening of a client, a page of its tool list,
@@ -215,14 +222,60 @@ class McpPolled:
 
 
 @dataclass(frozen=True, slots=True)
-class McpStreamMark:
-    """Where a stream has got to, with no event: its start, a gap, or a sign of life.
+class McpMark:
+    """Where a stream or a webhook has got to, with no event: a start, a gap, or a sign
+    of life.
 
     `truncated`: events were skipped to get here, so some may never come.
     """
 
     cursor: str | None
     truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class McpSubscription:
+    """A webhook subscription, as the server granted it (`events/subscribe`)."""
+
+    # The server's handle for it, sent with every post (`X-MCP-Subscription-Id`).
+    id: str
+    # When it lapses unless it is asked for again. None: never.
+    refresh_before: datetime | None
+    # Where every post sent so far has got to, safe to keep. None: no history.
+    cursor: str | None
+    # Events were skipped: the server started later than the cursor it was given.
+    truncated: bool
+    # False when the server had stopped posting after failing again and again. Asking
+    # again, as this did, starts it once more. None: it did not say.
+    delivering: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class McpEnded:
+    """The server ended a subscription, and says why."""
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class McpVerification:
+    """The server asks whether an address is ours: echo `challenge` to say so."""
+
+    challenge: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class McpPost:
+    """A webhook post whose signature held, and what it carried.
+
+    `message_id` is the same each time the post is tried again: one seen before is a
+    repeat. What it carried is an event, a gap (an `McpMark` with `truncated`), the end
+    of the subscription, or the server asking whether the address is ours.
+    """
+
+    message_id: str
+    subscription_id: str | None
+    item: McpOccurrence | McpMark | McpEnded | McpVerification
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,7 +536,7 @@ class McpEventStream:
 
     It is held on a client of its own, by a task of its own, as a link is: the stream
     is one long request, and the client's notifications are this stream's only. Read
-    it with `async for`. Each item is an `McpOccurrence`, or an `McpStreamMark` when
+    it with `async for`. Each item is an `McpOccurrence`, or an `McpMark` when
     the server says where it has got to with no event (a gap, or a sign of life).
 
     It ends, with `ended` saying why, when the server ends the subscription
@@ -498,7 +551,7 @@ class McpEventStream:
         request: _Stream,
         closed: Callable[["McpEventStream"], None],
     ) -> None:
-        self.start = McpStreamMark(None)
+        self.start = McpMark(None)
         self.heartbeat_ms = _HEARTBEAT_MS
         # Why the server ended the subscription, once it has.
         self.ended: str | None = None
@@ -519,7 +572,7 @@ class McpEventStream:
             raise ConnectionError(f"the stream began with {method}, not with its confirmation")
         self._confirmed(params)
 
-    def __aiter__(self) -> AsyncIterator["McpOccurrence | McpStreamMark"]:
+    def __aiter__(self) -> AsyncIterator["McpOccurrence | McpMark"]:
         return self._items()
 
     async def aclose(self) -> None:
@@ -528,7 +581,7 @@ class McpEventStream:
         self._task.cancel()
         await asyncio.gather(self._task, return_exceptions=True)
 
-    async def _items(self) -> AsyncGenerator["McpOccurrence | McpStreamMark"]:
+    async def _items(self) -> AsyncGenerator["McpOccurrence | McpMark"]:
         while True:
             # The heartbeat the server granted is the sign of life: one missed three
             # times over is a dead stream. After the end, the last events are waited for,
@@ -559,7 +612,7 @@ class McpEventStream:
                 self._confirmed(params)
                 yield self.start
             elif method == "notifications/events/heartbeat":
-                yield McpStreamMark(_string(params.get("cursor")))
+                yield McpMark(_string(params.get("cursor")))
             elif method == "notifications/events/error":
                 _log.warning(
                     "an event stream's server failed for a moment: %s", _said_error(params)
@@ -570,7 +623,7 @@ class McpEventStream:
                 self.ended = _said_error(params)
 
     def _confirmed(self, params: Mapping[str, Any]) -> None:
-        self.start = McpStreamMark(_string(params.get("cursor")), params.get("truncated") is True)
+        self.start = McpMark(_string(params.get("cursor")), params.get("truncated") is True)
         granted = params.get("heartbeatMs")
         if isinstance(granted, int) and not isinstance(granted, bool) and granted > 0:
             self.heartbeat_ms = granted
@@ -589,6 +642,47 @@ class McpEventStream:
         for _ in range(_STREAM_DRAIN_TURNS):
             await asyncio.sleep(0)
         self._queue.put_nowait(_Closed(failure))
+
+
+class _SubscribeParams(_EventParams):
+    delivery: dict[str, str]
+    ttl_ms: int | None = None
+
+
+class _Subscribe(Request[_SubscribeParams, Literal["events/subscribe"]]):
+    method: Literal["events/subscribe"] = "events/subscribe"
+    name_param = "name"
+
+
+class _UnsubscribeParams(RequestParams):
+    name: str
+    arguments: dict[str, object]
+    delivery: dict[str, str]
+
+
+class _Unsubscribe(Request[_UnsubscribeParams, Literal["events/unsubscribe"]]):
+    method: Literal["events/unsubscribe"] = "events/unsubscribe"
+    name_param = "name"
+
+
+class _DeliveryStatus(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    active: bool | None = None
+
+
+class _Subscribed(Result):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    refresh_before: str | None = None
+    cursor: str | None = None
+    truncated: bool = False
+    delivery_status: _DeliveryStatus | None = None
+
+
+class _Unsubscribed(Result):
+    model_config = ConfigDict(extra="ignore")
 
 
 class _StreamEnded(Result):
@@ -806,6 +900,114 @@ class McpAdapterClass:
             await stream.aclose()
             raise
         return stream
+
+    async def subscribe_events(
+        self,
+        server: McpServer,
+        name: str,
+        arguments: Mapping[str, object],
+        *,
+        url: str,
+        secret: str,
+        cursor: str | None,
+        ttl_ms: int,
+    ) -> McpSubscription:
+        """Ask the server to post one kind of event to `url` (`events/subscribe`).
+
+        Asking again with the same kind, arguments and address renews the subscription,
+        and must be done before `refresh_before`. `secret` is ours (see
+        `webhook_secret`): the server signs every post with it. `cursor` is where the
+        posts sent so far have got to, or None for from now. Raises `McpFailure` if the
+        server cannot be reached or refuses, as it does when it cannot reach `url`.
+        """
+        params = _SubscribeParams(
+            name=name,
+            arguments=dict(arguments),
+            cursor=cursor,
+            delivery={"mode": "webhook", "url": url, "secret": secret},
+            ttl_ms=ttl_ms,
+        )
+        async with self._using(server) as client:
+            async with asyncio.timeout(_CALL_SECONDS):
+                granted = await client.session.send_request(_Subscribe(params=params), _Subscribed)
+        refresh_before = None
+        if granted.refresh_before is not None:
+            refresh_before = _when(granted.refresh_before)
+            if refresh_before is None:
+                raise McpFailure("the server granted a subscription with a time it cannot read")
+        status = granted.delivery_status
+        return McpSubscription(
+            id=granted.id,
+            refresh_before=refresh_before,
+            cursor=granted.cursor,
+            truncated=granted.truncated,
+            delivering=None if status is None else status.active,
+        )
+
+    async def unsubscribe_events(
+        self, server: McpServer, name: str, arguments: Mapping[str, object], url: str
+    ) -> None:
+        """Ask the server to stop posting one kind of event to `url` (`events/unsubscribe`).
+
+        Raises `McpFailure` if it cannot be reached, or does not know the subscription.
+        """
+        params = _UnsubscribeParams(name=name, arguments=dict(arguments), delivery={"url": url})
+        async with self._using(server) as client:
+            async with asyncio.timeout(_CALL_SECONDS):
+                await client.session.send_request(_Unsubscribe(params=params), _Unsubscribed)
+
+    def webhook_secret(self, key: bytes) -> str:
+        """The secret a webhook's posts are signed with, made from 24 to 64 random bytes.
+
+        As Standard Webhooks writes one: `whsec_` and the bytes in base64.
+        """
+        if not _SECRET_BYTES[0] <= len(key) <= _SECRET_BYTES[1]:
+            raise ValueError("a webhook's secret is made of 24 to 64 bytes")
+        return f"whsec_{base64.b64encode(key).decode()}"
+
+    def check_post(
+        self,
+        secret: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        *,
+        now: datetime | None = None,
+    ) -> McpPost | None:
+        """A post to a webhook address, if the server signed it with `secret`, and read.
+
+        Checked as Standard Webhooks says: the HMAC-SHA256 of its id, its time and its
+        body as they came, with any of the signatures it carries, and a time no more
+        than five minutes from now. None if it does not hold, or cannot be read: then
+        nothing of it is to be believed.
+        """
+        lower = {name.lower(): value for name, value in headers.items()}
+        message_id = lower.get("webhook-id")
+        stamp = lower.get("webhook-timestamp")
+        signatures = lower.get("webhook-signature")
+        if not message_id or not stamp or not signatures:
+            return None
+        try:
+            sent = datetime.fromtimestamp(int(stamp), UTC)
+        except (ValueError, OverflowError, OSError):
+            return None
+        if abs(((now or datetime.now(UTC)) - sent).total_seconds()) > _POST_FRESH_SECONDS:
+            return None
+        try:
+            key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+        except binascii.Error:
+            return None
+        signed = f"{message_id}.{stamp}.".encode() + body
+        expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
+        held = any(
+            version == "v1" and hmac.compare_digest(given, expected)
+            for version, _, given in (one.partition(",") for one in signatures.split())
+        )
+        if not held:
+            return None
+        item = _posted(body)
+        if item is None:
+            return None
+        return McpPost(message_id, lower.get("x-mcp-subscription-id"), item)
 
     async def forget(self, server: McpServer) -> None:
         """Close the client kept for a server that is no longer used, if there is one."""
@@ -1201,6 +1403,40 @@ def _when(timestamp: str | None) -> datetime | None:
     except ValueError:
         return None
     return at if at.tzinfo is not None else None
+
+
+# How many random bytes a webhook's secret is made of, at least and at most.
+_SECRET_BYTES = (24, 64)
+# How far from now a webhook post's time may be (Standard Webhooks: five minutes).
+_POST_FRESH_SECONDS = 300
+
+
+def _posted(body: bytes) -> McpOccurrence | McpMark | McpEnded | McpVerification | None:
+    """What a signed webhook post carried, or None if it is not one this knows.
+
+    A body with a `type` is the server's own word (a gap, the end, a check of the
+    address); one without is an event.
+    """
+    try:
+        sent = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(sent, dict):
+        return None
+    said = cast("dict[str, Any]", sent)
+    kind = said.get("type")
+    if kind is None:
+        try:
+            return _occurrence(_Occurrence.model_validate(said))
+        except ValidationError:
+            return None
+    if kind == "gap":
+        return McpMark(_string(said.get("cursor")), truncated=True)
+    if kind == "terminated":
+        return McpEnded(_said_error(said))
+    if kind == "verification" and isinstance(challenge := said.get("challenge"), str):
+        return McpVerification(challenge)
+    return None
 
 
 def _string(value: object) -> str | None:
