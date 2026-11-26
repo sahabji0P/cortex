@@ -6,10 +6,10 @@ thing is written once, as the kind of entry it is, at the moment it is final. Th
 where every entry gets its number, and the one place entries are written from.
 
 Some kinds are what the gem remembers: what the user said, a line of ours, what the gem
-said, a tool call and its result (`conversation_store.REMEMBERED`). Each holds one item
-as a model is sent it, and the gem's conversation is those entries in order, since its
-last reset. A
-conversation hands each one over the moment it joins its history (`Recording.remember`),
+said, a tool call and its result, and an event it was told
+(`conversation_store.REMEMBERED`). Each holds one item as a model is sent it, and the
+gem's conversation is those entries in order, since its last reset. A conversation
+hands each one over the moment it joins its history (`Recording.remember`),
 so the log's order is the order the model was sent things in.
 
 The other kinds are what happened. No model is ever sent them. Each belongs to a turn
@@ -20,9 +20,14 @@ unless it says otherwise:
                      before it: its conversation starts again after it. Unlike the
                      rest, it cannot be lost: a reset is done only once it is stored
                      (`record_reset`).
+- `event.came`       an event came in, for a watch of the gem's (see `gem_event.py`),
+                     with all that is known of it. No turn. Like a reset, it cannot be
+                     lost: it is written at once, and the source that brought it is told
+                     only once it is stored (`record_event`). The gem is told it later,
+                     by an `event.received` that `delivers` it.
 - `turn.opened`      a reply was asked for. `by` says by what: the `user`, the `gem`
-                     speaking first, or a `background_result` that is to be told.
-                     `mode` is `call` or `chat`.
+                     speaking first, a `background_result` that is to be told, or an
+                     `event` that came in. `mode` is `call` or `chat`.
 - `settings.changed` the model, the instructions or the tools differ from what was
                      last written down. Only the parts that changed, each in full.
                      Written when a conversation says what its requests are made
@@ -113,6 +118,7 @@ from bson import ObjectId
 from app.entities.cold_start import Reason
 from app.entities.conversation_store import (
     COLD,
+    EVENT_CAME,
     REMEMBERED,
     RESET,
     ConversationStoreClass,
@@ -140,7 +146,7 @@ MUST_STORE: tuple[str, ...] = (*REMEMBERED, COLD)
 type Listener = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
 # What opened a turn.
-type OpenedBy = Literal["user", "gem", "background_result"]
+type OpenedBy = Literal["user", "gem", "background_result", "event"]
 
 
 class _Gem:
@@ -164,6 +170,8 @@ class _Gem:
         # again, whatever becomes of a write that was on its way at that moment.
         self.given_up = -1
         self.dropped = False
+        # The number of the latest reset written down in this process, or -1.
+        self.reset = -1
 
 
 class LogEntityClass:
@@ -285,8 +293,8 @@ class LogEntityClass:
             )
         )
 
-    async def record_reset(self, gem_id: ObjectId) -> None:
-        """Write down that the gem is reset, once it is stored.
+    async def record_reset(self, gem_id: ObjectId) -> int:
+        """Write down that the gem is reset, once it is stored. Return its number.
 
         The log must be open. This is not something that happened, to be lost if it
         cannot be written: the gem's conversation starts after it. So it is written at
@@ -295,7 +303,28 @@ class LogEntityClass:
         (seq,) = self.take(gem_id)
         entry = LogEntry(gem_id=gem_id, kind=RESET, seq=seq, at=datetime.now(UTC))
         await self._store.write([entry])
+        self._gems[gem_id].reset = max(self._gems[gem_id].reset, seq)
         self._tell(gem_id, entry.shown())
+        return seq
+
+    async def record_event(self, gem_id: ObjectId, data: dict[str, Any]) -> LogEntry:
+        """Write down that an event came in for the gem, once it is stored. Return its entry.
+
+        The log must be open. Like a reset, this is not to be lost: whoever brought the
+        event is told it is kept only once it is. So it is written at once, on its own,
+        and raises if it could not be stored. It is not held with what the gem
+        remembers, so a reply that cannot be stored never takes it down with it.
+        """
+        (seq,) = self.take(gem_id)
+        entry = LogEntry(gem_id=gem_id, kind=EVENT_CAME, seq=seq, at=datetime.now(UTC), data=data)
+        await self._store.write([entry])
+        self._tell(gem_id, entry.shown())
+        return entry
+
+    def reset_since(self, gem_id: ObjectId, seq: int) -> bool:
+        """Whether the gem was reset after entry `seq`, in this process, or its log is gone."""
+        kept = self._gems.get(gem_id)
+        return kept is None or kept.reset > seq
 
     async def written(self, gem_id: ObjectId | None = None) -> None:
         """Wait until every entry so far has been written, or could not be: of one gem, or all."""

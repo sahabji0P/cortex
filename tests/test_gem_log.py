@@ -855,3 +855,61 @@ async def test_the_events_waiting_are_those_since_the_reset_that_nothing_has_tol
     await store.write([remembered(gem_id, 6, _event_told("four", 4), "chat")])
 
     assert [entry.seq for entry in await store.pending_events(gem_id)] == [3, 5]
+
+
+async def test_an_event_that_came_is_written_at_once_and_raises_if_it_is_not_stored() -> None:
+    docdb, store, conversations = await _conversations()
+    gem_id = ObjectId()
+    log = conversations.log
+    await log.open(gem_id)
+    told: list[dict[str, Any]] = []
+
+    async def listener(gem: str, entry: dict[str, Any]) -> None:
+        told.append(entry)
+
+    log.listen(listener)
+    entry = await log.record_event(gem_id, {"watch_id": "w1", "name": "push"})
+
+    # Stored by the time it returns, with no turn, and told to whoever listens.
+    assert [(d["seq"], d["kind"], d["turn"]) for d in _log(docdb)] == [(0, "event.came", None)]
+    assert entry.data == {"watch_id": "w1", "name": "push"}
+    await asyncio.sleep(0)
+    assert [one["kind"] for one in told] == ["event.came"]
+
+    docdb.breaks_on_kind = "event.came"
+    with pytest.raises(ConnectionError):
+        await log.record_event(gem_id, {"watch_id": "w1", "name": "push"})
+    # Not held to be tried again: it is not something the gem remembers.
+    docdb.breaks_on_kind = None
+    await conversations.stored(gem_id)
+    assert _kinds(docdb) == ["event.came"]
+    assert [e.seq for e in await store.pending_events(gem_id)] == [0]
+
+
+async def test_a_reset_says_which_events_came_before_it() -> None:
+    _, _, conversations = await _conversations()
+    gem_id = ObjectId()
+    log = conversations.log
+    await log.open(gem_id)
+
+    before = await log.record_event(gem_id, {})
+    reset = await log.record_reset(gem_id)
+    after = await log.record_event(gem_id, {})
+
+    assert reset == before.seq + 1
+    assert log.reset_since(gem_id, before.seq)
+    assert not log.reset_since(gem_id, after.seq)
+    # A gem whose log is gone has nothing to come.
+    log.drop(gem_id)
+    assert log.reset_since(gem_id, after.seq)
+
+
+async def test_a_turn_can_be_opened_by_an_event() -> None:
+    docdb, conversations, _, recording = await _recording()
+
+    recording.turn("event")
+    await conversations.log.written()
+
+    assert [(d["kind"], d["data"]) for d in _log(docdb)] == [
+        ("turn.opened", {"by": "event", "mode": "chat"})
+    ]
