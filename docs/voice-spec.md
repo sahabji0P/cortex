@@ -258,7 +258,9 @@ Set per request:
 - **A little thinking while a search has no result yet.** OpenAI models only. Otherwise
   the model does not think before it speaks, except 6.1 Sol, which cannot run without.
 - **OpenAI:** nothing is stored at the provider.
-- **Anthropic:** caching is asked for up to the end of the request. Haiku 5.5 runs with
+- **Anthropic:** caching is asked for up to the end of the request, and on a request of
+  more than 18 blocks also at a second mark 18 blocks back (see
+  [Caching](models.md#caching)). Haiku 5.5 runs with
   thinking off, Sonnet 5.5 is set as near to off as it allows, and Opus 5.5 is asked for
   as little thinking as it will do.
 
@@ -509,7 +511,9 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
   stops before then, it is lost.
 - **A round of more than some 18 calls misses the cache** on Anthropic, once: the
   request after it reads nothing and caches the whole conversation again. On OpenAI the
-  limit is said to be 20 tool results, and was not measured.
+  cache is looked for at up to 20 earlier message endings: a user message, or the last
+  of a run of tool results ([the guide](https://developers.openai.com/api/docs/guides/prompt-caching)).
+  Here each result follows its own call, so that is some 20 results. Not measured.
 - **A long history is sent whole.** A call now starts from everything stored, so its
   first request is as long as the gem's whole conversation. Nothing is trimmed.
 - **One context with both speaking and writing in it has no recorded live run.** Whether
