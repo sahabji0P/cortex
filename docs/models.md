@@ -54,9 +54,29 @@ These things differ on an Anthropic model:
 - **Our lines travel in a user message**, wrapped in `<note>` tags that the instructions
   explain. The Messages API has no place for them where they fall, which is after a
   reply of the model's own.
-- **Caching is asked for on every request.** A conversation shorter than the provider's
-  minimum is not cached at all.
+- **Caching is asked for on every request** (see [Caching](#caching)).
 - **Two searches made in one round** are sent back as two rounds, one after the other.
+
+## Caching
+
+Each request starts with the whole of the one before it, so it can read what that one
+cached. A cache read costs a tenth of the input price or less, and writing one a quarter
+more than input (see [Cost](#cost)).
+
+- **OpenAI caches by itself.** It writes up to the end of the request's last message
+  that it takes as a stopping place: a user message or a tool's result, not a note of
+  ours after the start. Nothing is asked for. A request shorter than 1,024 tokens is not cached.
+- **OpenAI's explicit marks are not used.** With them, a request reads only up to a mark
+  it carries itself, so one mark at the end of each request would never be read. Through
+  the proxy they have no effect: even a lifetime OpenAI does not offer is taken.
+- **Through the proxy** reads come in steps of 128 tokens and not on every request, and
+  no write is reported.
+- **Anthropic caches only what is marked.** Every request is marked at its end. The
+  provider looks for what was cached in at most 20 blocks from a mark, and each call and
+  each result of a round is a message of its own, so a request more than 18 blocks long
+  has a second mark 18 blocks before its end. A round of up to some 18 calls still reads
+  the cache ([measured](voice-spec.md#measured-in-live-runs)). A request shorter than 512
+  tokens is not cached.
 
 ## OpenAI through a ChatGPT login
 
@@ -108,7 +128,8 @@ which is kept by hand and dated.
   tokens sent, Haiku 5.5 above 100,000), the whole request is costed at the higher
   prices.
 - **Through the proxy** the plan pays. The cost shown is what the request would have
-  cost with the API key.
+  cost with the API key, except that the proxy reports no cache writes: what was written
+  is priced as plain input.
 - **To change a price**, change it in the table and move `PRICED` on.
 
 A request's tokens and cost are written to the gem's log

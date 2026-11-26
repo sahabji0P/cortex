@@ -19,6 +19,7 @@ from app.adapters.anthropic_adp import AnthropicAdapterClass
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.entities import voice_ent
 from app.entities.model import (
+    SEARCH_TOOL,
     CallStarted,
     Item,
     Model,
@@ -225,6 +226,110 @@ async def test_a_round_is_sent_as_a_messages_request_and_read_back_as_events() -
     assert tool["strict"] is True
     assert tool["input_schema"] == _SEARCH.parameters
     assert llm.streams[0].closed
+
+
+def _round_of_calls(count: int, name: str = "web_search") -> list[Item]:
+    """A question, then a round of `count` calls, each followed by its own result."""
+    history: list[Item] = [{"role": "user", "content": "Look them all up."}]
+    for number in range(count):
+        history.append(
+            {"type": "function_call", "call_id": f"c{number}", "name": name, "arguments": "{}"}
+        )
+        history.append(
+            {"type": "function_call_output", "call_id": f"c{number}", "output": f"r{number}"}
+        )
+    return history
+
+
+def _marked(request: dict) -> list[int]:
+    """Where a request's blocks carry a cache mark of their own, counted from the end."""
+    blocks = [block for message in request["messages"] for block in message["content"]]
+    return [len(blocks) - 1 - at for at, block in enumerate(blocks) if "cache_control" in block]
+
+
+async def test_a_long_request_gets_a_second_cache_mark_far_enough_back() -> None:
+    # Twelve calls in one round are 24 blocks after the question: further back than the
+    # provider looks from the end for what the request before cached.
+    llm = _Claude([_final()], [_final()])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
+
+    for history in (_round_of_calls(12), _round_of_calls(8)):
+        async for _ in model.round(history, instructions="", think=False):
+            pass
+
+    long, short = llm.requests
+    assert _marked(long) == [18]
+    assert long["cache_control"] == {"type": "ephemeral"}
+    # A request of 18 blocks or fewer has only the mark at its end.
+    assert _marked(short) == []
+    assert short["cache_control"] == {"type": "ephemeral"}
+
+
+async def test_the_second_cache_mark_starts_at_nineteen_blocks() -> None:
+    llm = _Claude([_final()], [_final()])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
+
+    # 18 blocks (nine calls, no question), then 19 (the question too).
+    for history in (_round_of_calls(9)[1:], _round_of_calls(9)):
+        async for _ in model.round(history, instructions="", think=False):
+            pass
+
+    eighteen, nineteen = llm.requests
+    assert _marked(eighteen) == []
+    # The mark goes on the first block.
+    assert _marked(nineteen) == [18]
+
+
+def _reads_cache(request: dict, added: int) -> bool:
+    """Whether the request finds what the one before cached at its end, `added` blocks
+    back: each mark looks at its own block and the 19 before it."""
+    return any(mark <= added <= mark + 19 for mark in [0, *_marked(request)])
+
+
+async def test_the_two_marks_reach_back_thirty_seven_blocks_without_a_gap() -> None:
+    llm = _Claude([_final()])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
+
+    async for _ in model.round(_round_of_calls(19), instructions="", think=False):
+        pass
+
+    (request,) = llm.requests
+    assert all(_reads_cache(request, added) for added in range(38))
+    assert not _reads_cache(request, 38)
+
+
+async def test_the_second_cache_mark_passes_over_a_result_that_loads_tools() -> None:
+    found = ToolSpec(
+        name="tracker__close",
+        description="Close an issue.",
+        parameters={"type": "object", "properties": {}},
+        deferred=True,
+    )
+    search = ToolSpec(name=SEARCH_TOOL, description="Find tools.", parameters={"type": "object"})
+    # The search's result is the block 18 before the end: 9 calls with results follow it.
+    history: list[Item] = [
+        {"role": "user", "content": "Close it."},
+        {"type": "function_call", "call_id": "s1", "name": SEARCH_TOOL, "arguments": "{}"},
+        {
+            "type": "function_call_output",
+            "call_id": "s1",
+            "output": json.dumps({"tools": ["tracker__close"]}),
+        },
+        *_round_of_calls(9, "tracker__close")[1:],
+    ]
+    llm = _Claude([_final()])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [found, search])
+
+    async for _ in model.round(history, instructions="", think=False):
+        pass
+
+    (request,) = llm.requests
+    # The mark goes on the search's call, the block before its result.
+    assert _marked(request) == [19]
+    blocks = [block for message in request["messages"] for block in message["content"]]
+    assert blocks[-19]["type"] == "tool_result"
+    assert isinstance(blocks[-19]["content"], list)
+    assert blocks[-20]["type"] == "tool_use"
 
 
 @pytest.mark.parametrize(

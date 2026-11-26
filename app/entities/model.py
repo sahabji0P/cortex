@@ -485,9 +485,11 @@ class _AnthropicModel:
         # What a model writes as thinking is never sent back to it. The history is cut
         # down to what the user heard, and thinking sent back after such a change is
         # refused.
+        messages = to_messages(items, self._names)
+        _mark_far_back(messages)
         request = self._llm.stream_message(
             model=self._name,
-            messages=to_messages(items, self._names),
+            messages=messages,
             system=instructions,
             max_tokens=_MAX_REPLY_TOKENS,
             thinking=settings.thinking,
@@ -525,6 +527,34 @@ class _AnthropicModel:
             ],
             _anthropic_usage(message),
         )
+
+
+# The provider looks for what an earlier request cached in at most 20 blocks from each
+# mark, the mark's own included. A request that adds more than that since the one before
+# (a round of ten tool calls: each call and each result is a message of its own) finds
+# nothing from the end, and the whole conversation is read and cached again. So a second
+# mark goes this many blocks before the end, and looks back as far again: a request that
+# adds up to 37 blocks, some 18 calls in one round, still reads the cache. Where the mark
+# falls inside what is cached already, it costs nothing. 18 leaves room: the mark may move
+# one block back past a search's result, and its window still meets the end mark's.
+_FAR_BACK = 18
+
+
+def _mark_far_back(messages: list[MessageParam]) -> None:
+    """Put the second cache mark on the block `_FAR_BACK` blocks before the end, if any.
+
+    A result that loads tools (references to them, not text) is passed over for the block
+    before it: a mark on one has not been tried with the provider.
+    """
+    blocks = [
+        block
+        for message in cast("list[dict[str, list[dict[str, object]]]]", messages)
+        for block in message["content"]
+    ]
+    for block in reversed(blocks[:-_FAR_BACK]):
+        if not isinstance(block.get("content"), list):
+            block["cache_control"] = {"type": "ephemeral"}
+            return
 
 
 def _anthropic_usage(message: object) -> Usage | None:
