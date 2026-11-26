@@ -77,7 +77,8 @@ class LinkServiceV1Class:
         and while its audio is fed in.
 
         Every socket is told when a connection's sign-in changes (`connection.changed`),
-        and when a gem's watch is added, removed or changes state (`watch.changed`).
+        and when a gem's watch is added, removed or changes as the app shows it
+        (`watch.changed`).
         """
         await websocket.accept()
         # Replies and a call write to the socket at once, one frame at a time, so the

@@ -1521,6 +1521,9 @@ async def test_the_app_lists_a_gem_s_watches_without_their_secrets(
             "created_at": "2026-11-26T09:00:02Z",
             "last_event_at": None,
             "events": 0,
+            "refused": 0,
+            "last_refused_at": None,
+            "signed": False,
         },
         {
             "id": str(hook.id),
@@ -1539,6 +1542,9 @@ async def test_the_app_lists_a_gem_s_watches_without_their_secrets(
             "created_at": "2026-11-26T09:00:01Z",
             "last_event_at": None,
             "events": 0,
+            "refused": 0,
+            "last_refused_at": None,
+            "signed": False,
         },
         {
             "id": str(timer.id),
@@ -1557,8 +1563,47 @@ async def test_the_app_lists_a_gem_s_watches_without_their_secrets(
             "created_at": "2026-11-26T09:00:00Z",
             "last_event_at": None,
             "events": 0,
+            "refused": 0,
+            "last_refused_at": None,
+            "signed": False,
         },
     ]
+
+
+async def test_the_app_is_shown_a_webhook_s_refused_posts_and_that_it_takes_signed_only(
+    setup: _Setup, routes: httpx.AsyncClient, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    body = b'{"action": "opened"}'
+    signed = {"X-Hub-Signature-256": _signature(str(made.secret), body)}
+    assert (await hooks.post(f"/v1/hooks/{token}", content=body, headers=signed)).is_success
+    await setup.clock.advance(minutes=1)
+    assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 401
+
+    answer = await routes.get(f"/v1/gems/{setup.one.id}/watches")
+
+    [shown] = answer.json()
+    assert {key: shown[key] for key in ("events", "refused", "last_refused_at", "signed")} == {
+        "events": 1,
+        "refused": 1,
+        "last_refused_at": "2026-11-26T09:01:00Z",
+        "signed": True,
+    }
+    assert str(made.token) not in answer.text and str(made.secret) not in answer.text
+
+
+async def test_a_watch_stored_before_it_kept_refusals_or_signing_reads_none(
+    setup: _Setup, routes: httpx.AsyncClient
+) -> None:
+    await _webhook(setup)
+    for document in setup.stored():
+        for field in ("secret", "refused", "last_refused_at", "signed"):
+            document.pop(field)
+
+    answer = await routes.get(f"/v1/gems/{setup.one.id}/watches")
+
+    [shown] = answer.json()
+    assert (shown["refused"], shown["last_refused_at"], shown["signed"]) == (0, None, False)
 
 
 async def test_the_watches_of_a_gem_that_is_not_there_are_404(
@@ -1743,6 +1788,23 @@ async def test_every_socket_is_told_when_a_watch_changes(setup: _Setup) -> None:
     for socket in (first, second):
         await socket.until("watch.changed", 3)  # added, failing, removed
         assert [f for f in socket.frames if f["type"] != "link.ready"] == [told] * 3
+    # A webhook's refused post, and its taking only signed posts, are told too, and the
+    # frame never holds its token or its secret.
+    setup.sink.fails = None
+    hook, token = await _webhook(setup)
+    body = b'{"action": "opened"}'
+    app.dependency_overrides[get_hooks_service_v1] = lambda: HooksServiceV1Class(setup.watches)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as hooks:
+        signed = {"X-Hub-Signature-256": _signature(str(hook.secret), body)}
+        assert (await hooks.post(f"/v1/hooks/{token}", content=body, headers=signed)).is_success
+        assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 401
+    app.dependency_overrides.clear()
+    told = {"type": "watch.changed", "gem": str(setup.one.id), "watch": str(hook.id)}
+    for socket in (first, second):
+        await socket.until("watch.changed", 6)  # added, signed, refused
+        assert [f for f in socket.frames if f["type"] != "link.ready"][3:] == [told] * 3
+        assert token not in repr(socket.frames) and str(hook.secret) not in repr(socket.frames)
     await _close(first, first_linked)
     await _close(second, second_linked)
     # A socket that has gone is told no more.

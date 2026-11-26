@@ -44,6 +44,9 @@ class WatchesServiceV1Class:
             created_at=watch.created_at,
             last_event_at=watch.last_event_at,
             events=watch.events,
+            refused=watch.refused,
+            last_refused_at=watch.last_refused_at,
+            signed=watch.signed,
         )
 
     async def _gem(self, gem_id: str) -> ObjectId:

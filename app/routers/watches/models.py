@@ -37,8 +37,16 @@ class WatchesModels:
                 # Whether posts to an address of ours wake it: a plain webhook.
                 has_address: bool
                 created_at: datetime
+                # When it last brought an event, and how many it has brought: only those
+                # kept, not one delivered again.
                 last_event_at: datetime | None
                 events: int
+                # For a plain webhook: how many posts it refused for their signature, and
+                # when it last did, and whether it takes only signed posts now. Never what
+                # they are signed with.
+                refused: int
+                last_refused_at: datetime | None
+                signed: bool
 
             class Hook(BaseModel):
                 """A plain webhook watch's address and secret, for the user to see when they ask.

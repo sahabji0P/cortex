@@ -43,7 +43,8 @@ says why). A watch that fails is tried again after a while, twice as long each t
 fails again, up to ten minutes. An MCP watch is active again once its server answers (a
 stream opened, a webhook granted, a poll answered): one that is reached but never
 answers stays failing. Whoever listens (the app's sockets) is told when a watch
-is added, removed, or changes state.
+is added, removed, or changes as the app shows it: its state or reason, its delivery,
+a refused post, or that it takes only signed posts. Not of a new event alone.
 
 The gem is told too, once for each change of state, as an event of the watch's own:
 `watch.failing` when it starts failing, `watch.paused` when the fuse pauses it, both
@@ -170,8 +171,8 @@ type _Signature = Literal["unsigned", "signed", "forged"]
 # failing watch works again, or the user removes it from the app.
 type _Change = Literal["watch.failing", "watch.paused", "watch.recovered", "watch.ended"]
 
-# Told the gem's id and the watch's id of each watch added, removed, or whose state
-# changes. It may raise: that is not passed on.
+# Told the gem's id and the watch's id of each watch added, removed, or changed as the
+# app shows it. It may raise: that is not passed on.
 type Listener = Callable[[str, str], Coroutine[Any, Any, None]]
 
 
@@ -392,7 +393,8 @@ class WatchEntityClass:
         gems.when_deleted(self._forget)
 
     def listen(self, listener: Listener) -> None:
-        """Tell `listener` of each watch added, removed or changing state, until `ignore`."""
+        """Tell `listener` of each watch added, removed or changed as the app shows it,
+        until `ignore`."""
         self._listeners.add(listener)
 
     def ignore(self, listener: Listener) -> None:
