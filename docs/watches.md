@@ -74,8 +74,8 @@ ingress:
 
 Then set `PUBLIC_URL=https://hooks.example.com`.
 
-The access log of the server prints each request's path, so a webhook's token is in it.
-Keep that log on the Mac.
+The access log of the server prints each request's path. A webhook's token is left out
+of it: the path is shown as `/v1/hooks/…`.
 
 ## Timers
 

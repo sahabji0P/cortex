@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import cast
@@ -14,6 +15,28 @@ from app.config import settings
 from app.core.errors import AppError
 from app.entities import EntitiesRegistry
 from app.entities.watch_ent import HOOKS_PATH
+
+
+class _HookTokensHidden(logging.Filter):
+    """Keeps a webhook's token out of the access log, which prints each request's path.
+
+    The token is the secret that lets a post in, so the log shows `/v1/hooks/…` instead.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple):
+            record.args = tuple(_hidden(arg) for arg in args)
+        return True
+
+
+def _hidden(arg: object) -> object:
+    if isinstance(arg, str) and arg.startswith(f"{HOOKS_PATH}/"):
+        return f"{HOOKS_PATH}/…"
+    return arg
+
+
+logging.getLogger("uvicorn.access").addFilter(_HookTokensHidden())
 
 
 @asynccontextmanager
