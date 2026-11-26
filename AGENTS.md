@@ -74,7 +74,7 @@ What that means in practice:
   app is sent `chat.event` before such a reply, and shows an event in the history as
   role `event`. A watch that starts failing, is paused or works again is told to its gem
   the same way, once, as an event named `watch.failing`, `watch.paused` or
-  `watch.recovered`.
+  `watch.recovered`, and one the user removes in the app as `watch.ended`.
 - **A gem has one conversation, called or written to.** A call starts from what is
   stored and stores what it adds as it goes; the history route shows them as `user`
   and `gem` messages. One writer at a time: while a call holds a gem, a `chat.send` to it
