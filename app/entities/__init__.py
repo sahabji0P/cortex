@@ -1,7 +1,3 @@
-from collections.abc import Mapping
-
-from bson import ObjectId
-
 from app.adapters import AdapterRegistry
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
@@ -11,34 +7,12 @@ from app.entities.conversation_store import ConversationStoreClass, LogEntry
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.events_ent import EventsEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.gem_event import GemEvent, McpEventKind, McpWatch, OnMcpEvent
 from app.entities.gem_log import LogEntityClass
+from app.entities.mcp_events_ent import McpEventsEntityClass
 from app.entities.providers_ent import ProviderEntityClass
 from app.entities.user_ent import User, UserEntityClass
 from app.entities.voice_ent import VoiceEntityClass
 from app.entities.watch_ent import Watch, WatchEntityClass
-
-
-class _NoEventSink:
-    """Stands in for the event sink until it is built: no event can be kept yet."""
-
-    async def arrived(self, event: GemEvent) -> None:
-        raise RuntimeError("events cannot be kept yet")
-
-
-class _NoMcpEvents:
-    """Stands in for the connections' MCP events until they are built: none are served."""
-
-    async def kinds_for(self, gem_id: ObjectId) -> list[McpEventKind]:
-        return []
-
-    async def watch(self, watch: McpWatch, on_event: OnMcpEvent, hook_url: str | None) -> None:
-        raise RuntimeError("MCP events are not served yet")
-
-    async def posted(
-        self, watch: McpWatch, headers: Mapping[str, str], body: bytes, on_event: OnMcpEvent
-    ) -> bool:
-        return False
 
 
 class EntitiesRegistry:
@@ -121,9 +95,13 @@ class EntitiesRegistry:
             docdb=adapter.DocDB,
             gems=cls.Gems,
             log=cls.Log,
-            sink=_NoEventSink(),
-            mcp_events=_NoMcpEvents(),
+            sink=cls.Events,
+            mcp_events=McpEventsEntityClass(
+                docdb=adapter.DocDB, mcp=adapter.Mcp, connections=cls.Connections
+            ),
         )
+        # A reset gem forgets what its watches were for, so they end with the reset.
+        cls.Conversations.when_reset(cls.Watches.end_for)
 
     @classmethod
     async def resume(cls) -> None:
