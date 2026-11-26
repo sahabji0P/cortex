@@ -90,6 +90,10 @@ class _Clock:
             await asyncio.sleep(0)
 
 
+# What a watch tells its gem of itself, when its state changes.
+_CHANGES = ("watch.failing", "watch.paused", "watch.recovered")
+
+
 class _Sink:
     """The event sink: it keeps what it is handed, or fails while `fails` is set."""
 
@@ -101,6 +105,16 @@ class _Sink:
         if self.fails is not None:
             raise self.fails
         self.events.append(event)
+
+    @property
+    def caught(self) -> list[GemEvent]:
+        """The events the watches caught."""
+        return [event for event in self.events if event.name not in _CHANGES]
+
+    @property
+    def changes(self) -> list[tuple[str, str]]:
+        """What the watches told of themselves: each change's name and words."""
+        return [(event.name, event.data) for event in self.events if event.name in _CHANGES]
 
 
 _OPENED = McpEventKind(
@@ -125,6 +139,8 @@ class _McpEvents:
         self.cursors: dict[str, OnMcpCursor] = {}
         # What each watch running is told the delivery it starts on with.
         self.deliveries: dict[str, OnMcpDelivery] = {}
+        # What each watch running waits on: it fails when this does.
+        self.ending: dict[str, asyncio.Future[None]] = {}
         self.stopped: list[str] = []
         self.fails: Exception | None = None
         # Whether a post is one the server signed, and what each was posted with.
@@ -150,13 +166,19 @@ class _McpEvents:
             self.cursors[watch.watch_id] = on_cursor
         if on_delivery is not None:
             self.deliveries[watch.watch_id] = on_delivery
+        ending = self.ending[watch.watch_id] = asyncio.get_running_loop().create_future()
         try:
-            await asyncio.Event().wait()
+            await ending
         finally:
             del self.running[watch.watch_id]
             self.cursors.pop(watch.watch_id, None)
             self.deliveries.pop(watch.watch_id, None)
+            self.ending.pop(watch.watch_id, None)
             self.stopped.append(watch.watch_id)
+
+    def fail(self, watch_id: str, failure: Exception) -> None:
+        """Make a watch that runs fail now, as when its server stops answering."""
+        self.ending[watch_id].set_exception(failure)
 
     async def posted(
         self, watch: McpWatch, headers: Mapping[str, str], body: bytes, on_event: OnMcpEvent
@@ -416,9 +438,11 @@ async def test_a_timer_whose_event_cannot_be_kept_fails_and_comes_back(setup: _S
     assert len(setup.told) == told + 1
     # It went off late, and keeps its rhythm.
     assert kept.due_at == _START + timedelta(minutes=10)
-    assert [event.event_id for event in setup.sink.events] == [
+    assert [event.event_id for event in setup.sink.caught] == [
         f"timer:{(_START + timedelta(minutes=5)).isoformat()}"
     ]
+    # Its break could not be told, as the sink was what failed: only that it works again.
+    assert setup.sink.changes == [("watch.recovered", "")]
 
 
 async def test_a_removed_timer_stops_at_once(setup: _Setup) -> None:
@@ -551,6 +575,92 @@ async def test_an_mcp_watch_that_brings_an_event_is_active_again(setup: _Setup) 
     await setup.mcp.running[str(made.id)]("issue.opened", "{}", None, None, "c1")
 
     assert setup.watch(made).state == "active"
+
+
+async def test_a_watch_that_breaks_and_recovers_tells_its_gem_once_each_time(
+    setup: _Setup,
+) -> None:
+    setup.mcp.fails = RuntimeError("Its server does not answer: timed out")
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await _until(lambda: len(setup.sink.changes) == 1)
+
+    [failing] = setup.sink.events
+    assert failing == GemEvent(
+        gem_id=setup.one.id,
+        watch_id=str(made.id),
+        source="mcp",
+        name="watch.failing",
+        about="Triage new issues.",
+        data="Its server does not answer: timed out",
+        at=_START,
+        event_id=f"watch.failing:{_START.isoformat()}",
+    )
+    # Tried again, and failing again for another reason: the app is told, the gem is not.
+    setup.mcp.fails = RuntimeError("The user needs to sign in to Issues again")
+    told = len(setup.told)
+    await setup.clock.advance(seconds=10)
+    await setup.clock.advance(seconds=20)
+    assert len(setup.mcp.runs) == 3
+    assert setup.watch(made).reason == "The user needs to sign in to Issues again"
+    assert len(setup.told) == told + 1
+    assert len(setup.sink.events) == 1
+
+    # It works again once it has run a minute.
+    setup.mcp.fails = None
+    await setup.clock.advance(seconds=40)
+    await setup.clock.advance(seconds=60)
+    await _until(lambda: len(setup.sink.changes) == 2)
+    recovered = setup.sink.events[1]
+    assert (recovered.name, recovered.data, recovered.source) == ("watch.recovered", "", "mcp")
+    assert recovered.at == _START + timedelta(seconds=130)
+
+    # It breaks again later: told again, under an id of its own.
+    setup.mcp.fail(str(made.id), RuntimeError("Its server does not answer: timed out"))
+    await _until(lambda: len(setup.sink.changes) == 3)
+    again = setup.sink.events[2]
+    assert again.name == "watch.failing"
+    assert len({event.event_id for event in setup.sink.events}) == 3
+    # None of them is counted as an event the watch brought, nor by the fuse.
+    kept = setup.watch(made)
+    assert (kept.events, kept.last_event_at) == (0, None)
+    recent = setup.watches._recent  # pyright: ignore[reportPrivateUsage]
+    assert not recent.get(str(made.id))
+
+
+async def test_a_watch_that_works_again_by_an_event_tells_its_gem_after_the_event(
+    setup: _Setup,
+) -> None:
+    setup.mcp.fails = RuntimeError("the server did not answer")
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await _until(lambda: setup.watch(made).state == "failing")
+    setup.mcp.fails = None
+    await setup.clock.advance(seconds=10)
+
+    await setup.mcp.running[str(made.id)]("issue.opened", "{}", "e1", None, "c1")
+    await _until(lambda: len(setup.sink.events) == 3)
+
+    assert [event.name for event in setup.sink.events] == [
+        "watch.failing",
+        "issue.opened",
+        "watch.recovered",
+    ]
+    assert setup.watch(made).events == 1
+
+
+async def test_a_sink_that_cannot_be_told_a_break_does_not_stop_the_watch(
+    setup: _Setup, caplog: pytest.LogCaptureFixture
+) -> None:
+    setup.sink.fails = ConnectionError("the database went away")
+    setup.mcp.fails = RuntimeError("the server did not answer")
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await _until(lambda: "could not be told watch.failing" in caplog.text)
+
+    # It is tried again as ever, and runs once it can.
+    setup.mcp.fails = None
+    await setup.clock.advance(seconds=10)
+    assert len(setup.mcp.runs) == 2
+    assert str(made.id) in setup.mcp.running
+    assert setup.sink.events == []
 
 
 async def test_an_mcp_watch_keeps_a_cursor_that_moved_with_no_event(setup: _Setup) -> None:
@@ -841,15 +951,19 @@ async def test_a_watch_that_brings_61_events_in_an_hour_is_paused(
     answer = await hooks.post(f"/v1/hooks/{token}", content=b"{}")
 
     assert (answer.status_code, answer.content) == (409, b"")
-    assert len(setup.sink.events) == 60
+    assert len(setup.sink.caught) == 60
     kept = setup.watch(made)
     assert kept.state == "paused"
     assert kept.reason is not None and "more than 60 events in an hour" in kept.reason
     await _until(lambda: len(setup.told) == 2)
+    # The gem is told once, with why, though the watch is paused and the fuse has blown.
+    assert setup.sink.changes == [("watch.paused", kept.reason)]
+    assert kept.events == 60
     # It brings no more, an hour later too.
     await setup.clock.advance(hours=2)
     assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 409
-    assert len(setup.sink.events) == 60
+    assert len(setup.sink.caught) == 60
+    assert len(setup.sink.changes) == 1
 
 
 async def test_the_fuse_counts_only_the_last_hour(setup: _Setup, hooks: httpx.AsyncClient) -> None:
@@ -872,7 +986,8 @@ async def test_a_paused_mcp_watch_stops_running_and_does_not_run_again(setup: _S
     await _until(lambda: setup.mcp.stopped == [str(made.id)])
 
     assert setup.watch(made).state == "paused"
-    assert (len(setup.sink.events), setup.watch(made).cursor) == (60, "c59")
+    assert (len(setup.sink.caught), setup.watch(made).cursor) == (60, "c59")
+    assert [name for name, _ in setup.sink.changes] == ["watch.paused"]
     await setup.watches.close()
     again = setup.entity()
     await again.start()

@@ -39,6 +39,13 @@ fails again, up to ten minutes. One that runs again for a minute, or brings an e
 is active again. Whoever listens (the app's sockets) is told when a watch
 is added, removed, or changes state.
 
+The gem is told too, once for each change of state, as an event of the watch's own:
+`watch.failing` when it starts failing, `watch.paused` when the fuse pauses it, both
+with the reason, and `watch.recovered` when a failing watch works again. A failing
+watch tried again, or whose reason changes, is not a change. These are handed to the
+sink like any other event, but not counted, never stopped by the fuse, and telling the
+gem never holds the watch up.
+
 The gem has four tools for its watches (`tools_for`): `watch` makes one, `unwatch`
 removes one, `watches` lists its own, and `watchable` lists the MCP events it may watch:
 those of the connections open to it.
@@ -138,6 +145,10 @@ type RemovedBy = Literal["gem", "user"]
 # What became of a post to a watch's webhook address: handed over, a GitHub `ping` that
 # wakes nobody, refused for its signature, or not taken because the watch is paused.
 type HookOutcome = Literal["taken", "ignored", "refused", "paused"]
+
+# The events a watch tells its gem of itself: it starts failing, the fuse pauses it, or a
+# failing watch works again.
+type _Change = Literal["watch.failing", "watch.paused", "watch.recovered"]
 
 # Told the gem's id and the watch's id of each watch added, removed, or whose state
 # changes. It may raise: that is not passed on.
@@ -779,6 +790,7 @@ class WatchEntityClass:
             await self._store(changed, {*fields, "last_event_at", "events", "state", "reason"})
             if watch.state != changed.state:
                 self._tell(changed)
+                self._tell_gem(watch, changed)
             return True
 
     async def _pause(self, watch: Watch, reason: str) -> None:
@@ -790,6 +802,7 @@ class WatchEntityClass:
         paused = watch.model_copy(update={"state": "paused", "reason": reason})
         if await self._store(paused, {"state", "reason"}):
             self._tell(paused)
+            self._tell_gem(watch, paused)
         if (running := self._running.pop(str(watch.id), None)) is not None:
             running.task.cancel()
 
@@ -803,7 +816,8 @@ class WatchEntityClass:
     ) -> None:
         """Put the watch in this state, and tell of it if that is a change. It never raises.
 
-        A paused watch stays paused.
+        A new reason is a change to the listeners, not to the gem. A paused watch stays
+        paused.
         """
         try:
             async with self._lock(watch_id):
@@ -815,6 +829,7 @@ class WatchEntityClass:
                 changed = watch.model_copy(update={"state": state, "reason": reason})
                 if await self._store(changed, {"state", "reason"}):
                     self._tell(changed)
+                    self._tell_gem(watch, changed)
         except Exception:
             _log.warning("watch %s could not be marked %s", watch_id, state, exc_info=True)
 
@@ -834,6 +849,47 @@ class WatchEntityClass:
             _log.warning("a %s of gem %s could not be written down", kind, gem_id, exc_info=True)
             return
         self._log.note(gem_id, kind, None, data)
+
+    def _tell_gem(self, before: Watch, after: Watch) -> None:
+        """Tell the gem, without waiting, if its watch has started failing, been paused,
+        or works again: an event of the watch's own, handed to the sink like any other.
+
+        Its id is the change's own, so a later break of the same watch is not taken for
+        this one. It goes around `_deliver`: it is not counted, and the fuse and a paused
+        watch do not stop it.
+        """
+        name: _Change
+        if before.state == after.state:
+            return
+        if after.state == "failing":
+            name = "watch.failing"
+        elif after.state == "paused":
+            name = "watch.paused"
+        elif before.state == "failing":
+            name = "watch.recovered"
+        else:
+            return
+        at = self._now()
+        event = GemEvent(
+            gem_id=after.gem_id,
+            watch_id=str(after.id),
+            source=after.source,
+            name=name,
+            about=after.about,
+            data=_cut(after.reason or ""),
+            at=at,
+            event_id=f"{name}:{at.isoformat()}",
+        )
+        self._chore(self._hand_over(event))
+
+    async def _hand_over(self, event: GemEvent) -> None:
+        """Hand the sink a change of a watch. One it cannot keep is lost: the watch goes on."""
+        try:
+            await self._sink.arrived(event)
+        except Exception:
+            _log.warning(
+                "watch %s: its gem could not be told %s", event.watch_id, event.name, exc_info=True
+            )
 
     def _tell(self, watch: Watch) -> None:
         """Tell every listener that this watch has changed, without waiting."""

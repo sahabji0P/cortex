@@ -64,17 +64,20 @@ class GemEvent:
     watch_id: str
     source: WatchSource
     # What happened, as its source names it: an MCP event's name, a webhook's own name
-    # for it (GitHub's `X-GitHub-Event`, else "webhook"), or "timer".
+    # for it (GitHub's `X-GitHub-Event`, else "webhook"), or "timer". Or a change of the
+    # watch's own state: "watch.failing", "watch.paused" or "watch.recovered".
     name: str
     # What the watch is for, in the gem's own words, as it said when it made the watch.
     about: str
     # What happened, as text for the model: an MCP event's data or a webhook's body,
-    # cut to `EVENT_TEXT_LIMIT`. Empty for a timer.
+    # cut to `EVENT_TEXT_LIMIT`. Why, for a watch failing or paused. Empty for a timer
+    # and for a watch that works again.
     data: str
     # When it happened, by its source, or when it came in if its source does not say.
     at: datetime
     # The source's own id for it, if it has one (an MCP `eventId`, a webhook's delivery
-    # id), so the same event delivered twice can be known.
+    # id), so the same event delivered twice can be known. For a change of the watch's
+    # state, the change's own: its name and when it changed.
     event_id: str | None = None
 
 
