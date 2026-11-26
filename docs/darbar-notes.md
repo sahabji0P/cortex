@@ -133,6 +133,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 ## Base (next, order not fixed, no rush)
 
 - The log: a provider library's own retries, each written as a request of its own. Today up to two are made unseen.
+- MCP webhook watches: a renewal still in flight when the watch is removed may reach the server after the unsubscribe, and the subscription then lives until it lapses (an hour). Not seen yet. To fix: wait for it, then unsubscribe.
 - The log: listening and speaking as entries, with their times and cost (speech-to-text is charged by the second of audio sent, speech by the character).
 - The log: totals by gem, by day and by service, for the app's home.
 - The log: the tokens of a reply cut while the model was still producing. Anthropic says what it read at the start of a reply. Whether OpenAI says anything before the end is to be checked.
