@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from bson import ObjectId
 
-from app.adapters.mcp_adp import McpAdapterClass
+from app.adapters.mcp_adp import McpAdapterClass, McpFailure
 from app.entities.connection_ent import Connection, ConnectionEntityClass, ConnectionEvent
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.gem_event import EVENT_TEXT_LIMIT, McpEventKind, McpEvents, McpWatch
@@ -468,3 +468,19 @@ async def test_a_watch_tells_where_it_has_got_to_when_no_event_comes(setup: _Set
     # The first poll from now gives a place: it is told once, though asked from again.
     assert moved == ["0"]
     assert told.events == []
+
+
+async def test_a_watch_whose_server_does_not_answer_is_failing(
+    setup: _Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events, told = _events(setup), _Told()
+    connection = await _open_to(setup, setup.one)
+
+    async def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise McpFailure("the server could not be reached")
+
+    monkeypatch.setattr(setup.mcp, "poll_events", unreachable)
+
+    with pytest.raises(WatchFailed, match="does not answer: the server could not be reached"):
+        async with asyncio.timeout(5):
+            await events.watch(_watch(setup.one, connection, "build.finished"), told, None)

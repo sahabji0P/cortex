@@ -147,7 +147,8 @@ class McpEvents(Protocol):
         then poll. Runs for as long as the watch does, and comes back to the server
         after a drop from the last cursor. Raises if the watch cannot run at all, such
         as when the connection is gone, is no longer open to the gem, or does not serve
-        the event: the watch is then failing, and says why.
+        the event, and when the server has not answered for a while: the watch is then
+        failing, and says why.
         """
         ...
 

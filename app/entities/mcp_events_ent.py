@@ -83,6 +83,10 @@ _HOOK_TTL_MS = 3_600_000
 _HOOK_RENEW_AT = 0.8
 # How long stopping a webhook may take when its watch ends.
 _UNSUBSCRIBE_SECONDS = 5.0
+# How many failures in a row of a server that does not answer before a watch on it is
+# failing. It is tried again all the same (see `watch_ent.py`), and shown as failing
+# meanwhile. THE OWNER HAS NOT RULED ON THIS NUMBER.
+_FAILING_AFTER = 5
 
 
 class WatchFailed(Exception):
@@ -176,7 +180,8 @@ class McpEventsEntityClass:
         hook_url: str | None,
         on_cursor: OnMcpCursor | None = None,
     ) -> None:
-        """Run a watch until it is cancelled. Raises `WatchFailed` when it cannot run."""
+        """Run a watch until it is cancelled. Raises `WatchFailed` when it cannot run,
+        and when its server has not answered `_FAILING_AFTER` times in a row."""
         seen = self._seen[watch.watch_id] = _Seen(watch.cursor, on_cursor=on_cursor)
         try:
             connection, kind = await self._check(watch)
@@ -259,8 +264,9 @@ class McpEventsEntityClass:
                     cursor = polled.cursor if number == last else asked_from
                     await self._tell(watch, seen, on_event, occurrence, cursor)
                 await seen.moved(polled.cursor)
-            except _Again:
+            except _Again as again:
                 failures += 1
+                self._still_failing(failures, again)
                 await asyncio.sleep(self._pause_for(failures))
                 continue
             failures = 0
@@ -299,8 +305,9 @@ class McpEventsEntityClass:
                             )
                         await seen.moved(item.cursor)
                 raise WatchFailed(f"The server ended the watch: {stream.ended}")
-            except _Again:
+            except _Again as again:
                 failures += 1
+                self._still_failing(failures, again)
                 await asyncio.sleep(self._pause_for(failures))
             finally:
                 if stream is not None:
@@ -328,8 +335,9 @@ class McpEventsEntityClass:
                             ttl_ms=_HOOK_TTL_MS,
                         ),
                     )
-                except _Again:
+                except _Again as again:
                     failures += 1
+                    self._still_failing(failures, again)
                     await asyncio.sleep(self._pause_for(failures))
                     continue
                 except WatchFailed:
@@ -446,6 +454,16 @@ class McpEventsEntityClass:
                 raise WatchFailed(f"{connection.name} refused the watch: {exc.reason}") from exc
             _log.info("a watch on %s will try again: %s", connection.name, exc.reason)
             raise _Again from exc
+
+    def _still_failing(self, failures: int, again: _Again) -> None:
+        """Raise `WatchFailed` once a server has not answered too many times in a row.
+
+        The watch is then shown as failing, with why, and is tried again from its cursor.
+        """
+        if failures >= _FAILING_AFTER:
+            cause = again.__cause__
+            reason = cause.reason if isinstance(cause, McpFailure) else str(cause or again)
+            raise WatchFailed(f"Its server does not answer: {reason}") from again
 
     def _pause_for(self, failures: int) -> float:
         """How long to wait after this many failures in a row: it doubles, with a little
