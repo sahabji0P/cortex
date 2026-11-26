@@ -184,7 +184,7 @@ Imports go one way only: `config ← core ← adapters ← entities ← routers 
 ```text
 app/
   config.py     settings, read from the environment
-  core/         errors, password and token helpers, times
+  core/         errors, password and token helpers, times, webhook signatures
   adapters/     one file per outside service, and the only place an SDK is called
   entities/     the logic: the loop, calls, chat, gems, connections, the log
   routers/      HTTP and WebSocket endpoints, one folder each

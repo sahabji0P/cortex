@@ -22,7 +22,10 @@ Whatever its source, an event is handed to the event sink as a `GemEvent`: which
 watch, what happened (its name and its data as text, cut to 20,000 characters), when,
 and the source's own id for it, if it has one. The sink makes it part of the gem's
 conversation. An event is counted, and an MCP watch's cursor moved, only once the sink
-has kept it.
+has kept it. The sink keeps an event with its own id once: delivered again (the same
+watch and id, as a sender does when it tries again), it is passed over, and says so. Then
+it is not counted in `events`, does not move `last_event_at` and is not told to the fuse,
+but it is answered as taken, and a timer's next time or an MCP cursor still moves on.
 
 Every watch that is not paused runs from when the backend starts until it stops.
 
@@ -47,12 +50,19 @@ posting to one: a post to it is checked and read by the connections, not here.
 
 ## Webhooks
 
-A webhook watch's address is `{PUBLIC_URL}/v1/hooks/{token}`. The token is 32 random
-bytes, in URL-safe base64: it cannot be guessed, and it is the secret too.
+A webhook watch's address is `{PUBLIC_URL}/v1/hooks/{token}`, and it has a secret its
+posts are signed with. Each is 32 random bytes, in URL-safe base64, made apart.
 
+- **Why the token stays in the address.** It is what lets a post in at all: a sender
+  that does not sign can post with the address alone. So it must stay unguessable. It is
+  not the secret, because an address is seen by more than a secret is: GitHub, for one,
+  shows a webhook's address to whoever can see its settings, but never shows its secret
+  again once it is saved. A post signed with the secret proves more than one sent to the
+  address. A watch made before watches kept a secret of their own has none: its token is
+  its secret, so senders set up then keep working.
 - **The gem registers it itself.** The `watch` tool's result gives the gem the address,
-  the secret (the same token) and the content type, `application/json`, so it can add the
-  webhook where the events come from, such as with GitHub's tools. So the secret is in
+  the secret and the content type, `application/json`, so it can add the webhook where
+  the events come from, such as with GitHub's tools. So the secret is in
   the gem's conversation, and in its log, and is sent to its model. The log routes send
   it too, in that tool's result, as they send everything the gem remembers.
 - **The user sees it when they ask.** The app's list of watches and `watch.changed`
@@ -62,16 +72,61 @@ bytes, in URL-safe base64: it cannot be guessed, and it is the secret too.
   which only a plain webhook has. With no `PUBLIC_URL` it gives no address, and still
   gives the secret. Like every route but `/v1/hooks/`, it has no sign-in, so it must not
   go through the tunnel.
-- **A signed post must be signed with it.** A post with `X-Hub-Signature-256` (GitHub's
-  way: `sha256=` and the HMAC-SHA256 of the body) is refused unless it matches, compared
-  in constant time. A post with no signature is taken: the address is the secret.
 - **What the gem is told.** The event is named by `X-GitHub-Event`, or `webhook`; its id
-  is `X-GitHub-Delivery`; its data is the body as UTF-8 text. A GitHub `ping` wakes
-  nobody.
+  is `X-GitHub-Delivery`, or else `webhook-id`; its data is the body as UTF-8 text. A
+  GitHub `ping` wakes nobody.
 - **What is refused.** A body over 1 MB, unread past that. What was posted is never sent
   back, and never logged.
 
 With no `PUBLIC_URL`, the gem is told that no webhook can be made.
+
+### Signing
+
+A sender signs a post to prove it knows the secret: it sends, with the post, an HMAC of
+the body made with the secret, and the backend makes the same and compares the two, in
+constant time. Two ways are known:
+
+| Way | Headers | What is signed |
+| --- | --- | --- |
+| GitHub's | `X-Hub-Signature-256`: `sha256=` and the HMAC-SHA256, in hex | The body |
+| [Standard Webhooks](https://www.standardwebhooks.com/) | `webhook-id`, `webhook-timestamp` (seconds since the epoch) and `webhook-signature`: one or more `v1,` and the HMAC-SHA256 in base64, a space between two | `{webhook-id}.{webhook-timestamp}.{body}` |
+
+- **The key is the secret as it is.** Standard Webhooks' own secrets are `whsec_` and
+  base64, and its libraries decode them to make the key. This secret is not one: a
+  sender must sign with its text as it is. GitHub does that already.
+- **A Standard Webhooks post must be fresh**: its time within five minutes of now, either
+  way, so an old post sent again is refused. Its `webhook-id` is its event's id, so one
+  sent again within that time is kept once.
+- **A post that says it is signed must hold.** A post with either way's signature is
+  refused unless it holds, and one with both unless both hold. A Standard Webhooks
+  signature without its id or its time is refused.
+- **Signed once, signed always.** A post with no signature is taken while the watch has
+  never taken a signed one: a sender that never signs keeps working with the address
+  alone. Once one signed post is taken (a `ping` is not taken), the watch keeps `signed`,
+  and refuses an unsigned post from then on: knowing the address is no longer enough.
+  The app shows it as "only signed posts". It is never undone: to take unsigned posts
+  again, remove the watch and make it again.
+
+### Refused posts
+
+A post refused for its signature is answered 401, and counted on the watch: `refused`,
+and `last_refused_at`. It is never written in the gem's log, and nothing of it is kept.
+
+- **Three in a row make it failing.** After 3 refused posts in a row, with none taken
+  between them, the watch is `failing`, with the reason "Posts arrive, but they are not
+  signed with this watch's secret": the sender has the address, but the wrong secret, or
+  someone else has the address. The gem is told `watch.failing` once (see
+  [The gem is told](#the-gem-is-told)), not once a post: anyone with the address could
+  otherwise fill its log.
+- **A post taken makes it active again**, tells the gem `watch.recovered`, and starts the
+  run again. A post delivered again counts as taken here.
+- **The run is counted in memory**, as the fuse is, so a restart starts it again. The
+  total in `refused` is kept.
+- **The app is told of each**: `watch.changed` comes when `refused` moves, so the app can
+  show that posts are being refused.
+- **Only a plain webhook counts them.** A post to a watch on MCP events is its server's
+  to sign, and a refused one is answered 401 and counted nowhere: its connection says
+  whether the watch works.
 
 ### Exposing only the hooks
 
@@ -108,7 +163,8 @@ why.
 
 - **Failing.** An MCP watch whose connection cannot run it (the connection is gone, is
   no longer open to the gem, or does not answer), or a timer whose event the sink cannot
-  keep, is failing. It is tried again after 10 seconds, then twice as long each time,
+  keep, is failing. So is a plain webhook that refused 3 posts in a row (see
+  [Refused posts](#refused-posts)), until a post is taken. It is tried again after 10 seconds, then twice as long each time,
   at most every ten minutes. An MCP watch is active again once its server answers (a
   stream opened, a webhook granted, a poll answered) or it brings an event: one that is
   reached but never answers stays failing, and does not flip back and forth. A timer is
@@ -150,8 +206,10 @@ next turn, and waking it if it is quiet.
 A gem can wake itself in a loop: it comments on a pull request, the webhook fires, it
 wakes and comments again. So a watch that brings more than 60 events in one hour is
 paused, and brings no more until it is removed and made again (**not yet ruled on**).
-The count is kept in memory, so a restart starts it again. A post to a paused watch is
-answered 409.
+Only events kept count: a sender that delivers the same post again and again does not
+fill it. It is checked before an event is handed over, so once it holds 60 events kept
+within the hour, the next post pauses the watch, even one delivered again. The count is kept in memory, so a restart starts it again. A post to a paused
+watch is answered 409.
 
 ## What ends a watch
 
