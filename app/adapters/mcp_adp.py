@@ -44,7 +44,7 @@ import ipaddress
 import json
 import logging
 import re
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -53,7 +53,7 @@ from urllib.parse import quote, unquote_to_bytes, urlencode, urlsplit
 
 import httpx2
 from mcp import Client
-from mcp.client import ClientExtension, advertise
+from mcp.client import ClientExtension, NotificationBinding, advertise
 from mcp.client.auth import OAuthFlowError, PKCEParameters
 from mcp.client.auth.oauth2 import check_registration_usable
 from mcp.client.auth.utils import (
@@ -87,6 +87,7 @@ __all__ = [
     "McpAuthServer",
     "McpAuthorization",
     "McpChallenge",
+    "McpEventStream",
     "McpEventType",
     "McpFailure",
     "McpIcon",
@@ -96,6 +97,7 @@ __all__ = [
     "McpRegistration",
     "McpResult",
     "McpServer",
+    "McpStreamMark",
     "McpTokens",
     "McpTool",
 ]
@@ -107,6 +109,15 @@ _LIST_SECONDS = 20.0
 _CALL_SECONDS = 60.0
 # How long closing a client waits for what is still running on it.
 _CLOSE_SECONDS = 5.0
+# How often a stream's server is asked to send a sign of life, and how many of those may
+# be missed before the stream is taken as dead (the spec says three).
+_HEARTBEAT_MS = 30_000
+_HEARTBEATS_MISSED = 3
+# How long a stream's last events may take to come in after its server has closed it:
+# the SDK hands each one on in a task of its own, so they can come after the close.
+_STREAM_DRAIN_TURNS = 20
+# How long a stream whose subscription the server ended waits for its request to end.
+_STREAM_END_SECONDS = 1.0
 # A tool list, or an event list, that never ends cannot hold a request up for ever.
 _LIST_PAGES_MAX = 50
 # How long one request to a sign-in server may take. A renewal is made inside a tool
@@ -201,6 +212,17 @@ class McpPolled:
     has_more: bool
     # How long the server would like us to wait before asking again. None: it did not say.
     next_poll_ms: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class McpStreamMark:
+    """Where a stream has got to, with no event: its start, a gap, or a sign of life.
+
+    `truncated`: events were skipped to get here, so some may never come.
+    """
+
+    cursor: str | None
+    truncated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,6 +421,21 @@ class _Poll(Request[_PollParams, Literal["events/poll"]]):
     name_param = "name"
 
 
+class _StreamParams(_EventParams):
+    heartbeat_ms: int | None = None
+
+
+class _Stream(Request[_StreamParams, Literal["events/stream"]]):
+    method: Literal["events/stream"] = "events/stream"
+    name_param = "name"
+
+
+class _Note(BaseModel):
+    """The params of a notification on a stream, read as they come."""
+
+    model_config = ConfigDict(extra="allow")
+
+
 class _Occurrence(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, extra="ignore")
 
@@ -425,6 +462,156 @@ class _Refusal:
 
     status: int
     challenge: McpChallenge | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Closed:
+    """A stream's request has ended: with what it raised, or None when the server closed it."""
+
+    failure: BaseException | None
+
+
+# What a stream's queue holds: a notification (its method and params), or the end.
+type _StreamItem = tuple[str, dict[str, Any]] | _Closed
+
+# The notifications a stream is told things by (SEP-3415).
+_STREAM_NOTES = ("active", "event", "heartbeat", "error", "terminated")
+
+
+class McpEventStream:
+    """An open `events/stream`: one kind of event, sent by the server as it happens.
+
+    It is held on a client of its own, by a task of its own, as a link is: the stream
+    is one long request, and the client's notifications are this stream's only. Read
+    it with `async for`. Each item is an `McpOccurrence`, or an `McpStreamMark` when
+    the server says where it has got to with no event (a gap, or a sign of life).
+
+    It ends, with `ended` saying why, when the server ends the subscription
+    (`terminated`). It raises `McpFailure` when it drops: the request fails, the
+    server closes it without ending the subscription, or it says nothing for three
+    of its heartbeats. Come back with the last cursor then. `aclose` closes it.
+    """
+
+    def __init__(
+        self,
+        opener: Callable[[ClientExtension], AbstractAsyncContextManager[Client]],
+        request: _Stream,
+        closed: Callable[["McpEventStream"], None],
+    ) -> None:
+        self.start = McpStreamMark(None)
+        self.heartbeat_ms = _HEARTBEAT_MS
+        # Why the server ended the subscription, once it has.
+        self.ended: str | None = None
+        self._queue: asyncio.Queue[_StreamItem] = asyncio.Queue()
+        self._closed = closed
+        # The client's notifications all go to this stream's queue.
+        opening = opener(_StreamListener(self._queue))
+        self._task = asyncio.create_task(self._hold(opening, request))
+
+    async def opened(self) -> None:
+        """Wait for the server to confirm the stream. Raises what opening it raised."""
+        async with asyncio.timeout(_OPEN_SECONDS):
+            item = await self._queue.get()
+        if isinstance(item, _Closed):
+            raise item.failure or ConnectionError("the server closed the stream at once")
+        method, params = item
+        if method != "notifications/events/active":
+            raise ConnectionError(f"the stream began with {method}, not with its confirmation")
+        self._confirmed(params)
+
+    def __aiter__(self) -> AsyncIterator["McpOccurrence | McpStreamMark"]:
+        return self._items()
+
+    async def aclose(self) -> None:
+        """Close the stream: its request is aborted, which ends it at the server."""
+        self._closed(self)
+        self._task.cancel()
+        await asyncio.gather(self._task, return_exceptions=True)
+
+    async def _items(self) -> AsyncGenerator["McpOccurrence | McpStreamMark"]:
+        while True:
+            # The heartbeat the server granted is the sign of life: one missed three
+            # times over is a dead stream. After the end, the last events are waited for,
+            # a little.
+            quiet = self.heartbeat_ms * _HEARTBEATS_MISSED / 1000
+            if self.ended is not None:
+                quiet = _STREAM_END_SECONDS
+            try:
+                async with asyncio.timeout(quiet):
+                    item = await self._queue.get()
+            except TimeoutError:
+                if self.ended is not None:
+                    return
+                raise McpFailure("the stream said nothing for too long") from None
+            if isinstance(item, _Closed):
+                if self.ended is not None:
+                    return
+                if item.failure is not None:
+                    raise McpFailure(_reason(item.failure), code=_code(item.failure))
+                raise McpFailure("the server closed the stream")
+            method, params = item
+            if method == "notifications/events/event":
+                try:
+                    yield _occurrence(_Occurrence.model_validate(params))
+                except ValidationError:
+                    _log.warning("an event that could not be read was passed over")
+            elif method == "notifications/events/active":
+                self._confirmed(params)
+                yield self.start
+            elif method == "notifications/events/heartbeat":
+                yield McpStreamMark(_string(params.get("cursor")))
+            elif method == "notifications/events/error":
+                _log.warning(
+                    "an event stream's server failed for a moment: %s", _said_error(params)
+                )
+            elif method == "notifications/events/terminated":
+                # What came before it may still be on its way, so the stream ends when
+                # its request does.
+                self.ended = _said_error(params)
+
+    def _confirmed(self, params: Mapping[str, Any]) -> None:
+        self.start = McpStreamMark(_string(params.get("cursor")), params.get("truncated") is True)
+        granted = params.get("heartbeatMs")
+        if isinstance(granted, int) and not isinstance(granted, bool) and granted > 0:
+            self.heartbeat_ms = granted
+
+    async def _hold(self, opening: AbstractAsyncContextManager[Client], request: _Stream) -> None:
+        failure: BaseException | None = None
+        try:
+            async with opening as client:
+                # No time limit: the heartbeat is the stream's sign of life.
+                await client.session.send_request(request, _StreamEnded)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure = exc
+        # The notifications before the end are handed on by tasks of their own.
+        for _ in range(_STREAM_DRAIN_TURNS):
+            await asyncio.sleep(0)
+        self._queue.put_nowait(_Closed(failure))
+
+
+class _StreamEnded(Result):
+    model_config = ConfigDict(extra="ignore")
+
+
+class _StreamListener(ClientExtension):
+    """The events extension, declared by a stream's client, with its notifications bound."""
+
+    identifier = EVENTS_EXTENSION
+
+    def __init__(self, queue: "asyncio.Queue[_StreamItem]") -> None:
+        self._queue = queue
+
+    def notifications(self) -> Sequence[NotificationBinding[Any]]:
+        return [self._binding(f"notifications/events/{note}") for note in _STREAM_NOTES]
+
+    def _binding(self, method: str) -> NotificationBinding[_Note]:
+        async def told(note: _Note) -> None:
+            # Never waits: the SDK drops the oldest notification when its queue is full.
+            self._queue.put_nowait((method, dict(note.model_extra or {})))
+
+        return NotificationBinding(method=method, params_type=_Note, handler=told)
 
 
 class _Link:
@@ -505,6 +692,8 @@ class McpAdapterClass:
         self._closing: set[asyncio.Task[None]] = set()
         # Links no longer handed out that a call is still running on.
         self._retired: set[_Link] = set()
+        # Event streams open now, each on a client of its own.
+        self._streams: set[McpEventStream] = set()
 
     async def initialize(self) -> None:
         pass
@@ -513,6 +702,7 @@ class McpAdapterClass:
         links, self._links = [*self._links.values(), *self._retired], {}
         self._retired.clear()
         await asyncio.gather(*(link.close() for link in links))
+        await asyncio.gather(*(stream.aclose() for stream in list(self._streams)))
         await asyncio.gather(*self._closing, return_exceptions=True)
 
     async def list_tools(self, server: McpServer) -> McpListing:
@@ -587,6 +777,35 @@ class McpAdapterClass:
             has_more=polled.has_more,
             next_poll_ms=polled.next_poll_ms,
         )
+
+    async def open_stream(
+        self, server: McpServer, name: str, arguments: Mapping[str, object], cursor: str | None
+    ) -> McpEventStream:
+        """Open an `events/stream` for one kind of event, from `cursor` or from now.
+
+        Returns once the server has confirmed it: `start` says where it starts, and
+        whether events were skipped to start there. Raises `McpFailure` if it cannot be
+        reached or refuses. The caller closes the stream (`aclose`).
+        """
+        params = _StreamParams(
+            name=name, arguments=dict(arguments), cursor=cursor, heartbeat_ms=_HEARTBEAT_MS
+        )
+        self._refused.pop(server, None)
+        stream = McpEventStream(
+            lambda listener: self._opener(server, (listener,)),
+            _Stream(params=params),
+            self._streams.discard,
+        )
+        self._streams.add(stream)
+        try:
+            await stream.opened()
+        except Exception as exc:
+            await stream.aclose()
+            raise self._failure(server, exc) from exc
+        except BaseException:
+            await stream.aclose()
+            raise
+        return stream
 
     async def forget(self, server: McpServer) -> None:
         """Close the client kept for a server that is no longer used, if there is one."""
@@ -895,18 +1114,22 @@ class McpAdapterClass:
             if self._links.get(server) is link:
                 del self._links[server]
             link.retired = True
-            refusal = self._refused.pop(server, None)
-            status = None if refusal is None else refusal.status
-            raise McpFailure(
-                _reason(exc, status),
-                sign_in_needed=status == 401,
-                challenge=None if refusal is None else refusal.challenge,
-                code=_code(exc),
-            ) from exc
+            raise self._failure(server, exc) from exc
         finally:
             link.users -= 1
             if link.retired:
                 self._retire(link)
+
+    def _failure(self, server: McpServer, exc: BaseException) -> McpFailure:
+        """What went wrong with a request to a server, with the status it answered."""
+        refusal = self._refused.pop(server, None)
+        status = None if refusal is None else refusal.status
+        return McpFailure(
+            _reason(exc, status),
+            sign_in_needed=status == 401,
+            challenge=None if refusal is None else refusal.challenge,
+            code=_code(exc),
+        )
 
     def _retire(self, link: _Link) -> None:
         """Close a link once nothing is using it. It is no longer handed out."""
@@ -978,6 +1201,23 @@ def _when(timestamp: str | None) -> datetime | None:
     except ValueError:
         return None
     return at if at.tzinfo is not None else None
+
+
+def _string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _said_error(params: Mapping[str, Any]) -> str:
+    """What a stream's `error` or `terminated` says went wrong, in words."""
+    error = params.get("error")
+    if isinstance(error, dict):
+        said = cast("dict[str, object]", error)
+        message, data = said.get("message"), said.get("data")
+        reason = cast("dict[str, object]", data).get("reason") if isinstance(data, dict) else None
+        words = [str(part) for part in (message, reason) if isinstance(part, str) and part]
+        if words:
+            return ": ".join(words)[:200]
+    return "the server gave no reason"
 
 
 def _code(exc: BaseException) -> int | None:

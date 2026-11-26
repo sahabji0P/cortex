@@ -110,7 +110,7 @@ class _Hook:
     next: int
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class _Stream:
     """An open `events/stream`: what wakes it, and whether it is to be cut or ended."""
 
@@ -137,11 +137,15 @@ class EventsServer:
         self.heartbeat_ms = heartbeat_ms
         self.next_poll_ms = next_poll_ms
         self.max_ttl_ms = max_ttl_ms
+        # When set, an open stream sends no heartbeat: it goes quiet, as a dead one does.
+        self.mute = False
         self.events: list[_Event] = []
         # Events before this one are no longer kept: a cursor before it is a gap.
         self.floor = 0
         self.hooks: dict[str, _Hook] = {}
         self.streams: set[_Stream] = set()
+        # Set each time a stream ends at the server, however it ends.
+        self.stream_closed = asyncio.Event()
         # Every request asked of it, by method, and the webhook posts it made.
         self.asked: list[str] = []
         self.posts: list[tuple[str, int]] = []
@@ -268,9 +272,11 @@ class EventsServer:
                     async with asyncio.timeout(self.heartbeat_ms / 1000):
                         await stream.wake.wait()
                 except TimeoutError:
-                    await say("notifications/events/heartbeat", {"cursor": str(position)})
+                    if not self.mute:
+                        await say("notifications/events/heartbeat", {"cursor": str(position)})
         finally:
             self.streams.discard(stream)
+            self.stream_closed.set()
         return {"resultType": "complete", "_meta": sub}
 
     def subscribe(self, request: Request | None, params: dict[str, Any]) -> dict[str, Any]:
