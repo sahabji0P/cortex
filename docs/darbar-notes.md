@@ -113,6 +113,10 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - An event is written down the moment it comes (`event.came`), and joins what the gem remembers at its next turn (`event.received`). A restart loses none.
 - A reply an event woke goes to every socket that is open, not only the latest one to write.
 - The hook route is the only one meant to be reached from outside. Expose only `/v1/hooks/` through the tunnel.
+- A watch says how its events reach us (`delivery`): push, webhook or poll, the spec's words. Optional: none until its server answers.
+- A watch that breaks, is paused or works again is told to its gem as an ordinary event (`watch.failing`, `watch.paused`, `watch.recovered`), once per change. No special case.
+- A watch works again only once its server answers, never by time alone: a server that hangs keeps it failing, and it does not flip.
+- T3 watches a PR by polling GitHub itself every 2 minutes and waking only on a change. Cortex's way to that: "watch a tool" (next, not built).
 
 ### Watches: not ruled yet (the owner's to decide)
 
@@ -124,6 +128,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The watch tools are offered to every gem. No switch per gem.
 - The event tag's wording, and the short line the app is sent (`about: name`).
 - A webhook post with no signature is taken: the token in the address is enough.
+- Telling the gem when the user removes one of its watches: proposed, not built.
 
 ## Base (next, order not fixed, no rush)
 
