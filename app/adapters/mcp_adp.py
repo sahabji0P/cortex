@@ -4,6 +4,13 @@ MCP adapter: the tool servers a gem can be connected to, reached over Streamable
 A server is known here only by its address and the headers sent with every request to
 it. Two things are asked of one: which tools it has, and to run a call of one.
 
+A server may also serve events (SEP-3415, the extension `io.modelcontextprotocol/events`):
+things that happen, which a client listens for. Its kinds of event are read with its
+tools, when it says it has the extension. One kind is listened for in any of three ways
+the server offers for it: asked for again and again (`events/poll`), held open while
+the server sends each one (`events/stream`), or posted by the server to an address of
+ours (`events/subscribe`, a webhook), each post signed with a secret we give it.
+
 A server may also say how it shows itself: its icons and its website, read with its
 tools. An icon it names by address is fetched here, from the server's own domain only,
 and kept as a `data:` address, so the app never reaches a host for one.
@@ -32,12 +39,15 @@ pieces are used: the metadata models, the discovery addresses, PKCE and its chec
 
 import asyncio
 import base64
+import binascii
 import contextlib
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
 import re
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -46,6 +56,7 @@ from urllib.parse import quote, unquote_to_bytes, urlencode, urlsplit
 
 import httpx2
 from mcp import Client
+from mcp.client import ClientExtension, NotificationBinding, advertise
 from mcp.client.auth import OAuthFlowError, PKCEParameters
 from mcp.client.auth.oauth2 import check_registration_usable
 from mcp.client.auth.utils import (
@@ -66,24 +77,36 @@ from mcp.shared.auth import OAuthClientMetadata, OAuthToken, ProtectedResourceMe
 from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_server_url
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, ContentBlock, Icon, Implementation
-from pydantic import AnyUrl, BaseModel, ValidationError
+from mcp_types import Request, RequestParams, Result
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, ValidationError
+from pydantic.alias_generators import to_camel
 
 from app.core.times import UtcDatetime
 
 __all__ = [
+    "EVENTS_EXTENSION",
     "McpAbout",
     "McpAdapterClass",
     "McpAuthServer",
     "McpAuthorization",
     "McpChallenge",
+    "McpEnded",
+    "McpEventStream",
+    "McpEventType",
     "McpFailure",
     "McpIcon",
     "McpListing",
+    "McpMark",
+    "McpOccurrence",
+    "McpPolled",
+    "McpPost",
     "McpRegistration",
     "McpResult",
     "McpServer",
+    "McpSubscription",
     "McpTokens",
     "McpTool",
+    "McpVerification",
 ]
 
 # How long a server may take to answer the opening of a client, a page of its tool list,
@@ -93,7 +116,16 @@ _LIST_SECONDS = 20.0
 _CALL_SECONDS = 60.0
 # How long closing a client waits for what is still running on it.
 _CLOSE_SECONDS = 5.0
-# A tool list that never ends cannot hold a request up for ever.
+# How often a stream's server is asked to send a sign of life, and how many of those may
+# be missed before the stream is taken as dead (the spec says three).
+_HEARTBEAT_MS = 30_000
+_HEARTBEATS_MISSED = 3
+# How long a stream's last events may take to come in after its server has closed it:
+# the SDK hands each one on in a task of its own, so they can come after the close.
+_STREAM_DRAIN_TURNS = 20
+# How long a stream whose subscription the server ended waits for its request to end.
+_STREAM_END_SECONDS = 1.0
+# A tool list, or an event list, that never ends cannot hold a request up for ever.
 _LIST_PAGES_MAX = 50
 # How long one request to a sign-in server may take. A renewal is made inside a tool
 # call, so it is kept short: a sign-in server that does not answer fails the call soon.
@@ -111,6 +143,11 @@ _ICON_SECONDS = 5.0
 _WEBSITE_MAX_LENGTH = 2_000
 
 _log = logging.getLogger(__name__)
+
+# The MCP events extension (SEP-3415), as a server names it under its capabilities.
+EVENTS_EXTENSION = "io.modelcontextprotocol/events"
+# The ways a server may offer to deliver one kind of event.
+_DELIVERIES = ("poll", "push", "webhook")
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +177,108 @@ class McpTool:
 
 
 @dataclass(frozen=True, slots=True)
+class McpEventType:
+    """One kind of event a server can send, as it lists it (`events/list`)."""
+
+    name: str
+    description: str
+    # How it may be delivered: any of "poll", "push" and "webhook", in the server's order.
+    # Only those three are kept.
+    delivery: tuple[str, ...]
+    # The JSON schema of the arguments a listener gives it.
+    input_schema: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class McpOccurrence:
+    """One event as a server sent it: something that happened."""
+
+    # The server's id for it, the same each time it is sent: a second one is the same event.
+    event_id: str
+    name: str
+    # When it happened, as the server says. None if it said nothing that can be read.
+    at: datetime | None
+    # What happened, as the kind's payload schema has it.
+    data: dict[str, object]
+    # Where the listener has got to after it. Sent with a stream's and a webhook's events
+    # only: a poll gives one cursor for its whole batch. None when the server keeps no
+    # history to go back to.
+    cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class McpPolled:
+    """What one `events/poll` came back with."""
+
+    events: list[McpOccurrence]
+    # Where to ask from next time. None when the server keeps no history: ask from now.
+    cursor: str | None
+    # Events were skipped: the server started later than the cursor it was given.
+    truncated: bool
+    # More are waiting: ask again at once.
+    has_more: bool
+    # How long the server would like us to wait before asking again. None: it did not say.
+    next_poll_ms: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class McpMark:
+    """Where a stream or a webhook has got to, with no event: a start, a gap, or a sign
+    of life.
+
+    `truncated`: events were skipped to get here, so some may never come.
+    """
+
+    cursor: str | None
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class McpSubscription:
+    """A webhook subscription, as the server granted it (`events/subscribe`)."""
+
+    # The server's handle for it, sent with every post (`X-MCP-Subscription-Id`).
+    id: str
+    # When it lapses unless it is asked for again. None: never.
+    refresh_before: datetime | None
+    # Where every post sent so far has got to, safe to keep. None: no history.
+    cursor: str | None
+    # Events were skipped: the server started later than the cursor it was given.
+    truncated: bool
+    # False when the server had stopped posting after failing again and again. Asking
+    # again, as this did, starts it once more. None: it did not say.
+    delivering: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class McpEnded:
+    """The server ended a subscription, and says why."""
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class McpVerification:
+    """The server asks whether an address is ours: echo `challenge` to say so."""
+
+    challenge: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class McpPost:
+    """A webhook post whose signature held, and what it carried.
+
+    `message_id` is the same each time the post is tried again: one seen before is a
+    repeat. What it carried is an event, a gap (an `McpMark` with `truncated`), the end
+    of the subscription, or the server asking whether the address is ours.
+    """
+
+    message_id: str
+    subscription_id: str | None
+    item: McpOccurrence | McpMark | McpEnded | McpVerification
+
+
+@dataclass(frozen=True, slots=True)
 class McpIcon:
     """One of a server's icons, held here: `src` is always a `data:` address."""
 
@@ -165,10 +304,14 @@ class McpAbout:
 
 @dataclass(frozen=True, slots=True)
 class McpListing:
-    """What a server answered when it was asked for its tools, and how it shows itself."""
+    """What a server answered when it was asked for its tools, and how it shows itself.
+
+    `events` are the kinds of event it serves: none when it does not have the extension.
+    """
 
     tools: list[McpTool]
     about: McpAbout
+    events: list[McpEventType] = field(default_factory=list[McpEventType])
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +344,9 @@ class McpFailure(Exception):
     the server answered 401, or a sign-in server refused to renew a pass. It is set for
     nothing else. A 403 is not it: that is a server that knows who we are and says no,
     and signing in again would not change it. `challenge` is what a 401 said.
+
+    `code` is the protocol's error code, when the server answered with one: it says
+    whether asking again could help (the events extension's own are -32023 to -32027).
     """
 
     def __init__(
@@ -209,11 +355,13 @@ class McpFailure(Exception):
         *,
         sign_in_needed: bool = False,
         challenge: McpChallenge | None = None,
+        code: int | None = None,
     ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.sign_in_needed = sign_in_needed
         self.challenge = challenge
+        self.code = code
 
 
 class McpAuthServer(BaseModel):
@@ -275,7 +423,90 @@ class McpAuthorization:
     verifier: str = field(repr=False)
 
 
-type _Opener = Callable[[McpServer], AbstractAsyncContextManager[Client]]
+# Opens a client for a server, with the extensions it declares and listens with.
+type _Opener = Callable[[McpServer, Sequence[ClientExtension]], AbstractAsyncContextManager[Client]]
+
+
+class _ListEventsParams(RequestParams):
+    cursor: str | None = None
+
+
+class _ListEvents(Request[_ListEventsParams, Literal["events/list"]]):
+    method: Literal["events/list"] = "events/list"
+
+
+class _EventType(BaseModel):
+    """One kind of event as `events/list` gives it. Fields not read here are let through."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    description: str = ""
+    delivery: list[str] = Field(default_factory=list[str])
+    input_schema: dict[str, object] = Field(default_factory=dict, alias="inputSchema")
+
+
+class _EventsListed(Result):
+    model_config = ConfigDict(extra="ignore")
+
+    events: list[_EventType]
+    next_cursor: str | None = None
+
+
+class _EventParams(RequestParams):
+    """What says which events are listened for: a kind, its arguments, and where from.
+
+    A cursor of None is left out, which the spec reads as null: from now.
+    """
+
+    name: str
+    arguments: dict[str, object]
+    cursor: str | None = None
+
+
+class _PollParams(_EventParams):
+    max_events: int | None = None
+
+
+class _Poll(Request[_PollParams, Literal["events/poll"]]):
+    method: Literal["events/poll"] = "events/poll"
+    # The event's name goes in the `Mcp-Name` header too, as the spec asks.
+    name_param = "name"
+
+
+class _StreamParams(_EventParams):
+    heartbeat_ms: int | None = None
+
+
+class _Stream(Request[_StreamParams, Literal["events/stream"]]):
+    method: Literal["events/stream"] = "events/stream"
+    name_param = "name"
+
+
+class _Note(BaseModel):
+    """The params of a notification on a stream, read as they come."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class _Occurrence(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, extra="ignore")
+
+    event_id: str
+    name: str
+    timestamp: str | None = None
+    data: dict[str, object] = Field(default_factory=dict[str, object])
+    cursor: str | None = None
+
+
+class _Polled(Result):
+    model_config = ConfigDict(extra="ignore")
+
+    events: list[_Occurrence] = Field(default_factory=list[_Occurrence])
+    cursor: str | None = None
+    truncated: bool = False
+    has_more: bool = False
+    next_poll_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +515,197 @@ class _Refusal:
 
     status: int
     challenge: McpChallenge | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Closed:
+    """A stream's request has ended: with what it raised, or None when the server closed it."""
+
+    failure: BaseException | None
+
+
+# What a stream's queue holds: a notification (its method and params), or the end.
+type _StreamItem = tuple[str, dict[str, Any]] | _Closed
+
+# The notifications a stream is told things by (SEP-3415).
+_STREAM_NOTES = ("active", "event", "heartbeat", "error", "terminated")
+
+
+class McpEventStream:
+    """An open `events/stream`: one kind of event, sent by the server as it happens.
+
+    It is held on a client of its own, by a task of its own, as a link is: the stream
+    is one long request, and the client's notifications are this stream's only. Read
+    it with `async for`. Each item is an `McpOccurrence`, or an `McpMark` when
+    the server says where it has got to with no event (a gap, or a sign of life).
+
+    It ends, with `ended` saying why, when the server ends the subscription
+    (`terminated`). It raises `McpFailure` when it drops: the request fails, the
+    server closes it without ending the subscription, or it says nothing for three
+    of its heartbeats. Come back with the last cursor then. `aclose` closes it.
+    """
+
+    def __init__(
+        self,
+        opener: Callable[[ClientExtension], AbstractAsyncContextManager[Client]],
+        request: _Stream,
+        closed: Callable[["McpEventStream"], None],
+    ) -> None:
+        self.start = McpMark(None)
+        self.heartbeat_ms = _HEARTBEAT_MS
+        # Why the server ended the subscription, once it has.
+        self.ended: str | None = None
+        self._queue: asyncio.Queue[_StreamItem] = asyncio.Queue()
+        self._closed = closed
+        # The client's notifications all go to this stream's queue.
+        opening = opener(_StreamListener(self._queue))
+        self._task = asyncio.create_task(self._hold(opening, request))
+
+    async def opened(self) -> None:
+        """Wait for the server to confirm the stream. Raises what opening it raised."""
+        async with asyncio.timeout(_OPEN_SECONDS):
+            item = await self._queue.get()
+        if isinstance(item, _Closed):
+            raise item.failure or ConnectionError("the server closed the stream at once")
+        method, params = item
+        if method != "notifications/events/active":
+            raise ConnectionError(f"the stream began with {method}, not with its confirmation")
+        self._confirmed(params)
+
+    def __aiter__(self) -> AsyncIterator["McpOccurrence | McpMark"]:
+        return self._items()
+
+    async def aclose(self) -> None:
+        """Close the stream: its request is aborted, which ends it at the server."""
+        self._closed(self)
+        self._task.cancel()
+        await asyncio.gather(self._task, return_exceptions=True)
+
+    async def _items(self) -> AsyncGenerator["McpOccurrence | McpMark"]:
+        while True:
+            # The heartbeat the server granted is the sign of life: one missed three
+            # times over is a dead stream. After the end, the last events are waited for,
+            # a little.
+            quiet = self.heartbeat_ms * _HEARTBEATS_MISSED / 1000
+            if self.ended is not None:
+                quiet = _STREAM_END_SECONDS
+            try:
+                async with asyncio.timeout(quiet):
+                    item = await self._queue.get()
+            except TimeoutError:
+                if self.ended is not None:
+                    return
+                raise McpFailure("the stream said nothing for too long") from None
+            if isinstance(item, _Closed):
+                if self.ended is not None:
+                    return
+                if item.failure is not None:
+                    raise McpFailure(_reason(item.failure), code=_code(item.failure))
+                raise McpFailure("the server closed the stream")
+            method, params = item
+            if method == "notifications/events/event":
+                try:
+                    yield _occurrence(_Occurrence.model_validate(params))
+                except ValidationError:
+                    _log.warning("an event that could not be read was passed over")
+            elif method == "notifications/events/active":
+                self._confirmed(params)
+                yield self.start
+            elif method == "notifications/events/heartbeat":
+                yield McpMark(_string(params.get("cursor")))
+            elif method == "notifications/events/error":
+                _log.warning(
+                    "an event stream's server failed for a moment: %s", _said_error(params)
+                )
+            elif method == "notifications/events/terminated":
+                # What came before it may still be on its way, so the stream ends when
+                # its request does.
+                self.ended = _said_error(params)
+
+    def _confirmed(self, params: Mapping[str, Any]) -> None:
+        self.start = McpMark(_string(params.get("cursor")), params.get("truncated") is True)
+        granted = params.get("heartbeatMs")
+        if isinstance(granted, int) and not isinstance(granted, bool) and granted > 0:
+            self.heartbeat_ms = granted
+
+    async def _hold(self, opening: AbstractAsyncContextManager[Client], request: _Stream) -> None:
+        failure: BaseException | None = None
+        try:
+            async with opening as client:
+                # No time limit: the heartbeat is the stream's sign of life.
+                await client.session.send_request(request, _StreamEnded)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure = exc
+        # The notifications before the end are handed on by tasks of their own.
+        for _ in range(_STREAM_DRAIN_TURNS):
+            await asyncio.sleep(0)
+        self._queue.put_nowait(_Closed(failure))
+
+
+class _SubscribeParams(_EventParams):
+    delivery: dict[str, str]
+    ttl_ms: int | None = None
+
+
+class _Subscribe(Request[_SubscribeParams, Literal["events/subscribe"]]):
+    method: Literal["events/subscribe"] = "events/subscribe"
+    name_param = "name"
+
+
+class _UnsubscribeParams(RequestParams):
+    name: str
+    arguments: dict[str, object]
+    delivery: dict[str, str]
+
+
+class _Unsubscribe(Request[_UnsubscribeParams, Literal["events/unsubscribe"]]):
+    method: Literal["events/unsubscribe"] = "events/unsubscribe"
+    name_param = "name"
+
+
+class _DeliveryStatus(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    active: bool | None = None
+
+
+class _Subscribed(Result):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    refresh_before: str | None = None
+    cursor: str | None = None
+    truncated: bool = False
+    delivery_status: _DeliveryStatus | None = None
+
+
+class _Unsubscribed(Result):
+    model_config = ConfigDict(extra="ignore")
+
+
+class _StreamEnded(Result):
+    model_config = ConfigDict(extra="ignore")
+
+
+class _StreamListener(ClientExtension):
+    """The events extension, declared by a stream's client, with its notifications bound."""
+
+    identifier = EVENTS_EXTENSION
+
+    def __init__(self, queue: "asyncio.Queue[_StreamItem]") -> None:
+        self._queue = queue
+
+    def notifications(self) -> Sequence[NotificationBinding[Any]]:
+        return [self._binding(f"notifications/events/{note}") for note in _STREAM_NOTES]
+
+    def _binding(self, method: str) -> NotificationBinding[_Note]:
+        async def told(note: _Note) -> None:
+            # Never waits: the SDK drops the oldest notification when its queue is full.
+            self._queue.put_nowait((method, dict(note.model_extra or {})))
+
+        return NotificationBinding(method=method, params_type=_Note, handler=told)
 
 
 class _Link:
@@ -364,6 +786,8 @@ class McpAdapterClass:
         self._closing: set[asyncio.Task[None]] = set()
         # Links no longer handed out that a call is still running on.
         self._retired: set[_Link] = set()
+        # Event streams open now, each on a client of its own.
+        self._streams: set[McpEventStream] = set()
 
     async def initialize(self) -> None:
         pass
@@ -372,14 +796,16 @@ class McpAdapterClass:
         links, self._links = [*self._links.values(), *self._retired], {}
         self._retired.clear()
         await asyncio.gather(*(link.close() for link in links))
+        await asyncio.gather(*(stream.aclose() for stream in list(self._streams)))
         await asyncio.gather(*self._closing, return_exceptions=True)
 
     async def list_tools(self, server: McpServer) -> McpListing:
         """Every tool the server has now, in the order it lists them, and how it shows itself.
 
         How it shows itself is what it said when the client was opened, read from the
-        same client as the tools (see `_about`). Raises `McpFailure` if it cannot be
-        reached or does not answer. An icon that cannot be had never fails it.
+        same client as the tools (see `_about`). Its kinds of event are read too, when
+        it says it has the events extension. Raises `McpFailure` if it cannot be reached
+        or does not answer. An icon that cannot be had never fails it.
         """
         tools: list[McpTool] = []
         async with self._using(server) as client:
@@ -401,7 +827,8 @@ class McpAdapterClass:
                 if cursor is None:
                     break
             info = client.server_info
-        return McpListing(tools, await _about(info, server.url, self._transport))
+            events = await _list_events(client)
+        return McpListing(tools, await _about(info, server.url, self._transport), events)
 
     async def call_tool(
         self, server: McpServer, name: str, arguments: Mapping[str, object]
@@ -416,6 +843,171 @@ class McpAdapterClass:
                 name, dict(arguments), read_timeout_seconds=_CALL_SECONDS
             )
         return McpResult(text=_text(result), is_error=result.is_error)
+
+    async def poll_events(
+        self,
+        server: McpServer,
+        name: str,
+        arguments: Mapping[str, object],
+        cursor: str | None,
+        *,
+        max_events: int | None = None,
+    ) -> McpPolled:
+        """Ask the server once for the events of one kind since `cursor` (`events/poll`).
+
+        A cursor of None starts from now: the server sends no events, and a cursor to
+        ask from next time. Raises `McpFailure` if it cannot be reached or refuses.
+        """
+        params = _PollParams(
+            name=name, arguments=dict(arguments), cursor=cursor, max_events=max_events
+        )
+        async with self._using(server) as client:
+            async with asyncio.timeout(_LIST_SECONDS):
+                polled = await client.session.send_request(_Poll(params=params), _Polled)
+        return McpPolled(
+            events=[_occurrence(event) for event in polled.events],
+            cursor=polled.cursor,
+            truncated=polled.truncated,
+            has_more=polled.has_more,
+            next_poll_ms=polled.next_poll_ms,
+        )
+
+    async def open_stream(
+        self, server: McpServer, name: str, arguments: Mapping[str, object], cursor: str | None
+    ) -> McpEventStream:
+        """Open an `events/stream` for one kind of event, from `cursor` or from now.
+
+        Returns once the server has confirmed it: `start` says where it starts, and
+        whether events were skipped to start there. Raises `McpFailure` if it cannot be
+        reached or refuses. The caller closes the stream (`aclose`).
+        """
+        params = _StreamParams(
+            name=name, arguments=dict(arguments), cursor=cursor, heartbeat_ms=_HEARTBEAT_MS
+        )
+        self._refused.pop(server, None)
+        stream = McpEventStream(
+            lambda listener: self._opener(server, (listener,)),
+            _Stream(params=params),
+            self._streams.discard,
+        )
+        self._streams.add(stream)
+        try:
+            await stream.opened()
+        except Exception as exc:
+            await stream.aclose()
+            raise self._failure(server, exc) from exc
+        except BaseException:
+            await stream.aclose()
+            raise
+        return stream
+
+    async def subscribe_events(
+        self,
+        server: McpServer,
+        name: str,
+        arguments: Mapping[str, object],
+        *,
+        url: str,
+        secret: str,
+        cursor: str | None,
+        ttl_ms: int,
+    ) -> McpSubscription:
+        """Ask the server to post one kind of event to `url` (`events/subscribe`).
+
+        Asking again with the same kind, arguments and address renews the subscription,
+        and must be done before `refresh_before`. `secret` is ours (see
+        `webhook_secret`): the server signs every post with it. `cursor` is where the
+        posts sent so far have got to, or None for from now. Raises `McpFailure` if the
+        server cannot be reached or refuses, as it does when it cannot reach `url`.
+        """
+        params = _SubscribeParams(
+            name=name,
+            arguments=dict(arguments),
+            cursor=cursor,
+            delivery={"mode": "webhook", "url": url, "secret": secret},
+            ttl_ms=ttl_ms,
+        )
+        async with self._using(server) as client:
+            async with asyncio.timeout(_CALL_SECONDS):
+                granted = await client.session.send_request(_Subscribe(params=params), _Subscribed)
+        refresh_before = None
+        if granted.refresh_before is not None:
+            refresh_before = _when(granted.refresh_before)
+            if refresh_before is None:
+                raise McpFailure("the server granted a subscription with a time it cannot read")
+        status = granted.delivery_status
+        return McpSubscription(
+            id=granted.id,
+            refresh_before=refresh_before,
+            cursor=granted.cursor,
+            truncated=granted.truncated,
+            delivering=None if status is None else status.active,
+        )
+
+    async def unsubscribe_events(
+        self, server: McpServer, name: str, arguments: Mapping[str, object], url: str
+    ) -> None:
+        """Ask the server to stop posting one kind of event to `url` (`events/unsubscribe`).
+
+        Raises `McpFailure` if it cannot be reached, or does not know the subscription.
+        """
+        params = _UnsubscribeParams(name=name, arguments=dict(arguments), delivery={"url": url})
+        async with self._using(server) as client:
+            async with asyncio.timeout(_CALL_SECONDS):
+                await client.session.send_request(_Unsubscribe(params=params), _Unsubscribed)
+
+    def webhook_secret(self, key: bytes) -> str:
+        """The secret a webhook's posts are signed with, made from 24 to 64 random bytes.
+
+        As Standard Webhooks writes one: `whsec_` and the bytes in base64.
+        """
+        if not _SECRET_BYTES[0] <= len(key) <= _SECRET_BYTES[1]:
+            raise ValueError("a webhook's secret is made of 24 to 64 bytes")
+        return f"whsec_{base64.b64encode(key).decode()}"
+
+    def check_post(
+        self,
+        secret: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        *,
+        now: datetime | None = None,
+    ) -> McpPost | None:
+        """A post to a webhook address, if the server signed it with `secret`, and read.
+
+        Checked as Standard Webhooks says: the HMAC-SHA256 of its id, its time and its
+        body as they came, with any of the signatures it carries, and a time no more
+        than five minutes from now. None if it does not hold, or cannot be read: then
+        nothing of it is to be believed.
+        """
+        lower = {name.lower(): value for name, value in headers.items()}
+        message_id = lower.get("webhook-id")
+        stamp = lower.get("webhook-timestamp")
+        signatures = lower.get("webhook-signature")
+        if not message_id or not stamp or not signatures:
+            return None
+        try:
+            sent = datetime.fromtimestamp(int(stamp), UTC)
+        except (ValueError, OverflowError, OSError):
+            return None
+        if abs(((now or datetime.now(UTC)) - sent).total_seconds()) > _POST_FRESH_SECONDS:
+            return None
+        try:
+            key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+        except binascii.Error:
+            return None
+        signed = f"{message_id}.{stamp}.".encode() + body
+        expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
+        held = any(
+            version == "v1" and hmac.compare_digest(given, expected)
+            for version, _, given in (one.partition(",") for one in signatures.split())
+        )
+        if not held:
+            return None
+        item = _posted(body)
+        if item is None:
+            return None
+        return McpPost(message_id, lower.get("x-mcp-subscription-id"), item)
 
     async def forget(self, server: McpServer) -> None:
         """Close the client kept for a server that is no longer used, if there is one."""
@@ -673,7 +1265,9 @@ class McpAdapterClass:
             yield http
 
     @contextlib.asynccontextmanager
-    async def _open_http(self, server: McpServer) -> AsyncGenerator[Client]:
+    async def _open_http(
+        self, server: McpServer, extensions: Sequence[ClientExtension]
+    ) -> AsyncGenerator[Client]:
         """A client for a server reached over Streamable HTTP, with its headers and pass."""
 
         async def note(response: httpx2.Response) -> None:
@@ -698,7 +1292,9 @@ class McpAdapterClass:
                 event_hooks={"response": [note]},
                 transport=self._transport,
             ) as http,
-            Client(streamable_http_client(server.url, http_client=http)) as client,
+            Client(
+                streamable_http_client(server.url, http_client=http), extensions=extensions
+            ) as client,
         ):
             yield client
 
@@ -707,7 +1303,7 @@ class McpAdapterClass:
         """The server's client, for one request. Whatever goes wrong is an `McpFailure`."""
         link = self._links.get(server)
         if link is None or not link.alive:
-            link = self._links[server] = _Link(self._opener(server))
+            link = self._links[server] = _Link(self._opener(server, (_EVENTS_DECLARED,)))
         link.users += 1
         self._refused.pop(server, None)
         try:
@@ -720,17 +1316,22 @@ class McpAdapterClass:
             if self._links.get(server) is link:
                 del self._links[server]
             link.retired = True
-            refusal = self._refused.pop(server, None)
-            status = None if refusal is None else refusal.status
-            raise McpFailure(
-                _reason(exc, status),
-                sign_in_needed=status == 401,
-                challenge=None if refusal is None else refusal.challenge,
-            ) from exc
+            raise self._failure(server, exc) from exc
         finally:
             link.users -= 1
             if link.retired:
                 self._retire(link)
+
+    def _failure(self, server: McpServer, exc: BaseException) -> McpFailure:
+        """What went wrong with a request to a server, with the status it answered."""
+        refusal = self._refused.pop(server, None)
+        status = None if refusal is None else refusal.status
+        return McpFailure(
+            _reason(exc, status),
+            sign_in_needed=status == 401,
+            challenge=None if refusal is None else refusal.challenge,
+            code=_code(exc),
+        )
 
     def _retire(self, link: _Link) -> None:
         """Close a link once nothing is using it. It is no longer handed out."""
@@ -742,6 +1343,124 @@ class McpAdapterClass:
         closing = asyncio.create_task(link.close())
         self._closing.add(closing)
         closing.add_done_callback(self._closing.discard)
+
+
+# Every client says it understands the events extension, as a client may (SEP-3415).
+_EVENTS_DECLARED = advertise(EVENTS_EXTENSION)
+# What a server answers for a method it does not have.
+_METHOD_NOT_FOUND = -32601
+
+
+async def _list_events(client: Client) -> list[McpEventType]:
+    """The kinds of event a server serves, in its order. None if it has not the extension.
+
+    A kind that names no delivery this backend knows is left out: it could not be
+    listened for. A server that says it has the extension and then has no `events/list`
+    is taken as having none.
+    """
+    if EVENTS_EXTENSION not in (client.server_capabilities.extensions or {}):
+        return []
+    events: list[McpEventType] = []
+    cursor: str | None = None
+    for _ in range(_LIST_PAGES_MAX):
+        try:
+            async with asyncio.timeout(_LIST_SECONDS):
+                page = await client.session.send_request(
+                    _ListEvents(params=_ListEventsParams(cursor=cursor)), _EventsListed
+                )
+        except MCPError as exc:
+            if exc.code == _METHOD_NOT_FOUND:
+                return []
+            raise
+        for kind in page.events:
+            delivery = tuple(way for way in kind.delivery if way in _DELIVERIES)
+            if kind.name and delivery:
+                events.append(
+                    McpEventType(kind.name, kind.description, delivery, kind.input_schema)
+                )
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    return events
+
+
+def _occurrence(event: _Occurrence) -> McpOccurrence:
+    return McpOccurrence(
+        event_id=event.event_id,
+        name=event.name,
+        at=_when(event.timestamp),
+        data=event.data,
+        cursor=event.cursor,
+    )
+
+
+def _when(timestamp: str | None) -> datetime | None:
+    """An ISO 8601 time with its zone, or None if it is not one."""
+    if timestamp is None:
+        return None
+    try:
+        at = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else None
+
+
+# How many random bytes a webhook's secret is made of, at least and at most.
+_SECRET_BYTES = (24, 64)
+# How far from now a webhook post's time may be (Standard Webhooks: five minutes).
+_POST_FRESH_SECONDS = 300
+
+
+def _posted(body: bytes) -> McpOccurrence | McpMark | McpEnded | McpVerification | None:
+    """What a signed webhook post carried, or None if it is not one this knows.
+
+    A body with a `type` is the server's own word (a gap, the end, a check of the
+    address); one without is an event.
+    """
+    try:
+        sent = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(sent, dict):
+        return None
+    said = cast("dict[str, Any]", sent)
+    kind = said.get("type")
+    if kind is None:
+        try:
+            return _occurrence(_Occurrence.model_validate(said))
+        except ValidationError:
+            return None
+    if kind == "gap":
+        return McpMark(_string(said.get("cursor")), truncated=True)
+    if kind == "terminated":
+        return McpEnded(_said_error(said))
+    if kind == "verification" and isinstance(challenge := said.get("challenge"), str):
+        return McpVerification(challenge)
+    return None
+
+
+def _string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _said_error(params: Mapping[str, Any]) -> str:
+    """What a stream's `error` or `terminated` says went wrong, in words."""
+    error = params.get("error")
+    if isinstance(error, dict):
+        said = cast("dict[str, object]", error)
+        message, data = said.get("message"), said.get("data")
+        reason = cast("dict[str, object]", data).get("reason") if isinstance(data, dict) else None
+        words = [str(part) for part in (message, reason) if isinstance(part, str) and part]
+        if words:
+            return ": ".join(words)[:200]
+    return "the server gave no reason"
+
+
+def _code(exc: BaseException) -> int | None:
+    """The protocol's error code a failure carries, if the server answered with one."""
+    while isinstance(exc, BaseExceptionGroup):
+        exc = cast("BaseExceptionGroup[BaseException]", exc).exceptions[0]
+    return exc.code if isinstance(exc, MCPError) else None
 
 
 def _reason(exc: BaseException, status: int | None = None) -> str:

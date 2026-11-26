@@ -28,6 +28,7 @@ Connections are kept in the `Connections` collection, one document each:
 | `deferred` | on, its tools are not sent with every request: a gem finds and loads them with `tool_search` when it needs one (see [Deferred tools](#deferred-tools)). Off, all of them are sent in full with every request. Default on |
 | `gems` | the gems it is open to: `"all"`, or a list of gem ids. **A new connection is open to none** until the user says which |
 | `tools` | a copy of the tools the server listed when it was last asked: each one's name, title, description and schema |
+| `events` | a copy of the kinds of event the server serves (see [Events](#events)), made with the tools: each one's name, description, deliveries and schema |
 | `icons`, `website_url` | how the server shows itself, as it stated when its tools were last copied (see [The server's icons](#the-servers-icons)). Empty and null when it stated nothing |
 | limits | for one tool, the gems it is open to. A limit only narrows: the tool is offered to a gem when the connection is open to the gem and the limit names it too. A limit that names no gem turns the tool off for everyone. A tool with no limit is open to whoever the connection is |
 
@@ -230,6 +231,69 @@ A new `url` drops the sign-in (the pass and the registration) and the copy of th
 and signs in again if the new server asks; giving an `Authorization` header of the
 user's own drops it too. Deleting a connection drops everything.
 
+## Events
+
+A server may serve events: things that happen, which a gem can watch for (MCP events,
+[SEP-3415](https://modelcontextprotocol.io/seps/3415-events-extension), the extension
+`io.modelcontextprotocol/events`, protocol revision 2026-07-28). The code is
+[`app/entities/mcp_events_ent.py`](../app/entities/mcp_events_ent.py); the watches that
+use it, and how an event reaches a gem, are in [the notes](darbar-notes.md).
+
+**The copy.** Every client this backend opens says it understands the extension. A
+server that says it has it is asked `events/list` right after its tools, on the same
+client, and what it lists is kept in `events`, beside the tools, at the same moments
+and for the same reason: a gem watches only what the user was shown. A kind is left
+out, uncounted, when it has no name or a name listed twice, no delivery this backend
+knows (`poll`, `push`, `webhook`), a schema that is not an object's, is not a valid JSON
+schema or is longer than 20,000 characters, an argument marked `x-mcp-header` (the SDK
+does not send that header for events), or comes after the first 64.
+
+**Who may watch.** A gem is offered the kinds of event of the connections that are on
+and open to it. A tool's limit does not narrow events: it names a tool, and an event is
+not one.
+
+**How a watch runs.** The backend chooses the delivery, never the gem, from what the
+server offers for the kind:
+
+1. **Stream** (`push`): one long `events/stream` request, held on a client of its own
+   (its notifications are that stream's only). The server sends each event as it
+   happens, and a heartbeat with its cursor when nothing happens. Three heartbeats
+   missed, the request failing, or the server closing it without ending the
+   subscription is a drop.
+2. **Webhook**, only when the watch has a public address: `events/subscribe` asks the
+   server to post each event there, for an hour. It is asked for again when four fifths
+   of what the server granted have gone, and `events/unsubscribe` stops it when the
+   watch ends. A post is believed only when its Standard Webhooks signature (HMAC-SHA256
+   of its id, its time and its body) holds with the watch's secret, and its time is
+   within five minutes. The secret is made from the backend's `SECRET_KEY`, the
+   watch's id and the server's address, so it is the same after a restart, is kept
+   nowhere, and a server the connection has moved away from cannot sign a post. A server that will
+   not post to the address (it cannot reach it, say) is polled instead, if it offers
+   that.
+3. **Poll**: `events/poll`, as often as the server asks (`nextPollMs`), never more than
+   once a second, and every 30 seconds when it does not say; at once when it says more
+   are waiting.
+
+- **Cursors.** A watch starts from its last cursor, or from now. After a drop, or a
+  connection that did not answer, it comes back after a pause that doubles from one
+  second to five minutes, from the last cursor it had, so what happened in between is
+  sent then. A heartbeat, a poll and a renewal move the cursor on while nothing happens.
+  When the server says events were skipped (`truncated`, or a `gap` post), a line is
+  logged.
+- **Each event once.** An event whose id was told before is not told again (the last
+  1,000 ids of a watch are kept in memory), and a webhook post whose id was seen before
+  is not either. An event that cannot be kept is asked for again from the last cursor.
+- **What the model gets.** The event's data as compact JSON, cut at 20,000 characters
+  with a line saying how long it was. It is outside data, like a tool's result.
+- **When it stops.** The connection is read again before each event is told and each
+  time the server is come back to. A watch stops, and says why, when its connection is
+  gone, turned off, closed to its gem, moved to another address (another server),
+  needs a sign-in, or no longer lists the event;
+  when the server refuses it (no such event, not allowed, not offered, bad arguments);
+  or when the server ends the subscription.
+- **Passes** are kept good as for a tool call: renewed before they run out, or when the
+  server answers 401. An open stream keeps the pass it opened with until it drops.
+
 ## Not built, on purpose
 
 - **Servers started as a local command (stdio), and the older SSE transport.** These
@@ -242,5 +306,11 @@ user's own drops it too. Deleting a connection drops everything.
   asked for later (a 403 step-up).
 - **Being told before a pass runs out.** Nothing runs on a timer. The app shows a badge
   from `sign_in`; there is no notification.
+- **Answering a server's check of a webhook address.** A server may post a challenge
+  that has to be echoed in the answer. A watch's webhook route cannot echo it yet, so
+  such a server will not post to us, and the watch is polled when the server allows.
+- **Hearing that a server's events changed** (`notifications/events/list_changed`). The
+  copy changes when the user refreshes. A watch the server ends because its kind
+  changed stops, and says so.
 - **A vault.** The headers, passes and registrations are kept in the database as they
   are given. They are never sent to a client or to the model.

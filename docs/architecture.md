@@ -34,7 +34,7 @@ config ← core ← adapters ← entities ← routers ← main
 | `cartesia_stt_adp.py` | Cartesia speech-to-text, which also detects turns |
 | `cartesia_tts_adp.py` | Cartesia text-to-speech, with each word's timing |
 | `parallel_adp.py` | Parallel web search |
-| `mcp_adp.py` | MCP tool servers, over Streamable HTTP, with their sign-in and their icons |
+| `mcp_adp.py` | MCP tool servers, over Streamable HTTP, with their sign-in, their icons and their events |
 | `cliproxy_adp.py` | CLIProxyAPI's management API: the proxy's ChatGPT logins |
 | `docdb_adp.py` | MongoDB |
 | `redis_adp.py` | Redis: only the user login writes to it |
@@ -56,7 +56,6 @@ config ← core ← adapters ← entities ← routers ← main
 | `late_results.py` | tool calls that outlive their reply, held until their results are told: one copy for a call and for chat |
 | `pending_events.py` | events that came in for a gem's watches, held until they are told: one copy for a call and for chat |
 | `events_ent.py` | where every watch hands its events (the `EventSink`), and waking gems with events waiting after a restart |
-| `gem_event.py` | the shapes that cross between a watch's source and the gem |
 | `cold_start.py` | when a conversation starts cold, and the items as they are sent from then on, with old long tool results expired |
 | `gem_log.py` | everything that happens with a gem, numbered and written down as it happens |
 | `model.py` | either provider's model behind one interface, and the list of models |
@@ -67,6 +66,7 @@ config ← core ← adapters ← entities ← routers ← main
 | `connection_ent.py` | the tool servers, which gem may use which, and signing in to them |
 | `gem_event.py` | what wakes a gem: an event, and the shapes that cross between a watch's source and the gem |
 | `watch_ent.py` | a gem's watches: kept, run (MCP events, webhooks, timers), the fuse, and the gem's tools for them ([Watches](watches.md)) |
+| `mcp_events_ent.py` | the kinds of event a gem's connections serve, and running a watch on one |
 | `gem_ent.py` | a gem's config and its versions |
 | `darbar_ent.py` | the Darbar text every gem is told first |
 | `user_ent.py` | the user account behind `/v1/users` |

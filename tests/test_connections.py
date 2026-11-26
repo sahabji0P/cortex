@@ -8,7 +8,7 @@ import asyncio
 import base64
 import contextlib
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -18,6 +18,7 @@ from bson import ObjectId
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from mcp import Client
+from mcp.client import ClientExtension
 from mcp.server.mcpserver import MCPServer
 from mcp.types import Icon
 from pydantic import ValidationError
@@ -90,11 +91,13 @@ class _Servers:
         self.opened: list[McpServer] = []
 
     @contextlib.asynccontextmanager
-    async def open(self, server: McpServer) -> AsyncGenerator[Client]:
+    async def open(
+        self, server: McpServer, extensions: Sequence[ClientExtension]
+    ) -> AsyncGenerator[Client]:
         self.opened.append(server)
         if server.url not in self.at:
             raise ConnectionError("All connection attempts failed")
-        async with Client(self.at[server.url]) as client:
+        async with Client(self.at[server.url], extensions=extensions) as client:
             yield client
 
 
@@ -1399,9 +1402,9 @@ async def test_a_forgotten_server_s_client_in_use_is_closed_when_the_adapter_clo
     closed: list[str] = []
 
     @contextlib.asynccontextmanager
-    async def opener(_: McpServer) -> AsyncGenerator[Client]:
+    async def opener(_: McpServer, extensions: Sequence[ClientExtension]) -> AsyncGenerator[Client]:
         try:
-            async with Client(server) as client:
+            async with Client(server, extensions=extensions) as client:
                 yield client
         finally:
             closed.append("closed")
