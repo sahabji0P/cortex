@@ -14,9 +14,11 @@ A watch has one of three sources (see `gem_event.py`):
   for a server that delivers by posting to one.
 - `webhook`: posts to an address of ours, `{PUBLIC_URL}/v1/hooks/{token}`, such as a
   GitHub repo's own webhook. The token is random and cannot be guessed: it is what lets
-  a post in. The posts are signed with a secret of the watch's own (`hook_secret`).
-  Nothing runs for it: a post comes to the hooks route (`hooked`). A post signed the way
-  GitHub signs one must be signed with the secret. A GitHub `ping` wakes nobody.
+  a post in. The posts are signed with a secret of the watch's own (`hook_secret`), the
+  way GitHub signs one or the way Standard Webhooks does. Nothing runs for it: a post
+  comes to the hooks route (`hooked`). A post that says it is signed must be signed with
+  the secret, and once one signed post is taken, every post must be (`signed`). A sender
+  that never signs keeps working with the address alone. A GitHub `ping` wakes nobody.
 - `timer`: every so many minutes, at least `TIMER_MIN_MINUTES`, in a task of its own.
   It is first due one interval after it is made. One that came due while the backend
   was down goes off once as soon as it is up, and then keeps its rhythm.
@@ -84,6 +86,7 @@ from app.adapters.docdb_adp import DocDBAdapterClass
 from app.config import settings
 from app.core.errors import AppError, InvalidError, NotFoundError
 from app.core.times import UtcDatetime
+from app.core.webhooks import standard_webhook_id
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_event import (
     EVENT_TEXT_LIMIT,
@@ -151,6 +154,9 @@ type RemovedBy = Literal["gem", "user"]
 # What became of a post to a watch's webhook address: handed over, a GitHub `ping` that
 # wakes nobody, refused for its signature, or not taken because the watch is paused.
 type HookOutcome = Literal["taken", "ignored", "refused", "paused"]
+# What a plain webhook's post says of its signature: none, one that holds, or one that
+# does not.
+type _Signature = Literal["unsigned", "signed", "forged"]
 
 # The events a watch tells its gem of itself: it starts failing, the fuse pauses it, a
 # failing watch works again, or the user removes it from the app.
@@ -188,6 +194,9 @@ class Watch(BaseModel):
     # For a plain webhook: the secret its posts are signed with, never in the list
     # either. None for one stored before watches kept one: its token is its secret.
     secret: str | None = None
+    # For a plain webhook: whether it has taken a signed post. From then on it takes
+    # only signed ones.
+    signed: bool = False
     # For a timer: how often it goes off, and when it is next due.
     every_minutes: int | None = None
     due_at: UtcDatetime | None = None
@@ -574,8 +583,10 @@ class WatchEntityClass:
 
         A watch on MCP events has the connections check it and read it. A plain webhook's
         post must be signed with the watch's secret (`hook_secret`) if it says it is
-        signed (GitHub's `X-Hub-Signature-256`). Its event is named by `X-GitHub-Event`,
-        or "webhook", and its id is `X-GitHub-Delivery`. Raises if the sink cannot keep it.
+        signed (`_signature`), and must be signed at all once the watch has taken a
+        signed post (`signed`). Its event is named by `X-GitHub-Event`, or "webhook",
+        and its id is `X-GitHub-Delivery`, or else `webhook-id`. Raises if the sink cannot
+        keep it.
         """
         if watch.state == "paused":
             return "paused"
@@ -585,16 +596,21 @@ class WatchEntityClass:
             )
             return "taken" if taken else "refused"
         named = {name.lower(): value for name, value in headers.items()}
-        signature = named.get("x-hub-signature-256")
         secret = watch.hook_secret
-        if secret is None or (signature is not None and not _signed(secret, body, signature)):
+        if secret is None:
+            return "refused"
+        now = self._now()
+        signature = _signature(secret, named, body, now)
+        if signature == "forged" or (signature == "unsigned" and watch.signed):
             return "refused"
         name = named.get("x-github-event") or "webhook"
         if name == "ping":
             return "ignored"
         text = body.decode("utf-8", errors="replace")
-        event_id = named.get("x-github-delivery")
-        if not await self._deliver(watch.id, name, text, event_id, self._now(), {}):
+        event_id = named.get("x-github-delivery") or named.get("webhook-id")
+        # A signed post taken locks the watch: it takes only signed ones from then on.
+        fields = {"signed": True} if signature == "signed" else {}
+        if not await self._deliver(watch.id, name, text, event_id, now, fields):
             return "paused"
         return "taken"
 
@@ -809,9 +825,10 @@ class WatchEntityClass:
                 update={**fields, **counted, "state": "active", "reason": None}
             )
             await self._store(changed, {*fields, *counted, "state", "reason"})
-            if watch.state != changed.state:
+            # The app is told of a change it shows, but not of a new event alone.
+            if (watch.state, watch.signed) != (changed.state, changed.signed):
                 self._tell(changed)
-                self._tell_gem(watch, changed)
+            self._tell_gem(watch, changed)
             return True
 
     async def _pause(self, watch: Watch, reason: str) -> None:
@@ -980,7 +997,26 @@ def _kinds(kinds: list[McpEventKind]) -> str:
     )
 
 
-def _signed(secret: str, body: bytes, signature: str) -> bool:
+def _signature(secret: str, headers: Mapping[str, str], body: bytes, now: datetime) -> _Signature:
+    """What a plain webhook's post says of its signature, checked with the watch's secret.
+
+    Two ways of signing are known: GitHub's (`X-Hub-Signature-256`) and Standard
+    Webhooks' (`webhook-signature`, with `webhook-id` and `webhook-timestamp`), with the
+    secret as it is for the key. A post that carries both must hold for both. `headers`
+    are named in lower case.
+    """
+    github = headers.get("x-hub-signature-256")
+    standard = headers.get("webhook-signature")
+    if github is None and standard is None:
+        return "unsigned"
+    if github is not None and not _github_signed(secret, body, github):
+        return "forged"
+    if standard is not None and standard_webhook_id(secret.encode(), headers, body, now) is None:
+        return "forged"
+    return "signed"
+
+
+def _github_signed(secret: str, body: bytes, signature: str) -> bool:
     """Whether `signature` is the body's, as GitHub signs one: `sha256=` and its HMAC."""
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected.encode(), signature.encode())

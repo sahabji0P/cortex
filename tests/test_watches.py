@@ -5,6 +5,7 @@ so a timer's hours pass at once and nothing reaches the internet.
 """
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -763,6 +764,20 @@ def _signature(secret: str, body: bytes) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
+def _standard(
+    secret: str, body: bytes, message_id: str = "msg_1", at: datetime = _START
+) -> dict[str, str]:
+    """The headers of a post signed as Standard Webhooks signs one, with the secret as it is."""
+    stamp = str(int(at.timestamp()))
+    signed = f"{message_id}.{stamp}.".encode() + body
+    mac = hmac.new(secret.encode(), signed, hashlib.sha256).digest()
+    return {
+        "webhook-id": message_id,
+        "webhook-timestamp": stamp,
+        "webhook-signature": f"v1,{base64.b64encode(mac).decode()}",
+    }
+
+
 @pytest.fixture
 async def hooks(setup: _Setup) -> AsyncGenerator[httpx.AsyncClient]:
     """A client of the app, in the test's own loop, whose hooks route reaches `setup`'s watches."""
@@ -898,6 +913,107 @@ async def test_a_github_ping_is_answered_and_wakes_nobody(
     assert (answer.status_code, answer.content) == (200, b"")
     assert setup.sink.events == []
     assert setup.watch(made).events == 0
+    # A ping is not taken, so it does not lock the watch to signed posts.
+    assert setup.watch(made).signed is False
+
+
+async def test_a_sender_that_never_signs_keeps_working_with_the_address_alone(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+
+    for number in range(3):
+        answer = await hooks.post(f"/v1/hooks/{token}", content=f'{{"n": {number}}}'.encode())
+        assert answer.status_code == 202
+
+    assert (setup.watch(made).signed, setup.watch(made).events) == (False, 3)
+
+
+async def test_once_a_signed_post_is_taken_an_unsigned_one_is_401(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    assert (await hooks.post(f"/v1/hooks/{token}", content=b"{}")).status_code == 202
+    assert setup.watch(made).signed is False
+    body = b'{"action": "opened"}'
+    signed = {"X-Hub-Signature-256": _signature(str(made.secret), body)}
+
+    assert (await hooks.post(f"/v1/hooks/{token}", content=body, headers=signed)).is_success
+
+    assert setup.watch(made).signed is True
+    # The app is told, as it shows that the watch takes only signed posts now.
+    await _until(lambda: setup.told == [(str(setup.one.id), str(made.id))] * 2)
+    answer = await hooks.post(f"/v1/hooks/{token}", content=b'{"action": "closed"}')
+    assert (answer.status_code, answer.content) == (401, b"")
+    assert len(setup.sink.caught) == 2
+    # Signed either way, it is still taken.
+    other = b'{"action": "edited"}'
+    for headers in [
+        {"X-Hub-Signature-256": _signature(str(made.secret), other)},
+        _standard(str(made.secret), other),
+    ]:
+        assert (await hooks.post(f"/v1/hooks/{token}", content=other, headers=headers)).is_success
+    assert (len(setup.sink.caught), setup.watch(made).events) == (4, 4)
+
+
+async def test_a_standard_webhooks_post_signed_with_the_secret_wakes_the_gem(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    body = b'{"type": "invoice.paid"}'
+    headers = _standard(str(made.secret), body, "msg_2KWPBgLlAfxdpx2AI54pPJ85f4W")
+    # A sender rotating its secret signs with the old and the new: one that holds is enough.
+    headers["webhook-signature"] = f"v1,bm9wZQ== {headers['webhook-signature']}"
+
+    answer = await hooks.post(f"/v1/hooks/{token}", content=body, headers=headers)
+
+    assert (answer.status_code, answer.content) == (202, b"")
+    [event] = setup.sink.events
+    assert (event.name, event.event_id, event.data) == (
+        "webhook",
+        "msg_2KWPBgLlAfxdpx2AI54pPJ85f4W",
+        body.decode(),
+    )
+    assert setup.watch(made).signed is True
+    # Sent again, by its id, it is answered and not kept twice.
+    assert (await hooks.post(f"/v1/hooks/{token}", content=body, headers=headers)).is_success
+    assert (len(setup.sink.events), setup.watch(made).events) == (1, 1)
+
+
+async def test_a_standard_webhooks_post_that_is_forged_or_stale_is_401(
+    setup: _Setup, hooks: httpx.AsyncClient
+) -> None:
+    made, token = await _webhook(setup)
+    secret = str(made.secret)
+    body = b'{"type": "invoice.paid"}'
+    good = _standard(secret, body)
+
+    for headers in [
+        _standard("another", body),
+        # The token is in the address, and is not the secret.
+        _standard(token, body),
+        # Signed for another id, or another body.
+        {**good, "webhook-id": "msg_other"},
+        _standard(secret, b"{}"),
+        # Sent more than five minutes ago, or from more than five minutes ahead.
+        _standard(secret, body, at=_START - timedelta(minutes=5, seconds=1)),
+        _standard(secret, body, at=_START + timedelta(minutes=5, seconds=1)),
+        # Without its id or its time, or with no `v1` signature.
+        {key: value for key, value in good.items() if key != "webhook-timestamp"},
+        {key: value for key, value in good.items() if key != "webhook-id"},
+        {**good, "webhook-timestamp": "soon"},
+        {**good, "webhook-signature": good["webhook-signature"].replace("v1,", "v2,")},
+        {**good, "webhook-signature": ""},
+        # Signed both ways, and one of them does not hold.
+        {**good, "X-Hub-Signature-256": _signature("another", body)},
+    ]:
+        answer = await hooks.post(f"/v1/hooks/{token}", content=body, headers=headers)
+        assert (answer.status_code, answer.content) == (401, b""), headers
+    assert setup.sink.events == []
+    assert setup.watch(made).signed is False
+    # Within five minutes either way it holds.
+    late = _standard(secret, body, at=_START - timedelta(minutes=5))
+    assert (await hooks.post(f"/v1/hooks/{token}", content=body, headers=late)).is_success
 
 
 async def test_a_post_over_a_megabyte_is_413_and_not_handed_over(

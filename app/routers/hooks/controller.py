@@ -13,8 +13,8 @@ async def hook(token: str, request: Request, service: HooksServiceRegistry.V1) -
     """A post to a watch's webhook address, such as a GitHub webhook's: it wakes the gem.
 
     202 when it is handed over. 200 for a GitHub `ping`, which wakes nobody. 404 for an
-    address that is no watch's, 401 for a post whose signature is not the watch's, 413
-    for one over 1 MB, 409 for a watch that is paused, 503 when it could not be kept.
-    Every answer is empty.
+    address that is no watch's, 401 for a post whose signature is not the watch's, or
+    that is not signed when the watch has taken a signed one, 413 for one over 1 MB, 409
+    for a watch that is paused, 503 when it could not be kept. Every answer is empty.
     """
     return await service.hook(token, request)
