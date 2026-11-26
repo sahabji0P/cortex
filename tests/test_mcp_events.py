@@ -470,3 +470,22 @@ def test_a_webhook_secret_is_made_as_standard_webhooks_writes_one(mcp: McpAdapte
     assert mcp.webhook_secret(b"k" * 32) == _SECRET
     with pytest.raises(ValueError):
         mcp.webhook_secret(b"short")
+
+
+async def test_a_server_that_refuses_the_pass_says_a_sign_in_is_needed(
+    served: Running, mcp: McpAdapterClass
+) -> None:
+    served.server.pass_needed = "the-right-one"
+    server = McpServer(served.url, token="an-old-one")
+
+    with pytest.raises(McpFailure) as streamed:
+        await mcp.open_stream(server, "issue.opened", _REPO, None)
+    with pytest.raises(McpFailure) as polled:
+        await mcp.poll_events(server, "issue.opened", _REPO, None)
+
+    assert streamed.value.sign_in_needed
+    assert polled.value.sign_in_needed
+    stream = await mcp.open_stream(
+        McpServer(served.url, token="the-right-one"), "issue.opened", _REPO, None
+    )
+    await stream.aclose()

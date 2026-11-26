@@ -142,6 +142,9 @@ class EventsServer:
         self.max_ttl_ms = max_ttl_ms
         # When set, an open stream sends no heartbeat: it goes quiet, as a dead one does.
         self.mute = False
+        # When set, every request without this pass is answered 401, as a server whose
+        # pass has run out answers.
+        self.pass_needed: str | None = None
         self.events: list[_Event] = []
         # Events before this one are no longer kept: a cursor before it is a gap.
         self.floor = 0
@@ -151,6 +154,8 @@ class EventsServer:
         self.stream_closed = asyncio.Event()
         # Every request asked of it, by method, and the webhook posts it made.
         self.asked: list[str] = []
+        # Set each time it is asked something.
+        self.heard = asyncio.Event()
         self.posts: list[tuple[str, int]] = []
         self._post = _post_over_http if post is None else post
         self.mcp = MCPServer("events", extensions=[_Events(self)])
@@ -404,6 +409,7 @@ class _Events(Extension):
         ) -> MethodBinding:
             async def handle(ctx: ServerRequestContext[Any, Any], params: _Params) -> Any:
                 server.asked.append(method)
+                server.heard.set()
                 result = answer(ctx, params.model_dump(by_alias=True, exclude={"meta"}))
                 return await result if asyncio.iscoroutine(result) else result
 
@@ -499,6 +505,12 @@ async def running(server: EventsServer, port: int = 0) -> AsyncGenerator[Running
             response = await emit(Request(scope, receive))
             await response(scope, receive, send)
             return
+        if scope["type"] == "http" and server.pass_needed is not None:
+            given = Request(scope).headers.get("authorization")
+            if given != f"Bearer {server.pass_needed}":
+                refused = Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})
+                await refused(scope, receive, send)
+                return
         await app(scope, receive, send)
 
     config = uvicorn.Config(
