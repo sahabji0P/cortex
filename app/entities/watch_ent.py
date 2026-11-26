@@ -43,9 +43,12 @@ is added, removed, or changes state.
 The gem is told too, once for each change of state, as an event of the watch's own:
 `watch.failing` when it starts failing, `watch.paused` when the fuse pauses it, both
 with the reason, and `watch.recovered` when a failing watch works again. A failing
-watch tried again, or whose reason changes, is not a change. These are handed to the
-sink like any other event, but not counted, never stopped by the fuse, and telling the
-gem never holds the watch up.
+watch tried again, or whose reason changes, is not a change. When the user removes one
+of its watches from the app, the gem is told `watch.ended`, so it does not think it
+still runs. It is not told when it removes one itself (its tool's result says so), nor
+when its watches end because it is reset or deleted. These are handed to the sink like
+any other event, but not counted, never stopped by the fuse, and telling the gem never
+holds the watch, or its removal, up.
 
 The gem has four tools for its watches (`tools_for`): `watch` makes one, `unwatch`
 removes one, `watches` lists its own, and `watchable` lists the MCP events it may watch:
@@ -134,6 +137,8 @@ _FUSED = (
     f"It brought more than {_FUSE_EVENTS} events in an hour, so it was paused: the gem may "
     "be waking itself in a loop. Remove it, and it can be made again."
 )
+# What the gem is told when the user removes one of its watches from the app.
+_ENDED = "The user removed this watch."
 
 _log = logging.getLogger(__name__)
 
@@ -144,9 +149,9 @@ type RemovedBy = Literal["gem", "user"]
 # wakes nobody, refused for its signature, or not taken because the watch is paused.
 type HookOutcome = Literal["taken", "ignored", "refused", "paused"]
 
-# The events a watch tells its gem of itself: it starts failing, the fuse pauses it, or a
-# failing watch works again.
-type _Change = Literal["watch.failing", "watch.paused", "watch.recovered"]
+# The events a watch tells its gem of itself: it starts failing, the fuse pauses it, a
+# failing watch works again, or the user removes it from the app.
+type _Change = Literal["watch.failing", "watch.paused", "watch.recovered", "watch.ended"]
 
 # Told the gem's id and the watch's id of each watch added, removed, or whose state
 # changes. It may raise: that is not passed on.
@@ -436,8 +441,14 @@ class WatchEntityClass:
             raise NotFoundError("Watch")
         return found
 
-    async def remove(self, gem_id: ObjectId, watch_id: str, *, by: RemovedBy) -> None:
-        """Remove one of the gem's watches: it stops at once."""
+    async def remove(
+        self, gem_id: ObjectId, watch_id: str, *, by: RemovedBy, tell_gem: bool = False
+    ) -> None:
+        """Remove one of the gem's watches: it stops at once.
+
+        With `tell_gem`, as when the user removes it from the app, the gem is told
+        `watch.ended`, without waiting: the removal stands even if it cannot be told.
+        """
         watch = await self.get(gem_id, watch_id)
         if await self._docdb.delete(Watch, {"id": watch.id}) == 0:
             raise NotFoundError("Watch")
@@ -446,6 +457,8 @@ class WatchEntityClass:
         self._recent.pop(str(watch.id), None)
         await self._note(gem_id, "watch.removed", {"watch": str(watch.id), "by": by})
         self._tell(watch)
+        if tell_gem:
+            self._tell_gem_of(watch, "watch.ended", _ENDED)
 
     async def end_for(self, gem_id: ObjectId) -> None:
         """Remove every watch of the gem, as when it is reset: they all stop at once."""
@@ -845,13 +858,7 @@ class WatchEntityClass:
         self._log.note(gem_id, kind, None, data)
 
     def _tell_gem(self, before: Watch, after: Watch) -> None:
-        """Tell the gem, without waiting, if its watch has started failing, been paused,
-        or works again: an event of the watch's own, handed to the sink like any other.
-
-        Its id is the change's own, so a later break of the same watch is not taken for
-        this one. It goes around `_deliver`: it is not counted, and the fuse and a paused
-        watch do not stop it.
-        """
+        """Tell the gem if its watch has started failing, been paused, or works again."""
         name: _Change
         if before.state == after.state:
             return
@@ -863,14 +870,24 @@ class WatchEntityClass:
             name = "watch.recovered"
         else:
             return
+        self._tell_gem_of(after, name, after.reason or "")
+
+    def _tell_gem_of(self, watch: Watch, name: _Change, words: str) -> None:
+        """Tell the gem, without waiting, this change of its watch: an event of the watch's
+        own, handed to the sink like any other.
+
+        Its id is the change's own, so a later break of the same watch is not taken for
+        this one. It goes around `_deliver`: it is not counted, and the fuse and a paused
+        watch do not stop it.
+        """
         at = self._now()
         event = GemEvent(
-            gem_id=after.gem_id,
-            watch_id=str(after.id),
-            source=after.source,
+            gem_id=watch.gem_id,
+            watch_id=str(watch.id),
+            source=watch.source,
             name=name,
-            about=after.about,
-            data=_cut(after.reason or ""),
+            about=watch.about,
+            data=_cut(words),
             at=at,
             event_id=f"{name}:{at.isoformat()}",
         )

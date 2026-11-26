@@ -90,8 +90,8 @@ class _Clock:
             await asyncio.sleep(0)
 
 
-# What a watch tells its gem of itself, when its state changes.
-_CHANGES = ("watch.failing", "watch.paused", "watch.recovered")
+# What a watch tells its gem of itself, when its state changes or the user removes it.
+_CHANGES = ("watch.failing", "watch.paused", "watch.recovered", "watch.ended")
 
 
 class _Sink:
@@ -1297,11 +1297,73 @@ async def test_the_user_removes_a_watch_and_it_stops(
     assert [d["_id"] for d in setup.stored()] == [theirs.id]
     assert ("watch.removed", {"watch": str(made.id), "by": "user"}) in await setup.logged(setup.one)
     await setup.clock.advance(minutes=5)
-    assert [event.watch_id for event in setup.sink.events] == [str(theirs.id)]
+    assert [event.watch_id for event in setup.sink.caught] == [str(theirs.id)]
     # Another gem's watch, one that is gone, and one that never was are not found.
     for gem, watch in [(setup.one.id, theirs.id), (setup.one.id, made.id), (setup.one.id, "x")]:
         answer = await routes.delete(f"/v1/gems/{gem}/watches/{watch}")
         assert answer.status_code == 404
+
+
+async def test_the_user_removing_a_watch_tells_its_gem_once(
+    setup: _Setup, routes: httpx.AsyncClient
+) -> None:
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    await setup.clock.advance(seconds=30)
+
+    answer = await routes.delete(f"/v1/gems/{setup.one.id}/watches/{made.id}")
+    await _until(lambda: len(setup.sink.events) == 1)
+
+    assert answer.status_code == 204
+    assert setup.sink.events == [
+        GemEvent(
+            gem_id=setup.one.id,
+            watch_id=str(made.id),
+            source="mcp",
+            name="watch.ended",
+            about="Triage new issues.",
+            data="The user removed this watch.",
+            at=_START + timedelta(seconds=30),
+            event_id=f"watch.ended:{(_START + timedelta(seconds=30)).isoformat()}",
+        )
+    ]
+    # It is not an event the watch brought.
+    assert setup.sink.caught == []
+
+
+async def test_only_the_app_s_removal_tells_the_gem(
+    setup: _Setup, routes: httpx.AsyncClient
+) -> None:
+    unwatched = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    await setup.watches.add_timer(setup.one.id, "Check the post.", 5)
+    await setup.watches.add_timer(setup.two.id, "Check the news.", 5)
+
+    # The gem removes one itself, a reset ends the rest, and the other gem is deleted.
+    assert (await _call(setup, "unwatch", id=str(unwatched.id)))[1] is False
+    await setup.watches.end_for(setup.one.id)
+    await setup.gems.delete(str(setup.two.id))
+    await _until(lambda: setup.stored() == [])
+    # Then the user removes one from the app. What the gem is told is handed over in the
+    # order it is told, so anything told before would be in the sink first.
+    made = await setup.watches.add_timer(setup.one.id, "Check the weather.", 5)
+    assert (await routes.delete(f"/v1/gems/{setup.one.id}/watches/{made.id}")).status_code == 204
+    await _until(lambda: len(setup.sink.events) > 0)
+
+    assert [(event.name, event.watch_id) for event in setup.sink.events] == [
+        ("watch.ended", str(made.id))
+    ]
+
+
+async def test_a_sink_that_cannot_be_told_does_not_stop_the_removal(
+    setup: _Setup, routes: httpx.AsyncClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    made = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    setup.sink.fails = ConnectionError("the database went away")
+
+    answer = await routes.delete(f"/v1/gems/{setup.one.id}/watches/{made.id}")
+
+    assert answer.status_code == 204
+    assert setup.stored() == []
+    await _until(lambda: "could not be told watch.ended" in caplog.text)
 
 
 # ---- the standing socket

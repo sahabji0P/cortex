@@ -52,7 +52,8 @@ class WatchesServiceV1Class:
         return [self._watch_out(watch) for watch in watches]
 
     async def remove_watch(self, gem_id: str, watch_id: str) -> None:
-        await self.watches.remove(await self._gem(gem_id), watch_id, by="user")
+        # The user removes it from the app: the gem is told, so it stops counting on it.
+        await self.watches.remove(await self._gem(gem_id), watch_id, by="user", tell_gem=True)
 
 
 # Cached, so every request gets the one service.

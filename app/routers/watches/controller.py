@@ -17,6 +17,9 @@ async def list_watches(
 
 @router.delete("/{gem_id}/watches/{watch_id}", status_code=204)
 async def remove_watch(gem_id: str, watch_id: str, service: WatchesServiceRegistry.V1) -> Response:
-    """Remove one of the gem's watches: it stops at once, and the gem's log says the user did."""
+    """Remove one of the gem's watches: it stops at once, and the gem's log says the user did.
+
+    The gem is told too (`watch.ended`), so it stops counting on it.
+    """
     await service.remove_watch(gem_id, watch_id)
     return Response(status_code=204)
