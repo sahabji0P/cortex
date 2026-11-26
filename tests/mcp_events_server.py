@@ -44,7 +44,7 @@ from pydantic import ConfigDict
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-__all__ = ["EVENTS", "EventsServer", "Posted", "Running", "running", "sign"]
+__all__ = ["EVENTS", "KINDS", "EventsServer", "Posted", "Running", "running", "sign"]
 
 EVENTS = "io.modelcontextprotocol/events"
 _SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId"
@@ -56,7 +56,7 @@ _FORBIDDEN = -32024
 _UNSUPPORTED = -32026
 
 # The kinds of event served: an issue opened in a repo, and a build that ended.
-_KINDS: list[dict[str, Any]] = [
+KINDS: list[dict[str, Any]] = [
     {
         "name": "issue.opened",
         "description": "Fires when an issue is opened in a repo",
@@ -131,7 +131,10 @@ class EventsServer:
         heartbeat_ms: int = 30_000,
         next_poll_ms: int = 1_000,
         max_ttl_ms: int = 3_600_000,
+        kinds: list[dict[str, Any]] | None = None,
     ) -> None:
+        # The kinds of event it lists and serves.
+        self.kinds = KINDS if kinds is None else kinds
         self.allow_http = allow_http
         self.token = token
         self.heartbeat_ms = heartbeat_ms
@@ -214,7 +217,7 @@ class EventsServer:
     # ---- the methods
 
     def list_events(self) -> dict[str, Any]:
-        return {"resultType": "complete", "events": _KINDS}
+        return {"resultType": "complete", "events": self.kinds}
 
     def poll(self, params: dict[str, Any]) -> dict[str, Any]:
         name = self._kind(params, "poll")
@@ -326,7 +329,7 @@ class EventsServer:
 
     def _kind(self, params: dict[str, Any], delivery: str) -> str:
         name = params.get("name")
-        kind = next((kind for kind in _KINDS if kind["name"] == name), None)
+        kind = next((kind for kind in self.kinds if kind["name"] == name), None)
         if kind is None:
             raise MCPError(_NOT_FOUND, f"no event called {name}", {"kind": "event"})
         if delivery not in kind["delivery"]:
