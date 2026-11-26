@@ -11,7 +11,18 @@ from typing import Any, cast
 
 from app.entities.pending_events import PendingEvent, pending
 from tests.test_chat import _said
-from tests.test_one_conversation import _Client, _gem_said, _user, _World, _world
+from tests.test_one_conversation import (
+    _CALLED,
+    _ENDED,
+    _Client,
+    _gem_said,
+    _hang_up,
+    _spoken,
+    _user,
+    _World,
+    _world,
+)
+from tests.test_voice_conversation import _delta, _read_until
 from tests.time_lines import TIME_LINE
 
 
@@ -261,3 +272,97 @@ async def test_an_event_that_could_not_be_told_waits_in_the_log_for_the_next_mes
     await world.write("hi")
     assert _requests(world)[0]["input"] == [_event("push"), TIME_LINE, _user("hi")]
     await _quiet(world)
+
+
+# ---- in a call
+
+
+async def test_an_event_in_a_call_waits_for_the_user_and_goes_in_ahead_of_their_words() -> None:
+    world = await _world(_spoken("Noted. Hello."))
+    call, f, keeping = await world.call()
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+
+    # The user is speaking: the event does not cut in, it waits for their turn to end.
+    await _came_in(world, "push")
+    f.stt.turn_end("hello")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await _hang_up(call, keeping)
+
+    assert [request["input"] for request in _requests(world)] == [
+        [_CALLED, TIME_LINE, _event("push"), _user("hello")]
+    ]
+    assert await world.stored() == [
+        _CALLED,
+        TIME_LINE,
+        _event("push"),
+        _user("hello"),
+        _gem_said("Noted. Hello."),
+    ]
+    log = await _log(world)
+    assert [e["by"] for e in log if e["kind"] == "turn.opened"] == ["user"]
+    received = next(e for e in log if e["kind"] == "event.received")
+    assert (received["turn"], received["mode"]) == (1, "call")
+
+
+async def test_a_reply_about_an_event_that_a_noise_cuts_unheard_is_made_again() -> None:
+    never = asyncio.Event()
+    world = await _world([_delta("New commits"), never], _spoken("New commits are in."))
+    call, f, keeping = await world.call()
+
+    await _came_in(world, "push")
+    await _read_until(f.conversation, "assistant.word")
+    f.stt.say("")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await _hang_up(call, keeping)
+
+    # Nothing of it was heard: it is asked for again, and again by the event.
+    assert _requests(world)[1]["input"] == _requests(world)[0]["input"]
+    opened = [e for e in await _log(world) if e["kind"] == "turn.opened"]
+    assert [e["by"] for e in opened] == ["event", "event"]
+
+
+async def test_a_quiet_call_is_woken_by_an_event() -> None:
+    world = await _world(_spoken("New commits are in."))
+    call, f, keeping = await world.call()
+
+    await _came_in(world, "push")
+    await _read_until(f.conversation, "assistant.done")
+    f.clock.advance(60)
+    await _hang_up(call, keeping)
+
+    assert [request["input"] for request in _requests(world)] == [
+        [_CALLED, TIME_LINE, _event("push")]
+    ]
+    assert await world.stored() == [
+        _CALLED,
+        TIME_LINE,
+        _event("push"),
+        _gem_said("New commits are in."),
+    ]
+    opened = [e for e in await _log(world) if e["kind"] == "turn.opened"]
+    assert [(e["by"], e["mode"]) for e in opened] == [("event", "call")]
+
+
+async def test_events_waiting_when_a_call_ends_are_told_in_writing_after_it() -> None:
+    world = await _world(_said("New commits are in."))
+    call, f, keeping = await world.call()
+    f.stt.turn_start()
+    await _read_until(f.conversation, "interrupt")
+    await _came_in(world, "push")
+
+    await _hang_up(call, keeping)
+    await _quiet(world)
+
+    # After the line that says the call ended, as anything told in writing after a call.
+    assert _requests(world)[-1]["input"] == [_CALLED, TIME_LINE, _ENDED, _event("push")]
+    assert await world.stored() == [
+        _CALLED,
+        TIME_LINE,
+        _ENDED,
+        _event("push"),
+        _gem_said("New commits are in."),
+    ]
+    assert await world.modes() == ["call", "call", "chat", "chat", "chat"]
