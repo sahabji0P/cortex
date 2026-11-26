@@ -2,10 +2,12 @@
 What joins a gem's history, by the same rules in a call and in writing.
 
 Everything is added to the history once it is final, and nothing in the history is
-changed afterwards. What the user says is final when they have said it, so it is added
-then, as an item of its own (`said`). If no reply has got through to it when they speak
-again (the reply was cut before it left anything, or it failed), what they say next is
-one more user item after it, and the next reply answers both. In a call, speech
+changed afterwards. (At a cold start, old long tool results are sent expired, and stay
+stored as they were: see `cold_start.py`.) What the user says is final when they have
+said it, so it is added then, as an item of its own (`said`). If no reply has got
+through to it when they speak again (the reply was cut before it left anything, or it
+failed), what they say next is one more user item after it, and the next reply answers
+both. In a call, speech
 recognition often splits one sentence in two: the two halves are then two items in a
 row, and the model reads them together.
 

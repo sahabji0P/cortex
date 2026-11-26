@@ -12,6 +12,7 @@ from bson import ObjectId
 
 from app.entities import voice_ent
 from app.entities.call_ent import CallEntityClass, CallRefused
+from app.entities.cold_start import Cache
 from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import DEFAULT_GEM_INSTRUCTIONS, GemConfig
@@ -379,6 +380,9 @@ class _NothingStored:
 
     async def load(self, gem_id: object) -> list[object]:
         return []
+
+    async def cache(self, gem_id: object) -> Cache:
+        return Cache()
 
     async def last(self, gem_id: object, kind: str | None = None) -> None:
         return None

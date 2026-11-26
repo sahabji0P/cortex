@@ -403,6 +403,7 @@ Every other kind is something that happened. No model is ever sent them.
 | `call.opened`, `call.closed` | none | A call began, or ended. No turn. Writing has neither |
 | `gem.reset` | none | The user reset the gem (see [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset)). No turn. The gem knows nothing from before it: its conversation is the remembered entries after the latest one |
 | `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) or `background_result` (results of calls that went on in the background are to be told, with nothing new from the user). `mode` is `call` or `chat` |
+| `cache.cold` | `reason`, `before` | The conversation starts cold: from here on, long tool results before `before` are sent expired (see [A cold start](#a-cold-start)). `reason` is `quiet` (the provider's cache is taken to have gone) or `settings` (the model, the instructions or the tools changed). `before` is the `seq` of the last `request.sent` before it. No turn. Written just after the `settings.changed` it follows, if any: in writing before the reply's `turn.opened`, in a call before the call's first line |
 | `settings.changed` | any of `model`, `instructions`, `tools` | What the gem's requests are made with differs from what was last written down. Only the parts that changed are there, each in full (see below). Written before what it applies to: in writing, before the reply's `turn.opened`; in a call, just after `call.opened`, before the call's first line. Then it has no turn, and holds from there on. A change found later, at a request, has that request's turn (see below) |
 | `request.sent` | `request`, `attempt`, `think`, `count` | A request went to the model. `request` is its number for this gem. `attempt` is always 1 for now: a request the provider's library tries again by itself is not seen. `think` is whether the model was asked to think first. `count` is how many items it was sent (see below) |
 | `request.done` | `request`, `attempt`, `outcome`, `text`, `calls`, `first_token_at`, `usage`, `cost_usd`, `priced`, `error` | How that request ended (see below) |
@@ -414,11 +415,40 @@ Every other kind is something that happened. No model is ever sent them.
 **What a request was sent.** A request was sent every remembered entry before it in the
 log since the latest `gem.reset` before it, in order of `seq`, and nothing else:
 everything the gem remembers is added before the request that carries it. `count` is
-how many items that was. So to show what request N was sent, take the remembered
-entries between that reset (or the start) and its `request.sent`, or ask
-`GET /v1/gems/{gem_id}/log/{seq}/sent`. If they do not come to `count`, an entry before
-it was lost. Besides its items, a request is sent the instructions and the tools
-of the latest `settings.changed` before it.
+how many items that was. Each is sent as stored, except that a long tool result before
+the `before` of the latest `cache.cold` since that reset is sent expired (see
+[A cold start](#a-cold-start)). So to show what request N was sent, ask
+`GET /v1/gems/{gem_id}/log/{seq}/sent`, or take the remembered entries between that
+reset (or the start) and its `request.sent` and expire them so. If they do not come to
+`count`, an entry before it was lost. Besides its items, a request is sent the
+instructions and the tools of the latest `settings.changed` before it.
+
+### A cold start
+
+A gem's conversation only grows, and every request within a sitting starts with the
+whole of the one before it, so the provider's prompt cache holds. When the cache has
+gone, everything is sent at full price anyway: that is a cold start, and
+from then on, old tool results are sent expired instead of whole. Nothing stored
+changes: only what the model is sent.
+
+It is checked once for each reply in writing, and once when a call starts, never during
+a call. It is a cold start if the gem has had a `request.sent` since its latest
+`gem.reset`, and either the last one was sent longer ago than its provider keeps a
+cache (`quiet`: see [how long](models.md#caching)), or the model (`via` too), the
+instructions or the tools changed (`settings`). It is then written down as `cache.cold`,
+which, like what the gem remembers, must be stored: a reply whose cold start cannot be
+stored ends in `chat.error`, and a call in `call.failed`.
+
+From the latest `cache.cold` since the latest reset, a `tool.result` whose `seq` is below
+its `before` is sent with its `output` replaced by one fixed line (its words are in
+[the spec](voice-spec.md#what-the-server-writes-into-the-history)), and nothing else of
+it or of any other item changes.
+
+Never expired: the result of a `tool_search` (it loads deferred tools), a result with a
+`mark` or a `delivers`, and a result shorter than 1500 characters. `before` is the last
+request sent, not the cold start itself: whatever was stored after that request (a late
+result, or the stub that closes a lost call) has never been sent, and goes whole. Each
+cold start moves the line on, so what was expired stays expired.
 
 **How a request ended.** `outcome` is `done`, `failed` (with `error`), or `cut`: the
 reply was cut off while the model was still producing. `text` is all the model produced,
@@ -559,9 +589,9 @@ differ in what a failed write means:
 
 - **What happened** may be lost: a write that fails drops it, and fails nothing. If the
   backend stops, the last moment of it can be lost too.
-- **What the gem remembers** is held and written again, in order: nothing remembered is
-  stored ahead of something remembered before it, and a tool call is never stored
-  without its result. A reply's last frame, and the end of a call, wait until it is stored. While it
+- **What the gem remembers**, and a `cache.cold`, are held and written again, in order:
+  nothing remembered is stored ahead of something remembered before it, and a tool call
+  is never stored without its result. A reply's last frame, and the end of a call, wait until it is stored. While it
   cannot be, the call ends in `call.failed` ("the conversation could not be stored") or
   the reply in `chat.error` ("the reply could not be stored: …"), and what could not be
   stored is dropped. It is never stored later.
@@ -589,7 +619,9 @@ One entry, in full. A 404 if the gem or the entry is not there.
 
 Everything the request written down as entry `seq` (a `request.sent`) was sent, read
 from the log by the backend: the `item` of every remembered entry before it since the
-latest reset, in order, and the settings in force.
+latest reset, in order, as sent (tool results before the line of the latest
+`cache.cold` before it are expired, see [A cold start](#a-cold-start)), and the settings
+in force.
 
 ```json
 {

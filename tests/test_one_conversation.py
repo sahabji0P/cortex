@@ -8,7 +8,7 @@ turn allowed to gain a line.
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -104,6 +104,7 @@ class _Line:
         *,
         darbar: str | None = None,
         history: Sequence[Item] = (),
+        sent: Callable[[bool], Sequence[Item]] | None = None,
         last_mode: Mode = "chat",
         late: LateResults | None = None,
         connected: Sequence[Tool] = (),
@@ -121,6 +122,7 @@ class _Line:
             darbar=darbar,
             speaks_first=self._speaks_first,
             history=history,
+            sent=sent,
             last_mode=last_mode,
             late=late,
             connected=connected,

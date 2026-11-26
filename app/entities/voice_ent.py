@@ -50,7 +50,7 @@ import contextlib
 import re
 import time
 import unicodedata
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -177,6 +177,7 @@ class VoiceConversation:
         model: ModelName = "6 Luna",
         speaks_first: bool = False,
         history: Sequence[Item] = (),
+        sent: Callable[[bool], Sequence[Item]] | None = None,
         last_mode: Mode = "chat",
         late: LateResults | None = None,
         connected: Sequence[Tool] = (),
@@ -194,7 +195,9 @@ class VoiceConversation:
         # it calls `results_came` when a result comes in while the call is open. Left
         # out, the conversation holds its own, and stops its calls when it closes.
         # `connected` are the tools of the connections the gem may use, as they were when
-        # the call opened.
+        # the call opened. `sent`, if given, is asked once the conversation is described,
+        # with whether anything changed, and gives the history as the model is to be
+        # sent it (see `cold_start.py`). Left out, it is sent `history` as it is.
         self._stt = stt
         self._tts = tts
         self._clock = clock
@@ -248,12 +251,15 @@ class VoiceConversation:
         # Said once, before the call's opening line is added: what differs from what was
         # last written down is written now, ahead of anything the call remembers. Only
         # the way to the provider can change while the call is open.
-        self._record.describe(
+        changed = self._record.describe(
             model=model,
             via=lambda: getattr(llm, "via", "api"),
             layers=layers,
             tools=self._tools.tools,
         )
+        if sent is not None:
+            # Checked here, once: the call is sent its history so from start to end.
+            self._history = list(sent(changed))
         # The task producing a reply, while one is being produced.
         self._producing: asyncio.Task[None] | None = None
         # The turn opened in the log for a reply whose task has not begun yet.
@@ -659,6 +665,7 @@ class VoiceLine:
         *,
         darbar: str | None = None,
         history: Sequence[Item] = (),
+        sent: Callable[[bool], Sequence[Item]] | None = None,
         last_mode: Mode = "chat",
         late: LateResults | None = None,
         connected: Sequence[Tool] = (),
@@ -668,7 +675,7 @@ class VoiceLine:
         """Start listening. The conversation owns the line from here, and the caller owns it.
 
         `darbar` is the Darbar text the gem is told first, or None for the built-in one;
-        it is kept for the whole conversation. `history`, `last_mode`, `late`,
+        it is kept for the whole conversation. `history`, `sent`, `last_mode`, `late`,
         `connected`, `record` and `time_told` are as `VoiceConversation` takes them.
         """
         self._opened = True
@@ -682,6 +689,7 @@ class VoiceLine:
             model=self._model,
             speaks_first=self._speaks_first,
             history=history,
+            sent=sent,
             last_mode=last_mode,
             late=late,
             connected=connected,

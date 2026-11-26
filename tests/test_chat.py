@@ -105,6 +105,8 @@ class _DocDB:
         self.slow: Any = None
         # When set, a write of several documents stops after this many, and fails.
         self.breaks_after: int | None = None
+        # When set, a write that holds a log entry of this kind fails, writing nothing.
+        self.breaks_on_kind: str | None = None
 
     def _all(self, collection: type[BaseModel]) -> list[dict[str, Any]]:
         return self.collections.setdefault(_name(collection), [])
@@ -166,6 +168,10 @@ class _DocDB:
         if self.slow is not None:
             await self.slow.wait()
         documents = self._all(type(data[0]))
+        if self.breaks_on_kind is not None and any(
+            isinstance(item, LogEntry) and item.kind == self.breaks_on_kind for item in data
+        ):
+            raise ConnectionError("the database went away")
         for written, item in enumerate(data):
             if self.breaks_after is not None and written == self.breaks_after:
                 raise ConnectionError("the database went away part-way")
@@ -298,7 +304,8 @@ class _LLM:
     request starts with the whole of the one before it for the same conversation (told
     apart by its first message after the line that gives the time, which every one
     starts with), which is the rule the history keeps: the one thing that may change is
-    the user's open turn, the last item, which can gain a line.
+    the user's open turn, the last item, which can gain a line. A test that expects the
+    next request to start cold says so (`starts_cold`): results may then be expired.
     """
 
     configured = True
@@ -306,15 +313,21 @@ class _LLM:
     def __init__(self, *rounds: list[Any]) -> None:
         self._rounds = list(rounds)
         self.requests: list[dict[str, Any]] = []
+        self._cold = False
 
     def then(self, *rounds: list[Any]) -> None:
         self._rounds.extend(rounds)
+
+    def starts_cold(self) -> None:
+        """The next request may send results of the one before it expired, and only it."""
+        self._cold = True
 
     async def stream_response(self, **request: Any) -> Any:
         sent = [dict(item) for item in request["input"]]
         same = [r for r in self.requests if _first(r["input"]) == _first(sent)]
         if same:
-            _assert_only_grew(same[-1]["input"], sent)
+            _assert_only_grew(same[-1]["input"], sent, cold=self._cold)
+        self._cold = False
         self.requests.append({**request, "input": sent})
         script = self._rounds.pop(0)
 

@@ -29,9 +29,15 @@ unless it says otherwise:
                      with, before its turn and anything it remembers, in no turn. A
                      change found later (the way to the provider) is written just
                      before the request it applies to, in that request's turn.
+- `cache.cold`       the conversation starts cold (see `cold_start.py`): `reason` is
+                     `quiet` or `settings`, and `before` the number of the last request
+                     sent. From here on, long tool results before `before` are sent
+                     expired. Written after `settings.changed`, in no turn. Like what
+                     the gem remembers, it must be stored: what is sent depends on it.
 - `request.sent`     a request went to the model. It was sent everything the gem
                      remembered by then: every remembered entry before this one since
-                     the last reset, and nothing else. `count` is how many that is.
+                     the last reset, and nothing else, as the latest `cache.cold` before
+                     it has them sent. `count` is how many that is.
 - `request.done`     how the request ended: `done`, `failed`, or `cut` while the model
                      was still producing. Everything the model produced, in full: its
                      text and its tool calls. When the first of it came, the tokens
@@ -89,7 +95,7 @@ entry differ in what a failed write means:
 - What the gem remembers is kept and tried again, in order, and `stored` raises while it
   is not stored. Nothing remembered is ever stored ahead of something remembered before
   it, so what is stored of a conversation is always a start of it, and a tool call is
-  never stored without its result.
+  never stored without its result. A `cache.cold` is kept the same way (`MUST_STORE`).
 """
 
 import asyncio
@@ -104,7 +110,9 @@ from typing import Any, Literal
 
 from bson import ObjectId
 
+from app.entities.cold_start import Reason
 from app.entities.conversation_store import (
+    COLD,
     REMEMBERED,
     RESET,
     ConversationStoreClass,
@@ -115,13 +123,17 @@ from app.entities.conversation_store import (
 from app.entities.history import Added, Mode
 from app.entities.instructions import Layer
 from app.entities.loop import ToolCall
-from app.entities.model import MODELS, Item, ModelCall, ModelName, Usage
+from app.entities.model import MODELS, Item, ModelCall, ModelName, Provider, Usage
 from app.entities.prices import PRICED, cost
 from app.entities.tools import Tool
 
 __all__ = ["Listener", "LogEntityClass", "Recording", "RequestRecord", "TurnRecord"]
 
 logger = logging.getLogger(__name__)
+
+# The kinds of entry that must be stored, and are kept and tried again until they are:
+# what the gem remembers, and a cold start, which decides how it is sent.
+MUST_STORE: tuple[str, ...] = (*REMEMBERED, COLD)
 
 # Is told each entry as it is written down: the gem's id, and the entry as a client is
 # shown it.
@@ -253,6 +265,26 @@ class LogEntityClass:
         (seq,) = self.take(gem_id)
         self._add(remembered(gem_id, seq, added, mode))
 
+    def record_cold(self, gem_id: ObjectId, reason: Reason, before: int) -> None:
+        """Write down that the conversation starts cold, with the line it draws.
+
+        It is kept like what the gem remembers, and in order with it: `stored` raises
+        while it is not stored, and whoever holds the conversation fails for it. Nothing
+        is written of a gem whose log is not open.
+        """
+        if gem_id not in self._gems:
+            return
+        (seq,) = self.take(gem_id)
+        self._add(
+            LogEntry(
+                gem_id=gem_id,
+                kind=COLD,
+                seq=seq,
+                at=datetime.now(UTC),
+                data={"reason": reason, "before": before},
+            )
+        )
+
     async def record_reset(self, gem_id: ObjectId) -> None:
         """Write down that the gem is reset, once it is stored.
 
@@ -302,9 +334,9 @@ class LogEntityClass:
         kept = self._gems.get(gem_id)
         if kept is None:
             return []
-        waiting = [entry for entry in kept.pending if entry.kind in REMEMBERED]
+        waiting = [entry for entry in kept.pending if entry.kind in MUST_STORE]
         dropped = [*kept.unstored, *waiting]
-        kept.pending = [entry for entry in kept.pending if entry.kind not in REMEMBERED]
+        kept.pending = [entry for entry in kept.pending if entry.kind not in MUST_STORE]
         kept.unstored, kept.fault = [], None
         kept.given_up = kept.next - 1
         return dropped
@@ -364,7 +396,7 @@ class LogEntityClass:
                 kept.unstored = [
                     entry
                     for entry in batch
-                    if entry.kind in REMEMBERED and entry.seq > kept.given_up
+                    if entry.kind in MUST_STORE and entry.seq > kept.given_up
                 ]
                 if any(entry.kind == "settings.changed" for entry in batch):
                     # A change that was not written down is not known to the log, so
@@ -413,6 +445,10 @@ class Recording:
         self._gem_id = gem_id
         self.mode: Mode = mode
         self._model: ModelName | None = None
+        # The provider of the model, once the conversation is described.
+        self.provider: Provider | None = None
+        # Whether the conversation started cold (`cold`).
+        self.started_cold = False
         self._settings: Callable[[], dict[str, Any]] | None = None
 
     def describe(
@@ -422,14 +458,15 @@ class Recording:
         via: Callable[[], str],
         layers: Sequence[Layer],
         tools: Sequence[Tool],
-    ) -> None:
+    ) -> bool:
         """Say what the conversation's requests are made with, and write down what changed.
 
         `via` is asked again at every request: the way to a provider can change while a
-        call is open. The rest is fixed for the conversation.
+        call is open. The rest is fixed for the conversation. Returns whether anything
+        differs from what was last written down: the conversation then starts cold.
         """
         self._model = model
-        provider = next(info.provider for info in MODELS if info.name == model)
+        provider = self.provider = next(info.provider for info in MODELS if info.name == model)
         instructions = [{"name": layer.name, "text": layer.text} for layer in layers]
         told = [
             {
@@ -455,15 +492,26 @@ class Recording:
         # The instructions and the tools are the first thing a model is sent, so a change
         # of them is written down first too: before the turn, and before anything of the
         # conversation is remembered. It belongs to no turn, and holds from here on.
-        self._changes(None)
+        return self._changes(None)
 
-    def _changes(self, turn: int | None) -> None:
-        """Write down what the requests are made with now, if it differs from the last."""
+    def _changes(self, turn: int | None) -> bool:
+        """Write down what the requests are made with now, if it differs from the last.
+
+        Returns whether it did.
+        """
         with contextlib.suppress(Exception):
             if self._log is not None and self._gem_id is not None and self._settings is not None:
                 changed = self._log.settings_changed(self._gem_id, self._settings())
                 if changed:
                     self.note("settings.changed", turn, changed)
+                    return True
+        return False
+
+    def cold(self, reason: Reason, before: int) -> None:
+        """The conversation starts cold: results before `before` are sent expired from here on."""
+        self.started_cold = True
+        if self._log is not None and self._gem_id is not None:
+            self._log.record_cold(self._gem_id, reason, before)
 
     def call_opened(self) -> None:
         self.note("call.opened", None, {})

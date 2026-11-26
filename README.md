@@ -57,6 +57,8 @@ Three rules hold for what a gem remembers, in a call and in writing:
    model generated. A cut reply is kept as far as it got, ending in "…".
 2. **Every tool call keeps a valid result**, even when the reply that made it is cut.
 3. **Nothing the model was sent is changed afterwards**, so a prompt cache stays valid.
+   Only once the cache is gone anyway (a cold start) are old long tool results sent
+   expired; what is stored never changes.
 
 [Architecture](docs/architecture.md) explains these in full.
 

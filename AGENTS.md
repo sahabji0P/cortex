@@ -83,7 +83,8 @@ What that means in practice:
   entry there, written through `gem_log.py`, and never a store of its own. Adding a
   kind, or a field of one, is a change to the contract. Writing what happened never
   holds a reply up and never fails one. What the gem remembers must be stored: a reply
-  or a call that cannot store it fails. Nothing in the log but what the gem remembers
+  or a call that cannot store it fails. So must a `cache.cold`, which decides what the
+  model is sent. Nothing in the log but what the gem remembers
   is ever sent to a model.
 - **Cost comes from the log.** No provider reports a cost, so the backend works it out
   from the tokens and its own price table (`app/entities/prices.py`), which is kept by

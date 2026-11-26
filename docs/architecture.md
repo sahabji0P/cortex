@@ -54,6 +54,7 @@ config ← core ← adapters ← entities ← routers ← main
 | `conversation_store.py` | each gem's log in the database (`GemLog`) |
 | `history.py` | the rules for what joins a history and when: the user's words, the lines where the mode changes, what is kept beside an item |
 | `late_results.py` | tool calls that outlive their reply, held until their results are told: one copy for a call and for chat |
+| `cold_start.py` | when a conversation starts cold, and the items as they are sent from then on, with old long tool results expired |
 | `gem_log.py` | everything that happens with a gem, numbered and written down as it happens |
 | `model.py` | either provider's model behind one interface, and the list of models |
 | `prices.py` | what a model request cost, from its tokens |
@@ -123,10 +124,11 @@ loses nothing: a socket that closes cuts its replies, and they are stored as cut
 - **Calls lost to a restart.** Background calls run in the process's memory, so a
   restart loses them. Before the next reply, written or in a call, each one lost is
   closed with a stub call and a result saying it was lost and will not arrive.
-- **The whole conversation is sent every time.** Nothing is trimmed or summed up, and
-  old results are not cleared. The context grows with every message, and quickly when
-  tools are used. A message is at most 20,000 characters, so one stray paste cannot ride
-  along in every request after it.
+- **The whole conversation is sent every time.** Nothing is trimmed or summed up. The
+  context grows with every message, and quickly when tools are used. A message is at
+  most 20,000 characters, so one stray paste cannot ride along in every request after
+  it. The one thing sent other than as stored: after a cold start (rule 3 below), old
+  long tool results are sent expired.
 - **The user can reset the gem.** It then starts again, knowing nothing from before.
   A reset takes the gem as a reply does: one being written is cut first, a message sent
   meanwhile waits and is answered after the reset, and a call refuses it. Background
@@ -168,7 +170,16 @@ writing.
    starts with the whole of the one before it. The instructions and the tool list stay
    the same, so a prompt cache stays valid. One consequence: what the model said before
    a tool call is kept whole once it is sent back with the result, even if the user cut
-   it off part-way.
+   it off part-way. **One exception: a cold start.** Once the provider's cache has
+   gone (the gem was quiet longer than the cache lasts, or its model,
+   instructions or tools changed), everything is sent at full price anyway. So then, and
+   only then, long tool results that were sent before are sent expired: a fixed line in
+   place of their output. Some results are never expired
+   ([which](chat-contract.md#a-cold-start)). What is stored never changes, and from
+   that request on each request again starts with the whole of the one before. It is
+   checked for each reply in writing and once when a call starts, and written down as
+   `cache.cold` ([`cold_start.py`](../app/entities/cold_start.py), and
+   [the contract](chat-contract.md#a-cold-start)).
 
 **What the user says is stored as it was said, as a message of its own.** Words said, or
 a message sent, before a reply to the one before has got through are one more user

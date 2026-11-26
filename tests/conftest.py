@@ -1,10 +1,11 @@
 """What every test checks without asking: a request is sent what its gem remembers.
 
 The gem's log holds nothing of what a request was sent. It is read back as every entry
-the gem remembered before the request, since the gem was last reset (see
-`gem_log.py`). That is only true while a conversation hands each thing to the log before
-the request that carries it, so every request made in every test is checked against what
-its gem remembers at that moment.
+the gem remembered before the request, since the gem was last reset, as the latest cold
+start before it has them sent (see `gem_log.py` and `cold_start.py`). That is only true
+while a conversation hands each thing to the log before the request that carries it, so
+every request made in every test is checked against what its gem remembers at that
+moment, sent so.
 """
 
 from collections.abc import Iterator, Sequence
@@ -13,7 +14,8 @@ from typing import Any
 import pytest
 from bson import ObjectId
 
-from app.entities.conversation_store import REMEMBERED, RESET, LogEntry
+from app.entities.cold_start import Numbered, Reason, as_sent
+from app.entities.conversation_store import COLD, REMEMBERED, RESET, LogEntry
 from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, Mode
 from app.entities.model import Item
@@ -23,23 +25,37 @@ from app.entities.model import Item
 def every_request_is_sent_what_its_gem_remembers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # What each gem was handed to remember through each log, by its number, less what
     # was given up. It is in the database or on its way there.
-    handed: dict[tuple[int, ObjectId], dict[int, Item]] = {}
+    handed: dict[tuple[int, ObjectId], dict[int, Numbered]] = {}
+    # Likewise the cold starts each gem's log was handed: their lines, by their numbers.
+    colds: dict[tuple[int, ObjectId], dict[int, int]] = {}
     differed: list[tuple[list[Item], list[Item]]] = []
     remember, give_up, request = LogEntityClass.remember, LogEntityClass.give_up, Recording.request
+    record_cold = LogEntityClass.record_cold
 
     def remembering(self: LogEntityClass, gem_id: ObjectId, added: Added, mode: Mode) -> None:
         remember(self, gem_id, added, mode)
         if gem_id in self._gems:
-            handed.setdefault((id(self), gem_id), {})[self._gems[gem_id].next - 1] = added.item
+            seq = self._gems[gem_id].next - 1
+            numbered = Numbered(seq, added.item, added.mark, added.delivers)
+            handed.setdefault((id(self), gem_id), {})[seq] = numbered
+
+    def recording_cold(self: LogEntityClass, gem_id: ObjectId, reason: Reason, before: int) -> None:
+        record_cold(self, gem_id, reason, before)
+        if gem_id in self._gems:
+            colds.setdefault((id(self), gem_id), {})[self._gems[gem_id].next - 1] = before
 
     def giving_up(self: LogEntityClass, gem_id: ObjectId) -> list[LogEntry]:
         dropped = give_up(self, gem_id)
         for entry in dropped:
             handed.get((id(self), gem_id), {}).pop(entry.seq, None)
+            colds.get((id(self), gem_id), {}).pop(entry.seq, None)
         return dropped
 
     def remembered_now(recording: Recording) -> list[Item] | None:
-        """What the recording's gem remembers at this moment, in order, if it can be told."""
+        """What the recording's gem remembers at this moment, in order and as it is sent.
+
+        None if it cannot be told.
+        """
         log, gem_id = recording._log, recording._gem_id
         if log is None or gem_id is None or gem_id not in log._gems:
             return None  # nothing is written down, or the gem is gone
@@ -48,9 +64,19 @@ def every_request_is_sent_what_its_gem_remembers(monkeypatch: pytest.MonkeyPatch
             return None  # not one of the tests' own stores
         documents = [d for d in collections.get("GemLog", []) if d["gem_id"] == gem_id]
         since = max((d["seq"] for d in documents if d["kind"] == RESET), default=-1)
-        stored = {d["seq"]: d["data"]["item"] for d in documents if d["kind"] in REMEMBERED}
+        stored = {
+            d["seq"]: Numbered(
+                d["seq"], d["data"]["item"], d["data"].get("mark"), d["data"].get("delivers")
+            )
+            for d in documents
+            if d["kind"] in REMEMBERED
+        }
         everything = {**stored, **handed.get((id(log), gem_id), {})}
-        return [item for seq, item in sorted(everything.items()) if seq > since]
+        lines = {d["seq"]: d["data"]["before"] for d in documents if d["kind"] == COLD}
+        lines.update(colds.get((id(log), gem_id), {}))
+        cold = [before for seq, before in sorted(lines.items()) if seq > since]
+        remembered = [numbered for seq, numbered in sorted(everything.items()) if seq > since]
+        return as_sent(remembered, cold[-1] if cold else None)
 
     def requesting(self: Recording, turn: int | None, items: Sequence[Item], think: bool) -> Any:
         remembered = remembered_now(self)
@@ -60,6 +86,7 @@ def every_request_is_sent_what_its_gem_remembers(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(LogEntityClass, "remember", remembering)
     monkeypatch.setattr(LogEntityClass, "give_up", giving_up)
+    monkeypatch.setattr(LogEntityClass, "record_cold", recording_cold)
     monkeypatch.setattr(Recording, "request", requesting)
     yield
     assert not differed, (
