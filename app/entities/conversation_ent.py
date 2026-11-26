@@ -13,10 +13,16 @@ memory, for each gem, is a `GemConversation`:
 - the gem's tool calls that outlived their replies, until their results are told (see
   `late_results.py`): one `LateResults` for the gem, whoever made the call. A result is
   told in the call if one holds the gem, and in writing otherwise.
+- the events that came in for the gem's watches, until they are told (see
+  `pending_events.py`): one `PendingEvents` for the gem. Like a result, an event is told
+  in the call if one holds the gem, and in writing otherwise, and it wakes a gem that is
+  quiet. They are written down in the log as they come, so what waits is read again from
+  it when needed.
 
 The user can reset a gem (`reset`): it starts again, knowing nothing from before. A
 reset takes the gem as a reply does, so a message sent meanwhile is answered by the
-gem as it is after the reset.
+gem as it is after the reset. Events still waiting are dropped with the rest, and
+whoever asked is told of the reset (`when_reset`), as the gem's watches are.
 
 Every reply in writing, and every call when it starts, checks first whether the
 conversation starts cold, and is sent it as the latest cold start has it sent (`sent`,
@@ -45,6 +51,7 @@ from app.entities.history import Added, Mode, stubs
 from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
 from app.entities.model import Item
+from app.entities.pending_events import PendingEvent, PendingEvents, pending
 
 __all__ = [
     "Caller",
@@ -88,7 +95,7 @@ class Caller(Protocol):
     """A call with a gem, which holds the gem from its opening until it is stored."""
 
     def results_came(self) -> None:
-        """A late result has come in, to be told in the call."""
+        """A late result, or an event, has come in, to be told in the call."""
         ...
 
 
@@ -129,7 +136,10 @@ class GemConversation:
         # The gem's calls that outlived their replies, until their results are told. A
         # result that comes in is told in the call that holds the gem, or else by
         # `written`, in writing.
-        self.late = LateResults(self._results_came)
+        self.late = LateResults(self._came)
+        # The events that came in for the gem's watches, until they are told: told, and
+        # the gem woken, in the same way as a late result.
+        self.events = PendingEvents(self._came)
         self._written = written
         # The reply being written to the gem, until it is stored: one at a time.
         self.writer: Writer | None = None
@@ -140,9 +150,9 @@ class GemConversation:
     def idle(self) -> bool:
         """Whether nothing of it needs keeping."""
         held = self.writer is not None or self.call is not None
-        return not held and not self.late.pending
+        return not held and not self.late.pending and not self.events.pending
 
-    def _results_came(self) -> None:
+    def _came(self) -> None:
         if self.call is not None:
             self.call.results_came()
         else:
@@ -164,9 +174,13 @@ class ConversationEntityClass:
         self.log = LogEntityClass(store) if log is None else log
         # A gem that is deleted takes its log with it: nothing more is written of it.
         gems.when_deleted(self.log.drop)
+        # And the events that wait for it, which are in that log.
+        gems.when_deleted(self._forget_events)
         # What is kept of each gem's conversation, by `gem_key`.
         self._kept: dict[str, GemConversation] = {}
         self._quiet: Callable[[str], None] = _nobody
+        # Told the id of each gem that is reset, once the reset is stored.
+        self._resets: list[Callable[[ObjectId], None]] = []
 
     def tell_results_with(self, quiet: Callable[[str], None]) -> None:
         """Who tells a gem's late results: `quiet` is given the gem's key when one comes in.
@@ -174,6 +188,13 @@ class ConversationEntityClass:
         That is chat: it writes the gem a reply about them, once nothing else is.
         """
         self._quiet = quiet
+
+    def when_reset(self, told: Callable[[ObjectId], None]) -> None:
+        """Tell `told` each gem that is reset, once the reset is stored.
+
+        Such as the gem's watches, which end with it: what they were for is forgotten.
+        """
+        self._resets.append(told)
 
     def gem(self, key: str) -> GemConversation:
         """What is kept of a gem's conversation, made if there is none yet."""
@@ -212,7 +233,8 @@ class ConversationEntityClass:
 
         A reply being written is cut and stored first, and calls still running in the
         background are stopped, their results dropped: what they would answer is gone.
-        The log keeps everything: the reset is an entry of its own. Raises
+        Events still waiting are dropped too: the gem knows nothing of them. The log
+        keeps everything: the reset is an entry of its own. Raises
         `NotFoundError` if there is no such gem, `ConflictError` while a call holds it,
         and what stopped the reset if it could not be stored.
         """
@@ -229,10 +251,13 @@ class ConversationEntityClass:
                 previous.cut()
                 await previous.over.wait()
             await self.log.open(found)
-            await self.log.record_reset(found)
+            reset = await self.log.record_reset(found)
             # Only once the reset is stored. A result that comes meanwhile is not told:
-            # the reset holds the gem.
+            # the reset holds the gem. An event that came after the reset is kept.
             kept.late.stop()
+            kept.events.drop_before(reset)
+            for told in self._resets:
+                told(found)
         finally:
             resetting.over.set()
             if kept.writer is resetting:
@@ -274,12 +299,20 @@ class ConversationEntityClass:
         await self.log.open(gem_id)
         # What was added last is on its way to the database: it is waited for.
         await self.log.written(gem_id)
+        kept = self._kept.get(str(gem_id))
+        if kept is not None and kept.events.stale:
+            # Events taken to be told could not be stored: they wait in the log.
+            kept.events.refresh(await self.pending_events(gem_id))
         found = await self._store.load(gem_id)
         mode = found[-1].data.mode if found else "chat"
         last_time = next((e.at for e in reversed(found) if e.data.source == "time-line"), None)
         stored = Stored(_numbered(found), mode, last_time, await self._store.cache(gem_id))
         lost = self._lost(str(gem_id), found, told)
         return await self.add(gem_id, stored, stubs(lost, "lost-call"), stored.mode)
+
+    async def pending_events(self, gem_id: ObjectId) -> list[PendingEvent]:
+        """The events the gem's log says wait to be told, in the order they came."""
+        return [pending(entry) for entry in await self._store.pending_events(gem_id)]
 
     async def add(
         self, gem_id: ObjectId, stored: Stored, added: Sequence[Added], mode: Mode
@@ -458,6 +491,13 @@ class ConversationEntityClass:
             call = calls[call_id]
             lost.append(late_stub(ToolCall(call_id, call["name"], call["arguments"]), _LOST))
         return lost
+
+    def _forget_events(self, gem_id: ObjectId) -> None:
+        """A deleted gem's events go with its log: none is told."""
+        kept = self._kept.get(str(gem_id))
+        if kept is not None:
+            kept.events.take()
+            kept.events.stale = False
 
 
 def _numbered(found: Sequence[Remembered]) -> list[Numbered]:

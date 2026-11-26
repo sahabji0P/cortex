@@ -8,10 +8,13 @@ from datetime import UTC, datetime
 
 from bson import ObjectId
 
-from app.entities.conversation_store import LogEntry
+from app.entities.conversation_ent import ConversationEntityClass
+from app.entities.conversation_store import ConversationStoreClass, LogEntry
+from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_event import GemEvent
 from app.entities.history import event_told
 from app.entities.pending_events import PendingEvent, PendingEvents, came_fields, pending
+from tests.test_chat import _docdb
 
 _AT = datetime(2026, 11, 26, 9, 30, tzinfo=UTC)
 
@@ -132,3 +135,74 @@ def test_a_reset_drops_the_events_that_came_before_it() -> None:
     events.drop_before(5)
 
     assert [event.seq for event in events.take()] == [6]
+
+
+# ---- a gem's events, beside the rest of its conversation
+
+
+async def _gem() -> tuple[ConversationEntityClass, GemEntityClass, ObjectId]:
+    _, adapter = _docdb()
+    gems = GemEntityClass(adapter)
+    conversations = ConversationEntityClass(gems=gems, store=ConversationStoreClass(adapter))
+    made = await gems.create(name="Gem One")
+    await conversations.log.open(made.id)
+    return conversations, gems, made.id
+
+
+async def _came_in(conversations: ConversationEntityClass, gem_id: ObjectId) -> PendingEvent:
+    """An event comes in for the gem, as the sink takes it: written down, then held."""
+    entry = await conversations.log.record_event(gem_id, _came())
+    event = pending(entry)
+    conversations.gem(str(gem_id)).events.add(event)
+    return event
+
+
+async def test_a_gem_with_events_waiting_is_kept_until_they_are_told() -> None:
+    conversations, _, gem_id = await _gem()
+    await _came_in(conversations, gem_id)
+
+    conversations.let_go(str(gem_id))
+
+    kept = conversations.find(str(gem_id))
+    assert kept is not None and kept.events.ready
+    kept.events.take()
+    conversations.let_go(str(gem_id))
+    assert conversations.find(str(gem_id)) is None
+
+
+async def test_a_reset_drops_the_events_waiting_and_tells_whoever_asked() -> None:
+    conversations, _, gem_id = await _gem()
+    reset: list[ObjectId] = []
+    conversations.when_reset(reset.append)
+    await _came_in(conversations, gem_id)
+
+    await conversations.reset(str(gem_id))
+
+    assert reset == [gem_id]
+    assert conversations.find(str(gem_id)) is None
+    # The gem knows nothing of it, now or after a restart.
+    assert await conversations.pending_events(gem_id) == []
+    after = await _came_in(conversations, gem_id)
+    assert [e.seq for e in await conversations.pending_events(gem_id)] == [after.seq]
+
+
+async def test_events_that_could_not_be_stored_are_read_again_when_the_gem_is_next_read() -> None:
+    conversations, _, gem_id = await _gem()
+    one = await _came_in(conversations, gem_id)
+    kept = conversations.gem(str(gem_id))
+    kept.events.take()
+
+    kept.events.lost()
+    await conversations.load(gem_id)
+
+    assert [event.seq for event in kept.events.take()] == [one.seq]
+
+
+async def test_a_deleted_gem_s_events_go_with_its_log() -> None:
+    conversations, gems, gem_id = await _gem()
+    await _came_in(conversations, gem_id)
+
+    await gems.delete(str(gem_id))
+
+    kept = conversations.find(str(gem_id))
+    assert kept is None or not kept.events.pending
