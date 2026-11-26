@@ -543,3 +543,19 @@ async def test_a_reset_drops_an_event_waiting_for_a_reply_and_says_so() -> None:
     assert len(_requests(world)) == 1
     assert await world.stored() == []
     assert await world.conversations.pending_events(world.gem.id) == []
+
+
+async def test_an_event_that_comes_while_a_reset_holds_the_gem_is_told_after_it() -> None:
+    world = await _world(_said("Told."))
+
+    async def told(gem_id: ObjectId) -> None:
+        # Comes in while the reset still holds the gem, as while its watches are ended.
+        await _sink(world).arrived(_gem_event(world))
+
+    world.conversations.when_reset(told)
+    await world.conversations.reset(str(world.gem.id))
+    await _until(lambda: bool(_requests(world)))
+    await _quiet(world)
+
+    assert len(_requests(world)) == 1
+    assert await world.conversations.pending_events(world.gem.id) == []

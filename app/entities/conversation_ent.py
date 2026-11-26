@@ -266,6 +266,8 @@ class ConversationEntityClass:
             resetting.over.set()
             if kept.writer is resetting:
                 kept.writer = None
+                # An event that came after the reset, while it held the gem, wakes it now.
+                self._quiet(key)
             self.let_go(key)
 
     async def messages(self, gem_id: str) -> list[Message]:
