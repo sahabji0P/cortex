@@ -23,6 +23,11 @@ on, until the next cold start draws the line further on (`as_sent`). Anything st
 after that request is sent whole: the model has never been sent it, so no cache could
 have held it.
 
+The last request is read from the log's `request.sent` entries, which are written like
+everything else that happened: one lost to a failed write makes the next reply see an
+older request, and it may start cold while the cache is still warm. That costs one
+writing of the cache again; what is sent stays the same from then on.
+
 What is stored is never changed: only what the model is sent. And what is sent is
 worked out from what is stored and the line alone, so every request of a sitting starts
 with the same bytes as the one before it, and the cache holds again from the cold start.
@@ -59,8 +64,9 @@ EXPIRED = (
     "action, it already happened: do not repeat it.]"
 )
 
-# A result shorter than this many characters is never expired: it costs little to keep.
-# THE OWNER HAS NOT RULED ON THIS. Set it to 0 to expire every result.
+# A result shorter than this many characters is never expired: it costs little to keep,
+# and it is where what an action did is said (an id, "done"). Set it to 0 to expire
+# every result.
 KEEP_UNDER = 1500
 
 # Why a conversation starts cold.
@@ -99,6 +105,8 @@ def cold(cache: Cache, provider: Provider, *, changed: bool, now: datetime) -> R
     """
     if cache.sent is None or cache.sent_at is None:
         return None  # nothing was sent, so nothing could be cached
+    if cache.before is not None and cache.before >= cache.sent:
+        return None  # nothing was sent since the latest cold start: the line cannot move
     if changed:
         return "settings"
     if now - cache.sent_at > CACHE_LIFETIME[provider]:

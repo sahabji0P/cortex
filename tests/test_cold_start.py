@@ -59,6 +59,17 @@ def test_a_change_of_settings_is_a_cold_start_however_soon() -> None:
     assert cold(cache, "Anthropic", changed=True, now=later) == "settings"
 
 
+def test_with_nothing_sent_since_the_latest_cold_start_it_is_not_cold_again() -> None:
+    # A call that opened cold and was hung up before anyone spoke sent nothing.
+    cache = Cache(sent=7, sent_at=_SENT_AT, before=7)
+    later = _SENT_AT + timedelta(hours=1)
+
+    assert cold(cache, "Anthropic", changed=False, now=later) is None
+    assert cold(cache, "Anthropic", changed=True, now=later) is None
+    # A request after it lets the line move on.
+    assert cold(cache._replace(sent=9), "Anthropic", changed=False, now=later) == "quiet"
+
+
 # ---- what is sent
 
 
