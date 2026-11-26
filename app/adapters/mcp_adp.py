@@ -76,6 +76,7 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, ContentBlock, Icon, Implementation
 from mcp_types import Request, RequestParams, Result
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, ValidationError
+from pydantic.alias_generators import to_camel
 
 from app.core.times import UtcDatetime
 
@@ -90,6 +91,8 @@ __all__ = [
     "McpFailure",
     "McpIcon",
     "McpListing",
+    "McpOccurrence",
+    "McpPolled",
     "McpRegistration",
     "McpResult",
     "McpServer",
@@ -166,6 +169,38 @@ class McpEventType:
     delivery: tuple[str, ...]
     # The JSON schema of the arguments a listener gives it.
     input_schema: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class McpOccurrence:
+    """One event as a server sent it: something that happened."""
+
+    # The server's id for it, the same each time it is sent: a second one is the same event.
+    event_id: str
+    name: str
+    # When it happened, as the server says. None if it said nothing that can be read.
+    at: datetime | None
+    # What happened, as the kind's payload schema has it.
+    data: dict[str, object]
+    # Where the listener has got to after it. Sent with a stream's and a webhook's events
+    # only: a poll gives one cursor for its whole batch. None when the server keeps no
+    # history to go back to.
+    cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class McpPolled:
+    """What one `events/poll` came back with."""
+
+    events: list[McpOccurrence]
+    # Where to ask from next time. None when the server keeps no history: ask from now.
+    cursor: str | None
+    # Events were skipped: the server started later than the cursor it was given.
+    truncated: bool
+    # More are waiting: ask again at once.
+    has_more: bool
+    # How long the server would like us to wait before asking again. None: it did not say.
+    next_poll_ms: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +378,47 @@ class _EventsListed(Result):
     next_cursor: str | None = None
 
 
+class _EventParams(RequestParams):
+    """What says which events are listened for: a kind, its arguments, and where from.
+
+    A cursor of None is left out, which the spec reads as null: from now.
+    """
+
+    name: str
+    arguments: dict[str, object]
+    cursor: str | None = None
+
+
+class _PollParams(_EventParams):
+    max_events: int | None = None
+
+
+class _Poll(Request[_PollParams, Literal["events/poll"]]):
+    method: Literal["events/poll"] = "events/poll"
+    # The event's name goes in the `Mcp-Name` header too, as the spec asks.
+    name_param = "name"
+
+
+class _Occurrence(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, extra="ignore")
+
+    event_id: str
+    name: str
+    timestamp: str | None = None
+    data: dict[str, object] = Field(default_factory=dict[str, object])
+    cursor: str | None = None
+
+
+class _Polled(Result):
+    model_config = ConfigDict(extra="ignore")
+
+    events: list[_Occurrence] = Field(default_factory=list[_Occurrence])
+    cursor: str | None = None
+    truncated: bool = False
+    has_more: bool = False
+    next_poll_ms: int | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _Refusal:
     """A server's answer of 400 or more: its status, and what a 401 said of its sign-in."""
@@ -483,6 +559,34 @@ class McpAdapterClass:
                 name, dict(arguments), read_timeout_seconds=_CALL_SECONDS
             )
         return McpResult(text=_text(result), is_error=result.is_error)
+
+    async def poll_events(
+        self,
+        server: McpServer,
+        name: str,
+        arguments: Mapping[str, object],
+        cursor: str | None,
+        *,
+        max_events: int | None = None,
+    ) -> McpPolled:
+        """Ask the server once for the events of one kind since `cursor` (`events/poll`).
+
+        A cursor of None starts from now: the server sends no events, and a cursor to
+        ask from next time. Raises `McpFailure` if it cannot be reached or refuses.
+        """
+        params = _PollParams(
+            name=name, arguments=dict(arguments), cursor=cursor, max_events=max_events
+        )
+        async with self._using(server) as client:
+            async with asyncio.timeout(_LIST_SECONDS):
+                polled = await client.session.send_request(_Poll(params=params), _Polled)
+        return McpPolled(
+            events=[_occurrence(event) for event in polled.events],
+            cursor=polled.cursor,
+            truncated=polled.truncated,
+            has_more=polled.has_more,
+            next_poll_ms=polled.next_poll_ms,
+        )
 
     async def forget(self, server: McpServer) -> None:
         """Close the client kept for a server that is no longer used, if there is one."""
@@ -853,6 +957,27 @@ async def _list_events(client: Client) -> list[McpEventType]:
         if cursor is None:
             break
     return events
+
+
+def _occurrence(event: _Occurrence) -> McpOccurrence:
+    return McpOccurrence(
+        event_id=event.event_id,
+        name=event.name,
+        at=_when(event.timestamp),
+        data=event.data,
+        cursor=event.cursor,
+    )
+
+
+def _when(timestamp: str | None) -> datetime | None:
+    """An ISO 8601 time with its zone, or None if it is not one."""
+    if timestamp is None:
+        return None
+    try:
+        at = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else None
 
 
 def _code(exc: BaseException) -> int | None:

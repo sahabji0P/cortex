@@ -12,7 +12,7 @@ from mcp import Client
 from mcp.client import ClientExtension
 from mcp.server.mcpserver import MCPServer
 
-from app.adapters.mcp_adp import McpAdapterClass, McpEventType, McpServer
+from app.adapters.mcp_adp import McpAdapterClass, McpEventType, McpFailure, McpServer
 from tests.mcp_events_server import EventsServer, Running, running
 
 _REPO = {"repo": "owner/one"}
@@ -76,3 +76,55 @@ async def test_a_server_without_the_extension_has_no_events() -> None:
 
     assert [tool.name for tool in listed.tools] == [ping.__name__]
     assert listed.events == []
+
+
+async def test_a_poll_from_now_has_nothing_and_says_where_to_ask_from(
+    served: Running, mcp: McpAdapterClass
+) -> None:
+    await served.server.emit("issue.opened", _REPO)
+
+    polled = await mcp.poll_events(McpServer(served.url), "issue.opened", _REPO, None)
+
+    assert polled.events == []
+    assert polled.cursor == "1"
+    assert (polled.truncated, polled.has_more, polled.next_poll_ms) == (False, False, 1_000)
+
+
+async def test_a_poll_from_a_cursor_has_what_happened_since(
+    served: Running, mcp: McpAdapterClass
+) -> None:
+    server = McpServer(served.url)
+    start = await mcp.poll_events(server, "issue.opened", _REPO, None)
+    opened = await served.server.emit("issue.opened", {**_REPO, "number": 7}, event_id="evt_7")
+    await served.server.emit("issue.opened", {"repo": "owner/two", "number": 8})
+
+    polled = await mcp.poll_events(server, "issue.opened", _REPO, start.cursor)
+
+    assert [(one.event_id, one.name, one.data, one.cursor) for one in polled.events] == [
+        (opened, "issue.opened", {**_REPO, "number": 7}, None)
+    ]
+    assert polled.events[0].at is not None
+    assert polled.cursor == "2"
+    again = await mcp.poll_events(server, "issue.opened", _REPO, polled.cursor)
+    assert again.events == []
+
+
+async def test_a_poll_says_when_events_were_skipped(served: Running, mcp: McpAdapterClass) -> None:
+    for number in range(3):
+        await served.server.emit("issue.opened", {**_REPO, "number": number})
+    served.server.forget_before(2)
+
+    polled = await mcp.poll_events(McpServer(served.url), "issue.opened", _REPO, "0")
+
+    assert polled.truncated
+    assert [one.data["number"] for one in polled.events] == [2]
+
+
+async def test_a_poll_of_a_kind_the_server_does_not_serve_is_refused(
+    served: Running, mcp: McpAdapterClass
+) -> None:
+    with pytest.raises(McpFailure) as failed:
+        await mcp.poll_events(McpServer(served.url), "nothing.happened", {}, None)
+
+    assert failed.value.code == -32023
+    assert not failed.value.sign_in_needed
