@@ -138,6 +138,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A reply that plays to its end is stored only when the user next speaks or the call ends.
 - A long conversation is sent whole at the start of every call. Trimming comes with Gyan Kosh.
 - Compaction: a summary in place of the older part. Next, with the caching work.
+- OpenAI's explicit cache marks: put off until they can be run on the API key. They need a mark on every message, not one at the end. The proxy takes them and they do nothing.
 - Rewind to a turn, instead of resetting everything: put off.
 
 ## Learned from Docker Agent (read 2026-11-16, config version 16)
