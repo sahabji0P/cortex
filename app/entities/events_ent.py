@@ -52,6 +52,9 @@ class EventsEntityClass(EventSink):
         self._gems = gems
         self._conversations = conversations
         self._store = store
+        # The events being kept now, by gem, watch and their own id: one delivered again
+        # while the first is still being kept is not kept twice.
+        self._keeping: set[tuple[str, str, str]] = set()
 
     async def arrived(self, event: GemEvent) -> None:
         """An event has come in. Returns once it is stored, before the gem answers it.
@@ -60,10 +63,28 @@ class EventsEntityClass(EventSink):
         not be stored: the source may then try again. Nothing is kept of an event that
         raised. The gem is woken by it once this returns, whatever it is doing: it is
         told the event at its next turn.
+
+        An event with its own id (`event_id`) is kept once: delivered again, as a source
+        does when it tries again after a failure or a restart, it is passed over.
         """
         key = str(event.gem_id)
         if not await self._gems.exists(key):
             raise NotFoundError("Gem")
+        if event.event_id is None:
+            await self._keep(event)
+            return
+        same = (key, event.watch_id, event.event_id)
+        if same in self._keeping:
+            return
+        self._keeping.add(same)
+        try:
+            if await self._store.event_came(event.gem_id, event.watch_id, event.event_id):
+                return
+            await self._keep(event)
+        finally:
+            self._keeping.discard(same)
+
+    async def _keep(self, event: GemEvent) -> None:
         log = self._conversations.log
         await log.open(event.gem_id)
         came = await log.record_event(event.gem_id, came_fields(event))
@@ -71,7 +92,7 @@ class EventsEntityClass(EventSink):
             # The gem was reset while this was written, or deleted: it is kept in the log
             # before the reset, and the gem knows nothing of it.
             return
-        self._conversations.gem(key).events.add(pending(came))
+        self._conversations.gem(str(event.gem_id)).events.add(pending(came))
 
     async def resume(self) -> None:
         """Wake every gem that has events waiting to be told, as after a restart.

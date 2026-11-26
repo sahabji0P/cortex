@@ -31,6 +31,13 @@ class EntitiesRegistry:
             name="gem_log_in_order",
             only={"seq": {"$type": "number"}},
         )
+        # An event delivered again is known by its watch and its own id (see `events_ent.py`).
+        await adapter.DocDB.create_index(
+            LogEntry,
+            [("gem_id", 1), ("data.watch_id", 1), ("data.event_id", 1)],
+            name="gem_log_events_came",
+            only={"kind": "event.came"},
+        )
         # A connection's key starts its tools' names, so no two may share one.
         await adapter.DocDB.create_index(
             Connection, [("key", 1)], unique=True, name="connections_key"

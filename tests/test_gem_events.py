@@ -559,3 +559,28 @@ async def test_an_event_that_comes_while_a_reset_holds_the_gem_is_told_after_it(
 
     assert len(_requests(world)) == 1
     assert await world.conversations.pending_events(world.gem.id) == []
+
+
+async def test_an_event_delivered_again_by_its_own_id_is_kept_and_told_once() -> None:
+    world = await _world(_said("New commits are in."), _said("And more."))
+    sink = _sink(world)
+    once = replace(_gem_event(world), event_id="delivery-1")
+
+    # The same delivery at once, as a sender trying again while the first is kept, then
+    # again later, as after a restart; then the same id from another watch, and an event
+    # with no id of its own, twice.
+    await asyncio.gather(sink.arrived(once), sink.arrived(once))
+    await sink.arrived(once)
+    await sink.arrived(replace(once, watch_id="w2"))
+    await sink.arrived(_gem_event(world))
+    await sink.arrived(_gem_event(world))
+    await _until(lambda: len(_requests(world)) == 2)
+    await _quiet(world)
+
+    came = [e for e in await _log(world) if e["kind"] == "event.came"]
+    assert [(e["watch_id"], e["event_id"]) for e in came] == [
+        ("w1", "delivery-1"),
+        ("w2", "delivery-1"),
+        ("w1", None),
+        ("w1", None),
+    ]

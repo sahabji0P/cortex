@@ -327,6 +327,19 @@ class ConversationStoreClass:
         )
         return found[0].turn or 0 if found else 0
 
+    async def event_came(self, gem_id: ObjectId, watch_id: str, event_id: str) -> bool:
+        """Whether the gem's log already holds that event of that watch, by its own id."""
+        found = await self._docdb.get(
+            LogEntry,
+            filters={
+                "gem_id": gem_id,
+                "kind": EVENT_CAME,
+                "data.watch_id": watch_id,
+                "data.event_id": event_id,
+            },
+        )
+        return found is not None
+
     async def of_kind(self, gem_id: ObjectId, kind: str) -> list[LogEntry]:
         """Every entry of one kind, oldest first."""
         return await self._docdb.get_many(
