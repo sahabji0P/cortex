@@ -49,7 +49,7 @@ a `type`. Binary frames are a call's audio.
 | --- | --- | --- |
 | `link.ready` | `version` (7) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later. Version 4: a call's reply comes as words timed to its audio (`call.assistant.word`), and `call.assistant.delta` is gone. Version 5: `connection.changed`. Version 6: a gem's log can be watched (see [A gem's log](#a-gems-log)). Version 7: an event a gem watches for can wake it (`chat.event`), and `watch.changed` |
 | `connection.changed` | `id` (a connection's id) | A connection's sign-in has changed: it needs a sign-in now, or one was just finished. Sent to every open socket. Read the connection again (`GET /v1/connections/{id}`) for its `sign_in` and its tools |
-| `watch.changed` | `gem`, `watch` (their ids) | One of a gem's watches was added, removed, or changed state. Sent to every open socket. Read the gem's watches again (`GET /v1/gems/{gem}/watches`): a removed one is not there (see [Watches](#watches)) |
+| `watch.changed` | `gem`, `watch` (their ids) | One of a gem's watches was added, removed, or changed as the app shows it (its state, delivery, refused posts or signing). Sent to every open socket. Read the gem's watches again (`GET /v1/gems/{gem}/watches`): a removed one is not there (see [Watches](#watches)) |
 | `chat.result` | `gem`, `text` | A search, or another tool call, the gem started in an earlier reply has come back, and a reply about it follows, unasked. `text` is what the search looked up, as its `chat.tool` said, or "" |
 | `chat.event` | `gem`, `text` | Something one of the gem's watches waits for has happened, and a reply about it follows, unasked (see [Events](#events)). `text` says what came in, in a short line: the watch, as the gem described it when it made it, and what it caught, as "new commits on the main branch: push". The wording is not settled |
 | `chat.text` | `gem`, `text` | The next piece of the reply, as it is written |
@@ -949,7 +949,10 @@ A watch, as `GET` answers:
   "has_address": true,
   "created_at": "2026-11-26T09:00:00Z",
   "last_event_at": "2026-11-26T09:40:00Z",
-  "events": 3
+  "events": 3,
+  "refused": 1,
+  "last_refused_at": "2026-11-26T09:42:00Z",
+  "signed": true
 }
 ```
 
@@ -973,7 +976,19 @@ A watch, as `GET` answers:
   list, nor in a frame: the gem was given them in its tool's result, to register them
   where the events come from, and the app is given them only by
   `GET /v1/gems/{gem_id}/watches/{watch_id}/hook`, when the user asks to see them.
-- **`events`** is how many it has brought, and `last_event_at` when it last did, or null.
+- **`events`** is how many events it has brought, and `last_event_at` when it last did,
+  or null. Only events kept count: one its sender delivered again (the same id, such as
+  GitHub's `X-GitHub-Delivery` or Standard Webhooks' `webhook-id`) is answered, and not
+  counted again.
+- **`refused`** is how many posts a plain webhook has refused for their signature (see
+  `POST /v1/hooks/{token}` below), and `last_refused_at` when it last did, or null. After
+  3 refused in a row with none taken between them, it is `failing`, with the `reason`
+  "Posts arrive, but they are not signed with this watch's secret", until a post is
+  taken again. 0 and null for a timer, a watch on MCP events (its posts are its server's
+  to sign), and a watch stored before the backend kept them.
+- **`signed`** is true once a plain webhook has taken a signed post: from then on it
+  takes only signed posts, so the app can say "only signed posts". False until then, and
+  for the others. None of these fields says what the posts are signed with.
 - **A watch tells its gem when its state changes**, as an event of its own, once for each
   change: `watch.failing` when it starts failing and `watch.paused` when it is paused,
   each with its `reason` as the event's data, and `watch.recovered`, with no data, when
@@ -984,9 +999,9 @@ A watch, as `GET` answers:
   removed this watch.", only when it is removed with
   `DELETE /v1/gems/{gem_id}/watches/{watch_id}`. Not when the gem removes it itself, nor
   when a reset ends its watches, nor when the gem is deleted.
-- Every change of a watch the app shows (added, removed, a new `state`, `reason` or
-  `delivery`) comes as `watch.changed` on the socket. A new event alone does not: read again to see
-  `events` move.
+- Every change of a watch the app shows (added, removed, a new `state`, `reason`,
+  `delivery`, `refused` or `signed`) comes as `watch.changed` on the socket. A new event
+  alone does not: read again to see `events` move.
 
 ### `GET /v1/gems/{gem_id}/watches/{watch_id}/hook`
 
@@ -997,14 +1012,16 @@ The answer is sent with `Cache-Control: no-store`, and is never logged.
 ```json
 {
   "address": "https://hooks.example.com/v1/hooks/q3Vb8Lx0nTzR2kWfYc5HdA7mJpE1sGuX9oKiN4vBtZw",
-  "secret": "q3Vb8Lx0nTzR2kWfYc5HdA7mJpE1sGuX9oKiN4vBtZw",
+  "secret": "Hn5tK2wQ8rLm0yVb3cXz7pJd1fGs9aUe4oRi6kTq-Zs",
   "content_type": "application/json"
 }
 ```
 
-- **`address`** is `PUBLIC_URL`, then `/v1/hooks/`, then the secret. It is null while
-  the backend has no `PUBLIC_URL`: the secret is still given.
-- **`secret`** is what the posts are signed with (see `X-Hub-Signature-256` below).
+- **`address`** is `PUBLIC_URL`, then `/v1/hooks/`, then the watch's token. It is null
+  while the backend has no `PUBLIC_URL`: the secret is still given.
+- **`secret`** is what the posts are signed with (see `POST /v1/hooks/{token}` below).
+  It is not the token: each watch has its own. A watch made before the backend kept one
+  has its token as its secret, so its secret is the end of its address.
 - **`content_type`** is what to register the webhook to post: `application/json`.
 
 | Answer | When |
@@ -1024,11 +1041,22 @@ answer is empty, and what was posted is never sent back or logged.
 | --- | --- |
 | 202 | The event was handed over: the gem will be woken |
 | 200 | A GitHub `ping` (`X-GitHub-Event: ping`): it wakes nobody |
-| 401 | For a plain webhook, `X-Hub-Signature-256` is there and is not `sha256=` and the HMAC-SHA256 of the body with the watch's secret. For an MCP watch, the connection's server did not sign it |
+| 401 | For a plain webhook: a signature is there and does not hold (below), or there is none and the watch has taken a signed post (`signed`). Counted in `refused`. For an MCP watch, the connection's server did not sign it |
 | 404 | The address is no watch's |
 | 409 | The watch is paused |
 | 413 | The body is over 1 MB |
 | 503 | The event could not be kept: the sender may try again |
 
+A plain webhook's post is signed with the watch's secret in either of two ways:
+
+- **GitHub's**: `X-Hub-Signature-256` is `sha256=` and the HMAC-SHA256 of the body, in hex.
+- **Standard Webhooks'**: `webhook-id`, `webhook-timestamp` (seconds since the epoch,
+  within five minutes of now) and `webhook-signature`, one or more `v1,` and the
+  HMAC-SHA256 of `{webhook-id}.{webhook-timestamp}.{body}` in base64, separated by a
+  space. The key is the secret's text as it is, not base64-decoded.
+
+A post that carries both must hold for both. One with neither is taken until the watch
+has taken a signed one.
+
 A plain webhook's event is named by `X-GitHub-Event`, or `webhook` when there is none,
-and its id is `X-GitHub-Delivery`.
+and its id is `X-GitHub-Delivery`, or else `webhook-id`.
