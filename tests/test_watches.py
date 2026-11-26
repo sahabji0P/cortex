@@ -6,6 +6,7 @@ so a timer's hours pass at once and nothing reaches the internet.
 
 import asyncio
 from collections.abc import AsyncGenerator, Callable
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,11 +17,13 @@ from app.config import settings
 from app.core.errors import InvalidError, NotFoundError
 from app.entities.conversation_store import ConversationStoreClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
+from app.entities.gem_event import GemEvent
 from app.entities.gem_log import LogEntityClass
 from app.entities.watch_ent import Watch, WatchEntityClass
 from tests.test_chat import _DocDB, _docdb  # pyright: ignore[reportPrivateUsage]
 
 _PUBLIC = "https://hooks.example.com"
+_START = datetime(2026, 11, 26, 9, 0, tzinfo=UTC)
 
 
 async def _until(done: Callable[[], bool]) -> None:
@@ -32,14 +35,77 @@ async def _until(done: Callable[[], bool]) -> None:
     raise AssertionError("it never came to hold")
 
 
+class _Clock:
+    """A clock whose time moves only when the test moves it."""
+
+    def __init__(self) -> None:
+        self.at = _START
+        self._sleepers: list[tuple[datetime, asyncio.Future[None]]] = []
+
+    def now(self) -> datetime:
+        return self.at
+
+    async def sleep(self, seconds: float) -> None:
+        waking: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._sleepers.append((self.at + timedelta(seconds=seconds), waking))
+        try:
+            await waking
+        finally:
+            self._sleepers = [one for one in self._sleepers if one[1] is not waking]
+
+    @property
+    def sleeping(self) -> int:
+        return len(self._sleepers)
+
+    async def advance(self, **delta: float) -> None:
+        """Move the time on, and wake whoever sleeps until then."""
+        self.at += timedelta(**delta)
+        for until, waking in list(self._sleepers):
+            if until <= self.at and not waking.done():
+                waking.set_result(None)
+        for _ in range(50):
+            await asyncio.sleep(0)
+
+
+class _Sink:
+    """The event sink: it keeps what it is handed, or fails while `fails` is set."""
+
+    def __init__(self) -> None:
+        self.events: list[GemEvent] = []
+        self.fails: Exception | None = None
+
+    async def arrived(self, event: GemEvent) -> None:
+        if self.fails is not None:
+            raise self.fails
+        self.events.append(event)
+
+
 class _Setup(SimpleNamespace):
     docdb: _DocDB
+    adapter: Any
     gems: GemEntityClass
     log: LogEntityClass
+    clock: _Clock
+    sink: _Sink
     watches: WatchEntityClass
     one: GemConfig
     two: GemConfig
     told: list[tuple[str, str]]
+
+    def entity(self) -> WatchEntityClass:
+        """Another entity on the same database, as after a restart."""
+        return WatchEntityClass(
+            docdb=self.adapter,
+            gems=self.gems,
+            log=self.log,
+            sink=self.sink,
+            now=self.clock.now,
+            sleep=self.clock.sleep,
+        )
+
+    def watch(self, made: Watch) -> Watch:
+        """The watch as it is stored now."""
+        return Watch.model_validate(next(d for d in self.stored() if d["_id"] == made.id))
 
     def stored(self) -> list[dict[str, Any]]:
         return self.docdb.collections.get("Watches", [])
@@ -58,23 +124,26 @@ async def setup(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[_Setup]:
     monkeypatch.setattr(settings, "public_url", _PUBLIC)
     docdb, adapter = _docdb()
     gems = GemEntityClass(adapter)
-    log = LogEntityClass(ConversationStoreClass(adapter))
-    watches = WatchEntityClass(docdb=adapter, gems=gems, log=log)
-    told: list[tuple[str, str]] = []
-
-    async def listener(gem: str, watch: str) -> None:
-        told.append((gem, watch))
-
-    watches.listen(listener)
-    yield _Setup(
+    made = _Setup(
         docdb=docdb,
+        adapter=adapter,
         gems=gems,
-        log=log,
-        watches=watches,
+        log=LogEntityClass(ConversationStoreClass(adapter)),
+        clock=_Clock(),
+        sink=_Sink(),
         one=await gems.create(name="Gem One", model="6 Luna"),
         two=await gems.create(name="Gem Two", model="6 Luna"),
-        told=told,
+        told=[],
     )
+    made.watches = made.entity()
+
+    async def listener(gem: str, watch: str) -> None:
+        made.told.append((gem, watch))
+
+    made.watches.listen(listener)
+    await made.watches.start()
+    yield made
+    await made.watches.close()
 
 
 # ---- what is kept
@@ -177,3 +246,112 @@ async def test_a_watch_is_not_listed_for_an_unknown_gem(setup: _Setup) -> None:
     await setup.watches.add_webhook(setup.one.id, "first")
 
     assert await setup.watches.list_for(ObjectId()) == []
+
+
+# ---- timers
+
+
+async def test_a_timer_goes_off_on_its_rhythm(setup: _Setup) -> None:
+    made = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    assert made.due_at == _START + timedelta(minutes=5)
+
+    await setup.clock.advance(minutes=4, seconds=59)
+    assert setup.sink.events == []
+    await setup.clock.advance(seconds=1)
+    await setup.clock.advance(minutes=5)
+
+    assert setup.sink.events == [
+        GemEvent(
+            gem_id=setup.one.id,
+            watch_id=str(made.id),
+            source="timer",
+            name="timer",
+            about="Check the inbox.",
+            data="",
+            at=_START + timedelta(minutes=minutes),
+            event_id=f"timer:{(_START + timedelta(minutes=minutes)).isoformat()}",
+        )
+        for minutes in (5, 10)
+    ]
+    kept = setup.watch(made)
+    assert (kept.events, kept.last_event_at) == (2, _START + timedelta(minutes=10))
+    assert kept.due_at == _START + timedelta(minutes=15)
+
+
+async def test_a_timer_that_came_due_while_down_goes_off_once_then_keeps_its_rhythm(
+    setup: _Setup,
+) -> None:
+    made = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    await setup.watches.close()
+
+    # Down from 9:00 to 9:12: it was due at 9:05 and 9:10.
+    await setup.clock.advance(minutes=12)
+    assert setup.sink.events == []
+    again = setup.entity()
+    await again.start()
+    await setup.clock.advance()
+
+    assert [event.at for event in setup.sink.events] == [_START + timedelta(minutes=12)]
+    assert setup.watch(made).due_at == _START + timedelta(minutes=15)
+    await setup.clock.advance(minutes=3)
+    assert len(setup.sink.events) == 2
+    await again.close()
+
+
+async def test_a_timer_under_the_least_interval_is_refused(setup: _Setup) -> None:
+    with pytest.raises(InvalidError, match="at most every 5 minutes"):
+        await setup.watches.add_timer(setup.one.id, "Check the inbox.", 4)
+    assert setup.stored() == []
+
+
+async def test_a_timer_whose_event_cannot_be_kept_fails_and_comes_back(setup: _Setup) -> None:
+    made = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    await _until(lambda: len(setup.told) == 1)
+    setup.sink.fails = ConnectionError("the database went away")
+
+    await setup.clock.advance(minutes=5)
+    kept = setup.watch(made)
+    assert (kept.state, kept.reason) == ("failing", "the database went away")
+    assert setup.told[-1] == (str(setup.one.id), str(made.id))
+    # Tried again after 10 seconds, then 20: still failing, and told only once.
+    await setup.clock.advance(seconds=10)
+    assert setup.watch(made).state == "failing"
+    told = len(setup.told)
+    setup.sink.fails = None
+    await setup.clock.advance(seconds=20)
+
+    kept = setup.watch(made)
+    assert (kept.state, kept.reason, kept.events) == ("active", None, 1)
+    assert len(setup.told) == told + 1
+    # It went off late, and keeps its rhythm.
+    assert kept.due_at == _START + timedelta(minutes=10)
+    assert [event.event_id for event in setup.sink.events] == [
+        f"timer:{(_START + timedelta(minutes=5)).isoformat()}"
+    ]
+
+
+async def test_a_removed_timer_stops_at_once(setup: _Setup) -> None:
+    made = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    await setup.clock.advance()
+    assert setup.clock.sleeping == 1
+
+    await setup.watches.remove(setup.one.id, str(made.id), by="user")
+    await setup.clock.advance(minutes=30)
+
+    assert setup.sink.events == []
+    assert setup.clock.sleeping == 0
+
+
+async def test_end_for_and_a_deleted_gem_stop_their_timers(setup: _Setup) -> None:
+    await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    await setup.watches.add_timer(setup.two.id, "Check the post.", 5)
+    await setup.clock.advance()
+    assert setup.clock.sleeping == 2
+
+    await setup.watches.end_for(setup.one.id)
+    await setup.gems.delete(str(setup.two.id))
+    await setup.clock.advance(minutes=30)
+
+    assert setup.sink.events == []
+    assert setup.clock.sleeping == 0
+    assert setup.stored() == []
