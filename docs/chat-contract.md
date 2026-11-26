@@ -19,8 +19,9 @@ The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
 - Connections, the tool servers gems can use, and which gem may use which:
   `/v1/connections` (see [Connections](#connections-v1connections)).
 - A gem's watches, which the gem makes and the user can remove:
-  `GET /v1/gems/{gem_id}/watches` and `DELETE /v1/gems/{gem_id}/watches/{watch_id}` (see
-  [Watches](#watches)).
+  `GET /v1/gems/{gem_id}/watches` and `DELETE /v1/gems/{gem_id}/watches/{watch_id}`, and
+  a webhook's address and secret when the user asks to see them:
+  `GET /v1/gems/{gem_id}/watches/{watch_id}/hook` (see [Watches](#watches)).
 - The models a call can be held with: `GET /v1/voice/models`.
 - How OpenAI is reached, with the API key or through the ChatGPT proxy, and the proxy's
   account: `GET` and `PUT /v1/providers/openai`, `POST /v1/providers/openai/sign-in`
@@ -926,6 +927,7 @@ How they run is in [Watches](watches.md).
 | --- | --- |
 | `GET /v1/gems/{gem_id}/watches` | The gem's watches, the newest first. A gem that is not there is a 404 |
 | `DELETE /v1/gems/{gem_id}/watches/{watch_id}` | Removes one (204). It stops at once, the gem's log gets `watch.removed` with `by: "user"`, and the gem is told `watch.ended`. A watch that is not that gem's is a 404 |
+| `GET /v1/gems/{gem_id}/watches/{watch_id}/hook` | A plain webhook watch's address and secret, for when the user asks to see them (see [below](#get-v1gemsgem_idwatcheswatch_idhook)) |
 | `POST /v1/hooks/{token}` | Where a watch's webhook is posted to, from outside. The app never calls it |
 
 A watch, as `GET` answers:
@@ -967,9 +969,10 @@ A watch, as `GET` answers:
   `arguments` what the gem gave it. Null for the others.
 - **For `timer`**: `every_minutes`, and `next_at`, when it is next due. Null for the
   others.
-- **`has_address`** is true for a webhook. The address and its secret are never sent:
-  the gem was given them in its tool's result, to register them where the events come
-  from.
+- **`has_address`** is true for a webhook. The address and its secret are never in this
+  list, nor in a frame: the gem was given them in its tool's result, to register them
+  where the events come from, and the app is given them only by
+  `GET /v1/gems/{gem_id}/watches/{watch_id}/hook`, when the user asks to see them.
 - **`events`** is how many it has brought, and `last_event_at` when it last did, or null.
 - **A watch tells its gem when its state changes**, as an event of its own, once for each
   change: `watch.failing` when it starts failing and `watch.paused` when it is paused,
@@ -984,6 +987,33 @@ A watch, as `GET` answers:
 - Every change of a watch the app shows (added, removed, a new `state`, `reason` or
   `delivery`) comes as `watch.changed` on the socket. A new event alone does not: read again to see
   `events` move.
+
+### `GET /v1/gems/{gem_id}/watches/{watch_id}/hook`
+
+A plain webhook watch's address and secret, the same the gem was given to register it.
+The app asks for them only when the user clicks to see them, and does not keep them.
+The answer is sent with `Cache-Control: no-store`, and is never logged.
+
+```json
+{
+  "address": "https://hooks.example.com/v1/hooks/q3Vb8Lx0nTzR2kWfYc5HdA7mJpE1sGuX9oKiN4vBtZw",
+  "secret": "q3Vb8Lx0nTzR2kWfYc5HdA7mJpE1sGuX9oKiN4vBtZw",
+  "content_type": "application/json"
+}
+```
+
+- **`address`** is `PUBLIC_URL`, then `/v1/hooks/`, then the secret. It is null while
+  the backend has no `PUBLIC_URL`: the secret is still given.
+- **`secret`** is what the posts are signed with (see `X-Hub-Signature-256` below).
+- **`content_type`** is what to register the webhook to post: `application/json`.
+
+| Answer | When |
+| --- | --- |
+| 200 | A plain webhook watch (`source` is `webhook`) of that gem |
+| 404 | No such gem, no such watch, or a watch of another gem: `"message": "Watch not found"` (or `"Gem not found"`) |
+| 404 | A timer, or a watch on MCP events, whose posts come from its connection's server, signed its own way: `"message": "This watch has no Cortex webhook: only a plain webhook watch has one"` |
+
+Each 404 has `"code": "not_found"`.
 
 ### `POST /v1/hooks/{token}`
 
