@@ -123,6 +123,8 @@ class _McpEvents:
         self.running: dict[str, OnMcpEvent] = {}
         # What each watch running is told its cursor with, when it moves with no event.
         self.cursors: dict[str, OnMcpCursor] = {}
+        # What each watch running is told the delivery it starts on with.
+        self.deliveries: dict[str, OnMcpDelivery] = {}
         self.stopped: list[str] = []
         self.fails: Exception | None = None
         # Whether a post is one the server signed, and what each was posted with.
@@ -146,11 +148,14 @@ class _McpEvents:
         self.running[watch.watch_id] = on_event
         if on_cursor is not None:
             self.cursors[watch.watch_id] = on_cursor
+        if on_delivery is not None:
+            self.deliveries[watch.watch_id] = on_delivery
         try:
             await asyncio.Event().wait()
         finally:
             del self.running[watch.watch_id]
             self.cursors.pop(watch.watch_id, None)
+            self.deliveries.pop(watch.watch_id, None)
             self.stopped.append(watch.watch_id)
 
     async def posted(
@@ -566,6 +571,40 @@ async def test_an_mcp_watch_keeps_a_cursor_that_moved_with_no_event(setup: _Setu
     await _until(lambda: len(setup.mcp.runs) == 2)
     assert setup.mcp.runs[1][0].cursor == "c3"
     await again.close()
+
+
+async def test_an_mcp_watch_keeps_the_delivery_it_started_on(setup: _Setup) -> None:
+    made = await setup.watches.add_mcp(setup.one.id, "Triage new issues.", _OPENED, {})
+    assert made.delivery is None
+    await _until(lambda: str(made.id) in setup.mcp.deliveries)
+    on_delivery = setup.mcp.deliveries[str(made.id)]
+    told = len(setup.told)
+
+    await on_delivery("webhook")
+    await on_delivery("webhook")
+    await on_delivery("poll")  # as after a server would not take the webhook
+    await _until(lambda: len(setup.told) == told + 2)
+
+    assert setup.watch(made).delivery == "poll"
+    # Told when it changes only.
+    await on_delivery("poll")
+    await setup.clock.advance()
+    assert len(setup.told) == told + 2
+
+
+async def test_a_webhook_is_delivered_by_webhook_and_a_timer_by_nothing(setup: _Setup) -> None:
+    hook = await setup.watches.add_webhook(setup.one.id, "Review pull requests.")
+    timer = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+
+    assert (setup.watch(hook).delivery, setup.watch(timer).delivery) == ("webhook", None)
+
+
+async def test_a_watch_stored_without_a_delivery_has_none(setup: _Setup) -> None:
+    made = await setup.watches.add_webhook(setup.one.id, "Review pull requests.")
+    [stored] = setup.stored()
+    del stored["delivery"]
+
+    assert (await setup.watches.get(setup.one.id, str(made.id))).delivery is None
 
 
 async def test_an_mcp_watch_whose_event_cannot_be_kept_keeps_no_cursor(setup: _Setup) -> None:

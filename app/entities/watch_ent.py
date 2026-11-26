@@ -28,6 +28,10 @@ A fuse keeps a gem from waking itself in a loop (it comments on a pull request, 
 webhook fires, it wakes and comments again): a watch that brings more than
 `_FUSE_EVENTS` events in an hour is paused, and brings no more.
 
+A watch says how its events reach us now (`delivery`): a plain webhook by `webhook` from
+when it is made, a watch on MCP events by whichever its connection started on last
+(`McpEvents.watch` tells it), and a timer by none.
+
 A watch is `active`, `failing` (it cannot run now, and is tried again: `reason` says
 why) or `paused` (it brings no more events until it is removed and made again: `reason`
 says why). A watch that fails is tried again after a while, twice as long each time it
@@ -78,7 +82,9 @@ from app.entities.gem_event import (
     McpEvents,
     McpWatch,
     OnMcpCursor,
+    OnMcpDelivery,
     OnMcpEvent,
+    WatchDelivery,
     WatchSource,
 )
 from app.entities.gem_log import LogEntityClass
@@ -164,6 +170,9 @@ class Watch(BaseModel):
     # For a timer: how often it goes off, and when it is next due.
     every_minutes: int | None = None
     due_at: UtcDatetime | None = None
+    # How its events reach us now. None for a timer, and for a watch on MCP events until
+    # it first starts on one, as for one stored before watches kept it.
+    delivery: WatchDelivery | None = None
     state: WatchState = "active"
     # Why it is failing or paused. None while it is active.
     reason: str | None = None
@@ -363,6 +372,7 @@ class WatchEntityClass:
                 about=about,
                 source="webhook",
                 token=secrets.token_urlsafe(_TOKEN_BYTES),
+                delivery="webhook",
                 created_at=self._now(),
             )
         )
@@ -657,6 +667,7 @@ class WatchEntityClass:
                         self._on_event(watch_id),
                         watch.hook_url,
                         self._on_cursor(watch_id),
+                        self._on_delivery(watch_id),
                     )
                 )
                 try:
@@ -691,6 +702,20 @@ class WatchEntityClass:
             await self._docdb.update(Watch, {"id": watch_id}, {"cursor": cursor})
 
         return on_cursor
+
+    def _on_delivery(self, watch_id: PydanticObjectId) -> OnMcpDelivery:
+        """What is told how an MCP watch gets its events, each time it starts on a
+        delivery: it is kept, and listeners are told when it changes."""
+
+        async def on_delivery(delivery: WatchDelivery) -> None:
+            watch = await self._docdb.get(Watch, filters={"id": watch_id})
+            if watch is None or watch.delivery == delivery:
+                return
+            changed = watch.model_copy(update={"delivery": delivery})
+            if await self._store(changed, {"delivery"}):
+                self._tell(changed)
+
+        return on_delivery
 
     def _on_event(self, watch_id: PydanticObjectId) -> OnMcpEvent:
         """What is told each MCP event of a watch: it is handed over, then its cursor kept."""
