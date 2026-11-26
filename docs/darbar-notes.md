@@ -46,6 +46,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Tools are the same in a call and in chat: the same tools, run the same way, by one copy of the code.
 - A tool call still running at a cut carries on in both. cancel_tool_call stops one, for any tool.
 - Nothing is cleared from the history by itself, in a call or in chat. Keep it simple.
+- Cold start: once a gem's cache is gone (quiet too long, or its settings changed), old long tool results are sent expired. What is stored stays whole. Built.
 - Reset gem: the user resets a gem and it starts again, knowing nothing. Built for its conversation. The log keeps all of it.
 - A reset is of everything a gem knows: when Gyan Kosh comes, a reset clears that too.
 - Reset asks the user to confirm first. In the app: the side panel and the gem's settings.
@@ -182,3 +183,4 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Many tools in a call: how much later is the first word?
 - A deferred tool's first use in a call costs one more model round. How long is that wait before the first word?
 - A connection's result is cut at 20,000 characters. Is that the right number?
+- Cold start: short results are kept. Keep that guard, or expire every result?
