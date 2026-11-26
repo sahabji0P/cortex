@@ -125,7 +125,8 @@ class LinkModels:
                 id: str
 
             class WatchChanged(BaseModel):
-                """One of a gem's watches was added, removed, or changed state: read them again.
+                """One of a gem's watches was added, removed, or changed as the app shows it
+                (its state, delivery, refused posts or signing): read them again.
 
                 Sent to every socket. Read the gem's watches again
                 (`GET /v1/gems/{gem}/watches`): a removed one is no longer there.

@@ -15,6 +15,20 @@ async def list_watches(
     return await service.list_watches(gem_id)
 
 
+@router.get("/{gem_id}/watches/{watch_id}/hook")
+async def get_hook(
+    gem_id: str, watch_id: str, response: Response, service: WatchesServiceRegistry.V1
+) -> WatchesModels.V1.Output.Hook:
+    """A plain webhook watch's address and secret, which the app asks for when the user does.
+
+    Never in the list, nor in a frame. A timer, or a watch on MCP events, has none: a 404.
+    """
+    hook = await service.hook(gem_id, watch_id)
+    # It holds a secret: not to be kept by anyone on the way.
+    response.headers["Cache-Control"] = "no-store"
+    return hook
+
+
 @router.delete("/{gem_id}/watches/{watch_id}", status_code=204)
 async def remove_watch(gem_id: str, watch_id: str, service: WatchesServiceRegistry.V1) -> Response:
     """Remove one of the gem's watches: it stops at once, and the gem's log says the user did.

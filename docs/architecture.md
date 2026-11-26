@@ -14,8 +14,8 @@ config ← core ← adapters ← entities ← routers ← main
 ```
 
 - **`config`** reads the settings from the environment.
-- **`core`** holds what every layer may use: errors, password and token helpers, and how
-  times are kept and sent.
+- **`core`** holds what every layer may use: errors, password and token helpers, how
+  times are kept and sent, and the check of a Standard Webhooks signature.
 - **`adapters`** are one file per outside service, and the only place an SDK is called.
   Every call to the outside is async.
 - **`entities`** hold the logic. They reach the outside only through adapters.

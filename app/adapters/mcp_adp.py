@@ -41,8 +41,6 @@ import asyncio
 import base64
 import binascii
 import contextlib
-import hashlib
-import hmac
 import ipaddress
 import json
 import logging
@@ -82,6 +80,7 @@ from pydantic import AnyUrl, BaseModel, ConfigDict, Field, ValidationError
 from pydantic.alias_generators import to_camel
 
 from app.core.times import UtcDatetime
+from app.core.webhooks import standard_webhook_id
 
 __all__ = [
     "EVENTS_EXTENSION",
@@ -975,35 +974,18 @@ class McpAdapterClass:
     ) -> McpPost | None:
         """A post to a webhook address, if the server signed it with `secret`, and read.
 
-        Checked as Standard Webhooks says: the HMAC-SHA256 of its id, its time and its
-        body as they came, with any of the signatures it carries, and a time no more
-        than five minutes from now. None if it does not hold, or cannot be read: then
+        Checked as Standard Webhooks says (`standard_webhook_id`), with the bytes of the
+        `whsec_` secret as the key. None if it does not hold, or cannot be read: then
         nothing of it is to be believed.
         """
-        lower = {name.lower(): value for name, value in headers.items()}
-        message_id = lower.get("webhook-id")
-        stamp = lower.get("webhook-timestamp")
-        signatures = lower.get("webhook-signature")
-        if not message_id or not stamp or not signatures:
-            return None
-        try:
-            sent = datetime.fromtimestamp(int(stamp), UTC)
-        except (ValueError, OverflowError, OSError):
-            return None
-        if abs(((now or datetime.now(UTC)) - sent).total_seconds()) > _POST_FRESH_SECONDS:
-            return None
         try:
             key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
         except binascii.Error:
             return None
-        signed = f"{message_id}.{stamp}.".encode() + body
-        expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
-        held = any(
-            version == "v1" and hmac.compare_digest(given, expected)
-            for version, _, given in (one.partition(",") for one in signatures.split())
-        )
-        if not held:
+        message_id = standard_webhook_id(key, headers, body, now or datetime.now(UTC))
+        if message_id is None:
             return None
+        lower = {name.lower(): value for name, value in headers.items()}
         item = _posted(body)
         if item is None:
             return None
@@ -1407,8 +1389,6 @@ def _when(timestamp: str | None) -> datetime | None:
 
 # How many random bytes a webhook's secret is made of, at least and at most.
 _SECRET_BYTES = (24, 64)
-# How far from now a webhook post's time may be (Standard Webhooks: five minutes).
-_POST_FRESH_SECONDS = 300
 
 
 def _posted(body: bytes) -> McpOccurrence | McpMark | McpEnded | McpVerification | None:

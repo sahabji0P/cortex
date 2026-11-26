@@ -1070,7 +1070,7 @@ async def test_a_call_offers_the_tools_the_gem_s_connections_had_when_it_opened(
 class _NoEvents:
     """Neither keeps an event nor serves MCP events: only the tools are looked at here."""
 
-    async def arrived(self, event: GemEvent) -> None:
+    async def arrived(self, event: GemEvent) -> bool:
         raise AssertionError("no event comes in here")
 
     async def kinds_for(self, gem_id: ObjectId) -> list[McpEventKind]:

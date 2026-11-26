@@ -13,10 +13,15 @@ A watch has one of three sources (see `gem_event.py`):
   event is kept, so after a restart it goes on from there. It has a webhook address too,
   for a server that delivers by posting to one.
 - `webhook`: posts to an address of ours, `{PUBLIC_URL}/v1/hooks/{token}`, such as a
-  GitHub repo's own webhook. The token is random and cannot be guessed, and it is the
-  secret the posts are signed with too. Nothing runs for it: a post comes to the hooks
-  route (`hooked`). A post signed the way GitHub signs one must be signed with it. A
-  GitHub `ping` wakes nobody.
+  GitHub repo's own webhook. The token is random and cannot be guessed: it is what lets
+  a post in. The posts are signed with a secret of the watch's own (`hook_secret`), the
+  way GitHub signs one or the way Standard Webhooks does. Nothing runs for it: a post
+  comes to the hooks route (`hooked`). A post that says it is signed must be signed with
+  the secret, and once one signed post is taken, every post must be (`signed`). A sender
+  that never signs keeps working with the address alone. A GitHub `ping` wakes nobody.
+  A post refused for its signature is counted (`refused`), and never written in the
+  gem's log: after `_REFUSED_IN_A_ROW` in a row, with none taken between them, the watch
+  is failing, until a post is taken again.
 - `timer`: every so many minutes, at least `TIMER_MIN_MINUTES`, in a task of its own.
   It is first due one interval after it is made. One that came due while the backend
   was down goes off once as soon as it is up, and then keeps its rhythm.
@@ -38,7 +43,8 @@ says why). A watch that fails is tried again after a while, twice as long each t
 fails again, up to ten minutes. An MCP watch is active again once its server answers (a
 stream opened, a webhook granted, a poll answered): one that is reached but never
 answers stays failing. Whoever listens (the app's sockets) is told when a watch
-is added, removed, or changes state.
+is added, removed, or changes as the app shows it: its state or reason, its delivery,
+a refused post, or that it takes only signed posts. Not of a new event alone.
 
 The gem is told too, once for each change of state, as an event of the watch's own:
 `watch.failing` when it starts failing, `watch.paused` when the fuse pauses it, both
@@ -63,6 +69,8 @@ paused runs from `start` until `close`.
 """
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import hashlib
 import hmac
@@ -84,6 +92,7 @@ from app.adapters.docdb_adp import DocDBAdapterClass
 from app.config import settings
 from app.core.errors import AppError, InvalidError, NotFoundError
 from app.core.times import UtcDatetime
+from app.core.webhooks import standard_webhook_id
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_event import (
     EVENT_TEXT_LIMIT,
@@ -104,6 +113,7 @@ from app.entities.tools import Tool
 
 __all__ = [
     "HOOKS_PATH",
+    "HOOK_CONTENT_TYPE",
     "TIMER_MIN_MINUTES",
     "HookOutcome",
     "Listener",
@@ -116,8 +126,14 @@ __all__ = [
 # Where a watch's webhook is posted to, under `settings.public_url`, followed by its
 # token. The route is defined in `app/routers/hooks`.
 HOOKS_PATH = "/v1/hooks"
-# How many random bytes a webhook's token is made of.
+# What a watch's webhook is to be registered to post.
+HOOK_CONTENT_TYPE = "application/json"
+# How many random bytes a webhook's token, and a plain webhook's secret, are made of.
 _TOKEN_BYTES = 32
+# How a plain webhook's secret is written, as Standard Webhooks writes one: this, then
+# its random bytes in base64. A sender's Standard Webhooks library signs with those
+# bytes; GitHub, and a sender signing by hand, with the whole text as it is.
+_SECRET_PREFIX = "whsec_"
 
 # A timer goes off at most this often. THE OWNER HAS NOT RULED ON THIS NUMBER.
 TIMER_MIN_MINUTES = 5
@@ -139,6 +155,11 @@ _FUSED = (
 )
 # What the gem is told when the user removes one of its watches from the app.
 _ENDED = "The user removed this watch."
+# A plain webhook that refuses this many posts for their signature in a row, with none
+# taken between them, is failing, and says why. The gem is told once, not once a post:
+# anyone with the address could otherwise fill its log.
+_REFUSED_IN_A_ROW = 3
+_UNSIGNED = "Posts arrive, but they are not signed with this watch's secret"
 
 _log = logging.getLogger(__name__)
 
@@ -148,13 +169,16 @@ type RemovedBy = Literal["gem", "user"]
 # What became of a post to a watch's webhook address: handed over, a GitHub `ping` that
 # wakes nobody, refused for its signature, or not taken because the watch is paused.
 type HookOutcome = Literal["taken", "ignored", "refused", "paused"]
+# What a plain webhook's post says of its signature: none, one that holds, or one that
+# does not.
+type _Signature = Literal["unsigned", "signed", "forged"]
 
 # The events a watch tells its gem of itself: it starts failing, the fuse pauses it, a
 # failing watch works again, or the user removes it from the app.
 type _Change = Literal["watch.failing", "watch.paused", "watch.recovered", "watch.ended"]
 
-# Told the gem's id and the watch's id of each watch added, removed, or whose state
-# changes. It may raise: that is not passed on.
+# Told the gem's id and the watch's id of each watch added, removed, or changed as the
+# app shows it. It may raise: that is not passed on.
 type Listener = Callable[[str, str], Coroutine[Any, Any, None]]
 
 
@@ -178,9 +202,16 @@ class Watch(BaseModel):
     event: str | None = None
     arguments: str = "{}"
     cursor: str | None = None
-    # For a webhook, and for MCP events posted to us: the last part of its address, and
-    # the secret its posts are signed with. Never sent to the app.
+    # For a webhook, and for MCP events posted to us: the last part of its address. Never
+    # in the app's list of watches: a plain webhook's is given only by a route of its
+    # own, when the user asks to see it.
     token: str | None = None
+    # For a plain webhook: the secret its posts are signed with, never in the list
+    # either. None for one stored before watches kept one: its token is its secret.
+    secret: str | None = None
+    # For a plain webhook: whether it has taken a signed post. From then on it takes
+    # only signed ones.
+    signed: bool = False
     # For a timer: how often it goes off, and when it is next due.
     every_minutes: int | None = None
     due_at: UtcDatetime | None = None
@@ -191,9 +222,14 @@ class Watch(BaseModel):
     # Why it is failing or paused. None while it is active.
     reason: str | None = None
     created_at: UtcDatetime
-    # When it last brought an event, and how many it has brought.
+    # When it last brought an event, and how many it has brought: only those kept, not
+    # one delivered again.
     last_event_at: UtcDatetime | None = None
     events: int = 0
+    # For a plain webhook: how many posts it has refused for their signature, and when
+    # it last did.
+    refused: int = 0
+    last_refused_at: UtcDatetime | None = None
 
     @property
     def hook_url(self) -> str | None:
@@ -201,6 +237,12 @@ class Watch(BaseModel):
         if self.token is None or not settings.public_url:
             return None
         return f"{settings.public_url.rstrip('/')}{HOOKS_PATH}/{self.token}"
+
+    @property
+    def hook_secret(self) -> str | None:
+        """The secret a plain webhook's posts are signed with: its own, or its token if it
+        was stored before watches kept one, so a sender set up then goes on working."""
+        return self.secret or self.token
 
     @property
     def mcp(self) -> McpWatch:
@@ -348,13 +390,17 @@ class WatchEntityClass:
         self._locks: dict[str, asyncio.Lock] = {}
         # When each watch brought its events of the last hour, for the fuse.
         self._recent: dict[str, deque[datetime]] = {}
+        # How many posts each plain webhook has refused in a row, since one was taken.
+        # Counted in memory, as the fuse is: a restart starts the count again.
+        self._refusals: dict[str, int] = {}
         self._listeners: set[Listener] = set()
         # Telling listeners, and removing a deleted gem's watches, run on their own.
         self._chores: set[asyncio.Task[None]] = set()
         gems.when_deleted(self._forget)
 
     def listen(self, listener: Listener) -> None:
-        """Tell `listener` of each watch added, removed or changing state, until `ignore`."""
+        """Tell `listener` of each watch added, removed or changed as the app shows it,
+        until `ignore`."""
         self._listeners.add(listener)
 
     def ignore(self, listener: Listener) -> None:
@@ -386,6 +432,7 @@ class WatchEntityClass:
                 about=about,
                 source="webhook",
                 token=secrets.token_urlsafe(_TOKEN_BYTES),
+                secret=_new_secret(),
                 delivery="webhook",
                 created_at=self._now(),
             )
@@ -455,6 +502,7 @@ class WatchEntityClass:
         await self._stop(str(watch.id))
         self._locks.pop(str(watch.id), None)
         self._recent.pop(str(watch.id), None)
+        self._refusals.pop(str(watch.id), None)
         await self._note(gem_id, "watch.removed", {"watch": str(watch.id), "by": by})
         self._tell(watch)
         if tell_gem:
@@ -525,8 +573,8 @@ class WatchEntityClass:
             made = await self.add_webhook(gem_id, about.strip())
             return (
                 f"Watching, under the id {made.id}. Register this webhook where its events come "
-                f"from:\nAddress: {made.hook_url}\nSecret: {made.token}\nContent type: "
-                "application/json\nEach post to it wakes you. The secret is for that "
+                f"from:\nAddress: {made.hook_url}\nSecret: {made.hook_secret}\nContent type: "
+                f"{HOOK_CONTENT_TYPE}\nEach post to it wakes you. The secret is for that "
                 "registration only: do not show it to anyone."
             )
         if source == "event":
@@ -559,9 +607,11 @@ class WatchEntityClass:
         """A post came to the watch's webhook address: check it, and hand its event over.
 
         A watch on MCP events has the connections check it and read it. A plain webhook's
-        post must be signed with the watch's token if it says it is signed (GitHub's
-        `X-Hub-Signature-256`). Its event is named by `X-GitHub-Event`, or "webhook", and
-        its id is `X-GitHub-Delivery`. Raises if the sink cannot keep it.
+        post must be signed with the watch's secret (`hook_secret`) if it says it is
+        signed (`_signature`), and must be signed at all once the watch has taken a
+        signed post (`signed`). Its event is named by `X-GitHub-Event`, or "webhook",
+        and its id is `X-GitHub-Delivery`, or else `webhook-id`. Raises if the sink cannot
+        keep it.
         """
         if watch.state == "paused":
             return "paused"
@@ -571,17 +621,22 @@ class WatchEntityClass:
             )
             return "taken" if taken else "refused"
         named = {name.lower(): value for name, value in headers.items()}
-        signature = named.get("x-hub-signature-256")
-        if watch.token is None or (
-            signature is not None and not _signed(watch.token, body, signature)
-        ):
+        secret = watch.hook_secret
+        if secret is None:
+            return "refused"
+        now = self._now()
+        signature = _signature(secret, named, body, now)
+        if signature == "forged" or (signature == "unsigned" and watch.signed):
+            await self._refused(watch.id)
             return "refused"
         name = named.get("x-github-event") or "webhook"
         if name == "ping":
             return "ignored"
         text = body.decode("utf-8", errors="replace")
-        event_id = named.get("x-github-delivery")
-        if not await self._deliver(watch.id, name, text, event_id, self._now(), {}):
+        event_id = named.get("x-github-delivery") or named.get("webhook-id")
+        # A signed post taken locks the watch: it takes only signed ones from then on.
+        fields = {"signed": True} if signature == "signed" else {}
+        if not await self._deliver(watch.id, name, text, event_id, now, fields):
             return "paused"
         return "taken"
 
@@ -757,6 +812,10 @@ class WatchEntityClass:
     ) -> bool:
         """Hand one event of a watch to the sink, and keep `fields` with it once it is taken.
 
+        The event is counted, and the fuse told of it, only if the sink kept it now: one it
+        passed over as already kept (delivered again) is not, but `fields` are kept with it
+        all the same, and it is answered as taken, so a timer or a cursor moves on.
+
         Returns False if the watch is gone or paused, or the fuse pauses it now: then
         nothing is handed over. Raises if the sink cannot keep it, and then nothing is
         kept.
@@ -772,7 +831,7 @@ class WatchEntityClass:
             if len(recent) >= _FUSE_EVENTS:
                 await self._pause(watch, _FUSED)
                 return False
-            await self._sink.arrived(
+            kept = await self._sink.arrived(
                 GemEvent(
                     gem_id=watch.gem_id,
                     watch_id=str(watch.id),
@@ -784,21 +843,49 @@ class WatchEntityClass:
                     event_id=event_id,
                 )
             )
-            recent.append(now)
+            counted: dict[str, Any] = {}
+            if kept:
+                recent.append(now)
+                counted = {"last_event_at": now, "events": watch.events + 1}
             changed = watch.model_copy(
-                update={
-                    **fields,
-                    "last_event_at": now,
-                    "events": watch.events + 1,
-                    "state": "active",
-                    "reason": None,
-                }
+                update={**fields, **counted, "state": "active", "reason": None}
             )
-            await self._store(changed, {*fields, "last_event_at", "events", "state", "reason"})
-            if watch.state != changed.state:
+            await self._store(changed, {*fields, *counted, "state", "reason"})
+            # A post taken ends a run of refused ones.
+            self._refusals.pop(str(watch_id), None)
+            # The app is told of a change it shows, but not of a new event alone.
+            if (watch.state, watch.signed) != (changed.state, changed.signed):
                 self._tell(changed)
-                self._tell_gem(watch, changed)
+            self._tell_gem(watch, changed)
             return True
+
+    async def _refused(self, watch_id: PydanticObjectId) -> None:
+        """A plain webhook refused a post for its signature: count it, and make the watch
+        failing if it is the last of a run of `_REFUSED_IN_A_ROW`. It never raises: the
+        post is refused all the same.
+
+        Only the count is kept, never the post. A watch failing already, or paused, stays
+        as it is, so the gem is told once however many follow.
+        """
+        try:
+            async with self._lock(watch_id):
+                watch = await self._docdb.get(Watch, filters={"id": watch_id})
+                if watch is None:
+                    return
+                key = str(watch_id)
+                self._refusals[key] = self._refusals.get(key, 0) + 1
+                update: dict[str, Any] = {
+                    "refused": watch.refused + 1,
+                    "last_refused_at": self._now(),
+                }
+                if self._refusals[key] >= _REFUSED_IN_A_ROW and watch.state == "active":
+                    update |= {"state": "failing", "reason": _UNSIGNED}
+                changed = watch.model_copy(update=update)
+                if await self._store(changed, update.keys()):
+                    self._tell(changed)
+                    self._tell_gem(watch, changed)
+        except Exception:
+            _log.warning("watch %s: a refused post could not be counted", watch_id, exc_info=True)
 
     async def _pause(self, watch: Watch, reason: str) -> None:
         """Pause the watch, and stop its task.
@@ -966,7 +1053,47 @@ def _kinds(kinds: list[McpEventKind]) -> str:
     )
 
 
-def _signed(secret: str, body: bytes, signature: str) -> bool:
+def _signature(secret: str, headers: Mapping[str, str], body: bytes, now: datetime) -> _Signature:
+    """What a plain webhook's post says of its signature, checked with the watch's secret.
+
+    Two ways of signing are known: GitHub's (`X-Hub-Signature-256`), keyed with the
+    secret's text as it is, and Standard Webhooks' (`webhook-signature`, with `webhook-id`
+    and `webhook-timestamp`), keyed as that scheme keys one (`_standard_key`). A post that
+    carries both must hold for both. `headers` are named in lower case.
+    """
+    github = headers.get("x-hub-signature-256")
+    standard = headers.get("webhook-signature")
+    if github is None and standard is None:
+        return "unsigned"
+    if github is not None and not _github_signed(secret, body, github):
+        return "forged"
+    if (
+        standard is not None
+        and standard_webhook_id(_standard_key(secret), headers, body, now) is None
+    ):
+        return "forged"
+    return "signed"
+
+
+def _new_secret() -> str:
+    """A new plain webhook's secret, written as Standard Webhooks writes one."""
+    return _SECRET_PREFIX + base64.b64encode(secrets.token_bytes(_TOKEN_BYTES)).decode()
+
+
+def _standard_key(secret: str) -> bytes:
+    """The key a Standard Webhooks signature of this secret is made with.
+
+    A `whsec_` secret is keyed with the bytes after the prefix, as the scheme's libraries
+    key it. Any other (a watch stored before secrets were written so, whose secret is its
+    token) is keyed with its text as it is.
+    """
+    if secret.startswith(_SECRET_PREFIX):
+        with contextlib.suppress(binascii.Error, ValueError):
+            return base64.b64decode(secret.removeprefix(_SECRET_PREFIX), validate=True)
+    return secret.encode()
+
+
+def _github_signed(secret: str, body: bytes, signature: str) -> bool:
     """Whether `signature` is the body's, as GitHub signs one: `sha256=` and its HMAC."""
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected.encode(), signature.encode())
