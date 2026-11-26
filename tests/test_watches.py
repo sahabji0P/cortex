@@ -33,6 +33,7 @@ from app.entities.tools import Toolbox
 from app.entities.watch_ent import Watch, WatchEntityClass
 from app.main import app
 from app.routers.hooks.service import HooksServiceV1Class, get_hooks_service_v1
+from app.routers.watches.service import WatchesServiceV1Class, get_watches_service_v1
 from tests.test_chat import _DocDB, _docdb  # pyright: ignore[reportPrivateUsage]
 
 _PUBLIC = "https://hooks.example.com"
@@ -985,3 +986,116 @@ async def test_a_gem_lists_what_it_can_watch(setup: _Setup) -> None:
         '{"type": "object", "properties": {"repo": {"type": "string"}}}',
         False,
     )
+
+
+# ---- the app's routes
+
+
+@pytest.fixture
+async def routes(setup: _Setup) -> AsyncGenerator[httpx.AsyncClient]:
+    """A client of the app, in the test's own loop, whose watches routes reach `setup`'s."""
+    service = WatchesServiceV1Class(setup.watches, setup.gems)
+    app.dependency_overrides[get_watches_service_v1] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+    app.dependency_overrides.clear()
+
+
+async def test_the_app_lists_a_gem_s_watches_without_their_secrets(
+    setup: _Setup, routes: httpx.AsyncClient
+) -> None:
+    timer = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    await setup.clock.advance(seconds=1)
+    hook = await setup.watches.add_webhook(setup.one.id, "Review pull requests.")
+    await setup.clock.advance(seconds=1)
+    event = await setup.watches.add_mcp(
+        setup.one.id, "Triage new issues.", _OPENED, {"repo": "example/app"}
+    )
+    await setup.watches.add_webhook(setup.two.id, "Not hers.")
+
+    answer = await routes.get(f"/v1/gems/{setup.one.id}/watches")
+
+    assert answer.status_code == 200
+    for made in (hook, event):
+        assert made.token is not None and made.token not in answer.text
+    assert "/v1/hooks" not in answer.text
+    assert answer.json() == [
+        {
+            "id": str(event.id),
+            "gem": str(setup.one.id),
+            "about": "Triage new issues.",
+            "source": "mcp",
+            "state": "active",
+            "reason": None,
+            "connection": _OPENED.connection_id,
+            "event": "issue.opened",
+            "arguments": {"repo": "example/app"},
+            "every_minutes": None,
+            "next_at": None,
+            "has_address": False,
+            "created_at": "2026-11-26T09:00:02Z",
+            "last_event_at": None,
+            "events": 0,
+        },
+        {
+            "id": str(hook.id),
+            "gem": str(setup.one.id),
+            "about": "Review pull requests.",
+            "source": "webhook",
+            "state": "active",
+            "reason": None,
+            "connection": None,
+            "event": None,
+            "arguments": None,
+            "every_minutes": None,
+            "next_at": None,
+            "has_address": True,
+            "created_at": "2026-11-26T09:00:01Z",
+            "last_event_at": None,
+            "events": 0,
+        },
+        {
+            "id": str(timer.id),
+            "gem": str(setup.one.id),
+            "about": "Check the inbox.",
+            "source": "timer",
+            "state": "active",
+            "reason": None,
+            "connection": None,
+            "event": None,
+            "arguments": None,
+            "every_minutes": 5,
+            "next_at": "2026-11-26T09:05:00Z",
+            "has_address": False,
+            "created_at": "2026-11-26T09:00:00Z",
+            "last_event_at": None,
+            "events": 0,
+        },
+    ]
+
+
+async def test_the_watches_of_a_gem_that_is_not_there_are_404(
+    setup: _Setup, routes: httpx.AsyncClient
+) -> None:
+    for gem in [str(ObjectId()), "nope"]:
+        assert (await routes.get(f"/v1/gems/{gem}/watches")).status_code == 404
+
+
+async def test_the_user_removes_a_watch_and_it_stops(
+    setup: _Setup, routes: httpx.AsyncClient
+) -> None:
+    made = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    theirs = await setup.watches.add_timer(setup.two.id, "Check the post.", 5)
+
+    answer = await routes.delete(f"/v1/gems/{setup.one.id}/watches/{made.id}")
+
+    assert (answer.status_code, answer.content) == (204, b"")
+    assert [d["_id"] for d in setup.stored()] == [theirs.id]
+    assert ("watch.removed", {"watch": str(made.id), "by": "user"}) in await setup.logged(setup.one)
+    await setup.clock.advance(minutes=5)
+    assert [event.watch_id for event in setup.sink.events] == [str(theirs.id)]
+    # Another gem's watch, one that is gone, and one that never was are not found.
+    for gem, watch in [(setup.one.id, theirs.id), (setup.one.id, made.id), (setup.one.id, "x")]:
+        answer = await routes.delete(f"/v1/gems/{gem}/watches/{watch}")
+        assert answer.status_code == 404
