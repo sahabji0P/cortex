@@ -873,7 +873,7 @@ class ConnectionEntityClass:
             await self._store(signed, _SIGN_IN)
         await self._mcp.forget(current.server)
         try:
-            listed = await self._on_server(signed, self._mcp.list_tools)
+            listed = await self.on_server(signed, self._mcp.list_tools)
         except McpFailure as exc:
             self._tell(signed.id)
             return SignInOutcome(
@@ -955,7 +955,7 @@ class ConnectionEntityClass:
                 return "This tool is not available to you now."
             sent = cast("dict[str, object]", given)
             try:
-                result = await self._on_server(
+                result = await self.on_server(
                     now, lambda server: self._mcp.call_tool(server, tool.name, sent)
                 )
             except McpFailure as exc:
@@ -979,7 +979,7 @@ class ConnectionEntityClass:
         Raises `UpstreamError` otherwise.
         """
         try:
-            return await self._on_server(connection, self._mcp.list_tools)
+            return await self.on_server(connection, self._mcp.list_tools)
         except McpFailure as exc:
             failure = exc
         if failure.sign_in_needed and not connection.own_authorization:
@@ -1001,7 +1001,7 @@ class ConnectionEntityClass:
             f"The server at {connection.url} could not be asked for its tools: {failure.reason}"
         ) from failure
 
-    async def _on_server[T](
+    async def on_server[T](
         self, connection: Connection, ask: Callable[[McpServer], Awaitable[T]]
     ) -> T:
         """Make one request of the connection's server, with its pass kept good.
