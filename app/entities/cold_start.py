@@ -81,8 +81,9 @@ class Numbered(NamedTuple):
     item: Item
     # What a call's result stands for beyond its text (see `conversation_store.Kept`).
     mark: ResultMark | None = None
-    # For a stub call of ours and its result: the call whose result they carry.
-    delivers: str | None = None
+    # For a stub call of ours and its result: the call whose result they carry. For an
+    # event: the number of the `event.came` it tells.
+    delivers: str | int | None = None
 
 
 class Cache(NamedTuple):

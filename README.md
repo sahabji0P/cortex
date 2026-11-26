@@ -33,6 +33,9 @@ It is a personal project and an experiment. It runs on your own Mac, for one use
 - **Tools.** Web search, and the tools of any [MCP](https://modelcontextprotocol.io)
   server you connect, with browser sign-in (OAuth) and per-gem permissions. A tool call
   carries on in the background when a reply is cut, and its result is told later.
+- **Events.** Something a gem watches for wakes it: the event is told to the gem as
+  outside data at its next turn, and a quiet gem answers it unasked, even with the app
+  closed.
 
 ## How it works
 
@@ -66,7 +69,7 @@ Three rules hold for what a gem remembers, in a call and in writing:
 
 Every gem has a log: everything that happens with it, in one list, in the order it
 happened. It is not a trace kept beside the conversation. The gem's conversation *is*
-the five kinds of entry it remembers, and everything else that happened is written in
+the six kinds of entry it remembers, and everything else that happened is written in
 between. So for any request you can see exactly what the model was sent, what it
 produced, what the user actually got, and what it cost.
 

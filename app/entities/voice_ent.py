@@ -43,6 +43,13 @@ waiting, the result is added ahead of what they said, and one reply answers them
 tells the result. The same goes for a tool call left running by a written reply before
 the call: the gem has one set of calls that outlive their replies. A call still running
 when the call ends carries on too, and its result is told in writing.
+
+An event that comes in for one of the gem's watches (see `pending_events.py`) is told the
+same way. It never cuts a reply and is never an interruption: it waits for the gem's
+next turn. If the user's turn ends first, it goes in ahead of what they said, after any
+late results, and one reply does both. If the call is quiet, nobody speaking and nothing
+playing, the gem is woken by it, in the call. Events still waiting when the call ends
+are told in writing after it.
 """
 
 import asyncio
@@ -88,6 +95,7 @@ from app.entities.model import (
     is_openai,
     model_for,
 )
+from app.entities.pending_events import PendingEvents, told_events
 from app.entities.tools import Tool, gem_toolbox
 from app.entities.voice_speech import Clock, Playback, Speech, Standby
 
@@ -180,6 +188,7 @@ class VoiceConversation:
         sent: Callable[[bool], Sequence[Item]] | None = None,
         last_mode: Mode = "chat",
         late: LateResults | None = None,
+        events: PendingEvents | None = None,
         connected: Sequence[Tool] = (),
         clock: Clock = time.monotonic,
         record: Recording | None = None,
@@ -194,6 +203,9 @@ class VoiceConversation:
         # that outlive their replies, those of written replies included; whoever holds
         # it calls `results_came` when a result comes in while the call is open. Left
         # out, the conversation holds its own, and stops its calls when it closes.
+        # `events` holds the gem's events that wait to be told, and whoever holds it
+        # calls `results_came` too when one comes in. Left out, the conversation holds
+        # its own.
         # `connected` are the tools of the connections the gem may use, as they were when
         # the call opened. `sent`, if given, is asked once the conversation is described,
         # with whether anything changed, and gives the history as the model is to be
@@ -232,6 +244,9 @@ class VoiceConversation:
         # ends first.
         self._owns_late = late is None
         self._late = LateResults(self.results_came) if late is None else late
+        # Events that came in and wait to be told: at the next quiet moment, or with the
+        # user's turn if it ends first, as a late result is.
+        self._events = PendingEvents(self.results_came) if events is None else events
         # `llm` has to be the adapter of the provider that `model` belongs to. The gem is
         # offered the tools its config names and those of its connections, as in
         # writing (see `tools.py`).
@@ -272,6 +287,9 @@ class VoiceConversation:
         # Whether a late result is in the history that the user has heard no reply to
         # and has not spoken since. The reply about it is then made again.
         self._results_owed = False
+        # What that reply was asked for by: events, or late results alone. A reply made
+        # again is asked for by the same.
+        self._owed_by: Literal["background_result", "event"] = "background_result"
         self._announcing: asyncio.Task[None] | None = None
         # The speech connection for the next reply, opened before it is needed.
         self._standby = Standby(tts, clock)
@@ -305,7 +323,10 @@ class VoiceConversation:
             yield item
 
     def results_came(self) -> None:
-        """A late result has come in: told at the next quiet moment, or with the user's turn."""
+        """A late result, or an event, has come in: told when the call is next quiet.
+
+        Or with the user's turn, if it ends first.
+        """
         self._announce_when_quiet()
 
     async def close(self) -> None:
@@ -412,14 +433,17 @@ class VoiceConversation:
         self._add(*of_turn(kept, reply.turn.number))
 
     def _announce_when_quiet(self) -> None:
-        """Make sure something is waiting to give the model its late results."""
+        """Make sure something is waiting to give the model its late results and events."""
         waiting = self._announcing is not None and not self._announcing.done()
-        owed = self._late.ready or self._results_owed
+        owed = self._late.ready or self._events.ready or self._results_owed
         if owed and not self._user_speaking and not waiting and not self._closed:
             self._announcing = asyncio.create_task(self._announce_late_results())
 
     async def _announce_late_results(self) -> None:
         """Wait until nothing is being said, then have the model tell the user of late results.
+
+        Events that came in are told the same way, after the results: the gem is woken by
+        them.
 
         Nothing is being said once the reply in progress has been produced and played to
         the end. Only then is that reply final, so only then may another request be made.
@@ -438,13 +462,16 @@ class VoiceConversation:
             else:
                 break
         self._settle()
-        if not self._late.ready and not self._results_owed:
+        if not self._late.ready and not self._events.ready and not self._results_owed:
             return  # the user has been told in the meantime
         # The turn of the reply that tells them. Nothing is awaited from here on, so
         # the reply is either begun or, if it is stopped first, its turn is closed.
-        turn = self._record.turn("background_result")
-        if self._late.ready:
+        if self._late.ready or self._events.ready:
+            self._owed_by = "event" if self._events.ready else "background_result"
+        turn = self._record.turn(self._owed_by)
+        if self._late.ready or self._events.ready:
             self._add_late_results(turn)
+            self._add_events(turn)
             self._results_owed = True
         self._unstarted = turn
         self._producing = asyncio.create_task(self._respond(turn, brings_results=True))
@@ -460,6 +487,17 @@ class VoiceConversation:
         if results:
             self._unanswered = False
         self._add(*results)
+
+    def _add_events(self, turn: TurnRecord) -> None:
+        """Add each waiting event to the history, as the gem is told it.
+
+        They follow the late results told with them, and what the user says in the turn
+        comes after them. `turn` is the turn of the reply that tells them.
+        """
+        events = told_events(self._events.take(), turn.number)
+        if events:
+            self._unanswered = False
+        self._add(*events)
 
     async def _start_reply(self, transcript: str) -> None:
         """A turn ended: answer it, or put back what it interrupted if nothing was said."""
@@ -488,10 +526,12 @@ class VoiceConversation:
         if spoke:
             # The result is in front of the model along with what the user now says.
             self._results_owed = False
-            # Results waiting go in ahead of their words, so the one reply that answers
-            # them tells the results too.
+            # Results and events waiting go in ahead of their words, so the one reply
+            # that answers them tells those too.
             if self._late.ready:
                 self._add_late_results(turn)
+            if self._events.ready:
+                self._add_events(turn)
             # Their words are final as they stand, so they join the history now.
             self._unanswered = True
             self._add(said(transcript, turn=turn.number))
@@ -668,6 +708,7 @@ class VoiceLine:
         sent: Callable[[bool], Sequence[Item]] | None = None,
         last_mode: Mode = "chat",
         late: LateResults | None = None,
+        events: PendingEvents | None = None,
         connected: Sequence[Tool] = (),
         record: Recording | None = None,
         time_told: TimeTold | None = None,
@@ -676,7 +717,8 @@ class VoiceLine:
 
         `darbar` is the Darbar text the gem is told first, or None for the built-in one;
         it is kept for the whole conversation. `history`, `sent`, `last_mode`, `late`,
-        `connected`, `record` and `time_told` are as `VoiceConversation` takes them.
+        `events`, `connected`, `record` and `time_told` are as `VoiceConversation` takes
+        them.
         """
         self._opened = True
         return VoiceConversation(
@@ -692,6 +734,7 @@ class VoiceLine:
             sent=sent,
             last_mode=last_mode,
             late=late,
+            events=events,
             connected=connected,
             record=record,
             time_told=time_told,

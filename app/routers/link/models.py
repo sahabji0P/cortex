@@ -94,7 +94,8 @@ class LinkModels:
                 # 4: a call's reply comes as words timed to its audio, not as text.
                 # 5: a connection whose sign-in changes is told (`connection.changed`).
                 # 6: a gem's log can be watched (`log.watch`, `log.entry`).
-                version: Literal[6] = 6
+                # 7: an event a gem watches for can wake it (`chat.event`).
+                version: Literal[7] = 7
 
             class LogEntry(BaseModel):
                 """One entry of a gem's log, as it is written down, for a socket that watches it.

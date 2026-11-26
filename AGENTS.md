@@ -20,7 +20,7 @@ a change here needs a matching change there:
 | The standing socket `/v1/link` (`app/routers/link`; its frames in `docs/chat-contract.md`) | `src/link.rs`, `src/chat.rs`, `src/voice.rs`, `src/audio.rs` | Written chat, and calls: `call.start` and its settings, the call's audio and how it is played, `call.playback`, and the frames a call ends with |
 | `VoiceEvent` in `app/entities/voice_ent.py` | `src/protocol.rs` | A call's events, sent on the link with `call.` put before their type |
 | `/v1/gems` (`app/routers/gems`, `GemConfig` in `app/entities/gem_ent.py`) | `src/gem_routes.rs` | The gems and their configs |
-| `GET /v1/gems/{id}/chat`, `POST /v1/gems/{id}/reset` | `src/chat.rs` | A gem's conversation so far, a call's turns included, and resetting the gem so it starts again |
+| `GET /v1/gems/{id}/chat`, `POST /v1/gems/{id}/reset` | `src/chat.rs` | A gem's conversation so far, a call's turns and the events it was told included, and resetting the gem so it starts again |
 | `GET /v1/gems/{id}/log`, `GET /v1/gems/{id}/log/{seq}`, `GET /v1/gems/{id}/log/{seq}/sent`, and the frames `log.watch`, `log.unwatch` and `log.entry` on the link (the entries are written down in `app/entities/gem_log.py`) | `src/trajectory.rs`, `src/log_store.rs`, and Home's figures in `src/ui/stats.rs` | A gem's log: every turn, every request to the model with its tokens and cost, every tool call, every change of model, instructions or tools, and what the gem remembers, as entries of one shape in the order they happened |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
 | `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | `src/connections.rs`, `src/ui/connections_view.rs` | The tool servers gems can use, their tools, which gem may use which, whether a gem finds its tools by searching (`deferred`), each server's own icons and website, and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
@@ -65,6 +65,13 @@ What that means in practice:
   conversation, in the time zone the app sends on `chat.send` and `call.start`.
 - **A call is always with a gem.** `call.start` names the gem, and may say who speaks
   first. The gem's config says which model answers: a call cannot ask for another.
+- **An event wakes a gem.** A watch's event is handed to the sink
+  (`app/entities/events_ent.py`), written down as `event.came`, and told to the gem at
+  its next turn as a user message in an event tag (`event.received`): never as the
+  user's words, and never as a tool call. It never cuts a reply. A quiet gem is woken by
+  it, in a call or in writing, and its reply is stored even with no app connected. The
+  app is sent `chat.event` before such a reply, and shows an event in the history as
+  role `event`.
 - **A gem has one conversation, called or written to.** A call starts from what is
   stored and stores what it adds as it goes; the history route shows them as `user`
   and `gem` messages. One writer at a time: while a call holds a gem, a `chat.send` to it
@@ -75,9 +82,9 @@ What that means in practice:
   through is a user message of its own, and the next one follows it.
 - **A gem has a log, and it is the base for anything that looks at what a gem did.**
   Everything that happens with a gem is written down in one list, in order, each thing
-  once, as the kind of entry it is. Five kinds (`user.said`, `note.written`,
-  `gem.said`, `tool.called`, `tool.result`) are what the gem remembers, and its
-  conversation is those entries, since the latest `gem.reset`:
+  once, as the kind of entry it is. Six kinds (`user.said`, `note.written`,
+  `gem.said`, `tool.called`, `tool.result`, `event.received`) are what the gem
+  remembers, and its conversation is those entries, since the latest `gem.reset`:
   `docs/chat-contract.md` says every kind and its fields.
   A new thing a gem does (a new step of the loop, a new paid service) is a new kind of
   entry there, written through `gem_log.py`, and never a store of its own. Adding a
