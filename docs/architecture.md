@@ -62,14 +62,18 @@ config ← core ← adapters ← entities ← routers ← main
 | `instructions.py` | what the model is told, in layers |
 | `tools.py` | the tools a model may call, each a small object, and which a gem is offered |
 | `connection_ent.py` | the tool servers, which gem may use which, and signing in to them |
+| `gem_event.py` | what wakes a gem: an event, and the shapes that cross between a watch's source and the gem |
+| `watch_ent.py` | a gem's watches: kept, run (MCP events, webhooks, timers), the fuse, and the gem's tools for them ([Watches](watches.md)) |
 | `gem_ent.py` | a gem's config and its versions |
 | `darbar_ent.py` | the Darbar text every gem is told first |
 | `user_ent.py` | the user account behind `/v1/users` |
 
 ### Routers
 
-`link` (the standing socket, which carries chat, calls and the log), `gems`, `darbar`,
-`connections`, `providers`, `voice` (the model list) and `user`.
+`link` (the standing socket, which carries chat, calls and the log), `gems`, `watches` (a
+gem's watches), `hooks` (where a watch's webhook is posted, the one route meant to be
+reached from outside), `darbar`, `connections`, `providers`, `voice` (the model list) and
+`user`.
 
 ## The loop, and the surface a reply is delivered on
 
