@@ -91,12 +91,14 @@ entry it is, at the moment it is final.
 | | Kinds | Sent to a model? |
 | --- | --- | --- |
 | **What the gem remembers** | `user.said`, `note.written`, `gem.said`, `tool.called`, `tool.result` | Yes. The gem's conversation is these entries since the latest reset, in order, and nothing else |
-| **What happened** | `call.opened`, `call.closed`, `gem.reset`, `turn.opened`, `turn.closed`, `settings.changed`, `request.sent`, `request.done`, `tool.started`, `tool.backgrounded`, `tool.done` | Never |
+| **What happened** | `call.opened`, `call.closed`, `gem.reset`, `turn.opened`, `turn.closed`, `settings.changed`, `cache.cold`, `request.sent`, `request.done`, `tool.started`, `tool.backgrounded`, `tool.done` | Never |
 
 So the log is not a copy kept beside the conversation: it *is* the conversation, with
 everything else that happened written in between. A `gem.reset` is where the user reset
 the gem: the conversation is what the gem remembers after the latest one, and
-what came before stays in the log.
+what came before stays in the log. A `cache.cold` is where the conversation started
+cold: from there on, long tool results before its `before` are sent expired (see
+[the contract](chat-contract.md#a-cold-start)).
 
 ## What it promises
 
@@ -105,8 +107,10 @@ what came before stays in the log.
   it, so the log's order is the order the model was sent things in. Order by `seq`,
   never by `at`.
 - **A request holds a count, not a copy.** It was sent every remembered entry before it,
-  since the latest reset, and `count` says how many. That is how `/sent` rebuilds it,
-  and how a lost entry shows: the numbers do not add up, and `exact` is false.
+  since the latest reset, and `count` says how many, each as stored or, before the line
+  of the latest `cache.cold`, expired. That is how `/sent` rebuilds it, and how a lost
+  entry shows: the numbers do not add up, and `exact` is false. A `cache.cold` is kept
+  like what the gem remembers, since what was sent depends on it.
 - **A change comes before what it applies to.** What a reply or a call is made with (the
   model and the way to its provider, each layer of the instructions, every tool) is
   compared with what was last written down, and only the part that differs is written,
@@ -119,7 +123,8 @@ what came before stays in the log.
   watches the gem, and written to the database behind the reply's back. A write of what
   happened that fails is logged and dropped: it fails no reply. What the gem remembers is
   held and written again, in order, and a reply's last frame and a call's end wait until
-  it is stored. If it cannot be, the reply or the call fails.
+  it is stored. If it cannot be, the reply or the call fails. So does a `cache.cold`, and
+  a reply in writing waits for it to be stored before its first request.
 - **It changes nothing.** With a log or without one, the model is sent the same: a test
   sends a scripted reply both ways and compares the requests.
 

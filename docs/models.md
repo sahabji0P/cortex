@@ -77,6 +77,10 @@ more than input (see [Cost](#cost)).
   has a second mark 18 blocks before its end. A round of up to some 18 calls still reads
   the cache ([measured](voice-spec.md#measured-in-live-runs)). A request shorter than 512
   tokens is not cached.
+- **How long a cache lasts** is taken to be 5 minutes from its last use on Anthropic
+  (ours ask for no longer) and 30 minutes on OpenAI (its default from GPT-5.6 on; through
+  the proxy it is not known). After that, or when the model, the instructions or the
+  tools change, a conversation starts cold (see [the contract](chat-contract.md#a-cold-start)).
 
 ## OpenAI through a ChatGPT login
 
