@@ -33,8 +33,15 @@ from app.entities.tools import Toolbox
 from app.entities.watch_ent import Watch, WatchEntityClass
 from app.main import app
 from app.routers.hooks.service import HooksServiceV1Class, get_hooks_service_v1
+from app.routers.link.service import LinkServiceV1Class
 from app.routers.watches.service import WatchesServiceV1Class, get_watches_service_v1
-from tests.test_chat import _DocDB, _docdb  # pyright: ignore[reportPrivateUsage]
+from tests.test_chat import (
+    _chat,  # pyright: ignore[reportPrivateUsage]
+    _close,  # pyright: ignore[reportPrivateUsage]
+    _DocDB,  # pyright: ignore[reportPrivateUsage]
+    _docdb,  # pyright: ignore[reportPrivateUsage]
+    _open,  # pyright: ignore[reportPrivateUsage]
+)
 
 _PUBLIC = "https://hooks.example.com"
 _START = datetime(2026, 11, 26, 9, 0, tzinfo=UTC)
@@ -1099,3 +1106,29 @@ async def test_the_user_removes_a_watch_and_it_stops(
     for gem, watch in [(setup.one.id, theirs.id), (setup.one.id, made.id), (setup.one.id, "x")]:
         answer = await routes.delete(f"/v1/gems/{gem}/watches/{watch}")
         assert answer.status_code == 404
+
+
+# ---- the standing socket
+
+
+async def test_every_socket_is_told_when_a_watch_changes(setup: _Setup) -> None:
+    chat = await _chat()
+    plain = chat.service()
+    link = LinkServiceV1Class(chat.chat, plain.call, watches=setup.watches)
+    first, first_linked = await _open(link)
+    second, second_linked = await _open(link)
+
+    made = await setup.watches.add_timer(setup.one.id, "Check the inbox.", 5)
+    setup.sink.fails = ConnectionError("the database went away")
+    await setup.clock.advance(minutes=5)
+    await setup.watches.remove(setup.one.id, str(made.id), by="user")
+
+    told = {"type": "watch.changed", "gem": str(setup.one.id), "watch": str(made.id)}
+    for socket in (first, second):
+        await socket.until("watch.changed", 3)  # added, failing, removed
+        assert [f for f in socket.frames if f["type"] != "link.ready"] == [told] * 3
+    await _close(first, first_linked)
+    await _close(second, second_linked)
+    # A socket that has gone is told no more.
+    listeners = setup.watches._listeners  # pyright: ignore[reportPrivateUsage]
+    assert len(listeners) == 1
