@@ -91,9 +91,11 @@ constant time. Two ways are known:
 | GitHub's | `X-Hub-Signature-256`: `sha256=` and the HMAC-SHA256, in hex | The body |
 | [Standard Webhooks](https://www.standardwebhooks.com/) | `webhook-id`, `webhook-timestamp` (seconds since the epoch) and `webhook-signature`: one or more `v1,` and the HMAC-SHA256 in base64, a space between two | `{webhook-id}.{webhook-timestamp}.{body}` |
 
-- **The key is the secret as it is.** Standard Webhooks' own secrets are `whsec_` and
-  base64, and its libraries decode them to make the key. This secret is not one: a
-  sender must sign with its text as it is. GitHub does that already.
+- **The secret is written as Standard Webhooks writes one**: `whsec_` and 32 random
+  bytes in base64. A Standard Webhooks signature is keyed with those bytes, as that
+  scheme's libraries key it, so a sender using one just takes the secret as it is given.
+  GitHub keys with the whole text, `whsec_` and all, as it does any secret. A watch made
+  before secrets were written so signs with its token, keyed with its text both ways.
 - **A Standard Webhooks post must be fresh**: its time within five minutes of now, either
   way, so an old post sent again is refused. Its `webhook-id` is its event's id, so one
   sent again within that time is kept once.
