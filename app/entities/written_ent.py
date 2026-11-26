@@ -4,7 +4,7 @@ Written entity: a conversation with a gem in writing.
 One message in, one reply out. The reply is made by the same loop as a call's (see
 `loop.py`) and delivered as text: each piece reaches the reader as an event of the
 stream `send` returns. A reply can also be written with no new message, as when a late
-search result is to be told.
+search result is to be told, or an event that came in.
 
 A conversation is given the history to start from. Each thing it adds to it (the user's
 message, the reply as it was delivered, its tool calls with their results) it hands to
@@ -179,12 +179,17 @@ class WrittenConversation:
         self._settling: asyncio.Task[WrittenEvent] | None = None
 
     async def send(
-        self, text: str | None, *, at: datetime | None = None
+        self,
+        text: str | None,
+        *,
+        at: datetime | None = None,
+        woken_by: Literal["background_result", "event"] = "background_result",
     ) -> AsyncGenerator[WrittenEvent]:
         """Send a message and yield its reply as it is written, ending with `done` or `cut`.
 
         With `text` None, no message is sent: the reply is written from the history as it
-        stands, as when a late search result is to be told.
+        stands, as when a late search result is to be told, or an event. `woken_by` says
+        which, for the gem's log.
 
         The message joins the history as it is sent, after a line that gives the time
         if one is due. `at` is when it was sent, if not now. Nothing happens until the
@@ -206,8 +211,8 @@ class WrittenConversation:
             if time_due(self._time, at):
                 self._add(time_line(self._time.zone, at))
                 self._time = TimeTold(self._time.zone, at)
-        # A reply with no message is written to tell a late result.
-        turn = self._record.turn("background_result" if text is None else "user")
+        # A reply with no message is written to tell a late result, or an event.
+        turn = self._record.turn(woken_by if text is None else "user")
         if text is not None:
             # Final as it stands, so it joins the history now, whatever the reply does.
             self._add(said(text, at, turn.number))

@@ -21,15 +21,16 @@ to be told could not be stored (`lost`): they wait in the log, and are read back
 the next time the gem's conversation is read.
 """
 
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 
 from app.entities.conversation_store import LogEntry, stamp
 from app.entities.gem_event import GemEvent
 from app.entities.history import Added, event_told
 
-__all__ = ["PendingEvent", "PendingEvents", "came_fields", "pending"]
+__all__ = ["PendingEvent", "PendingEvents", "came_fields", "pending", "told_events"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +67,17 @@ def came_fields(event: GemEvent) -> dict[str, Any]:
 def pending(entry: LogEntry) -> PendingEvent:
     """The event an `event.came` entry wrote down, ready to be told."""
     return PendingEvent(entry.seq, event_told(entry.data, entry.seq))
+
+
+def told_events(events: Sequence[PendingEvent], turn: int | None = None) -> list[Added]:
+    """Events as they join the history now, one item each, in the turn that tells them.
+
+    They follow everything the model has been sent, and the late results told with
+    them. What the user says next comes after them: a turn that ends while events wait
+    is answered with the events in front of it, in one reply.
+    """
+    now = datetime.now(UTC)
+    return [replace(event.told, at=now, turn=turn) for event in events]
 
 
 class PendingEvents:

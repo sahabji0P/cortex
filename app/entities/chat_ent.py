@@ -32,6 +32,15 @@ then, the result is added ahead of that message instead, and the reply to the me
 tells it, as in a call (see `history.py`). Which stub delivered which call is read
 from the stub's arguments, and which results are placeholders and which cancels stopped
 a call, from the marks stored with them.
+
+An event that came in for one of the gem's watches (see `pending_events.py`) is told the
+same way, after the late results waiting with it, with one difference: nobody has to be
+there. A gem that is quiet is woken by the event itself, and its reply is written and
+stored even when no client has written to it: it is sent to the client of the latest
+message if there is one, and to nobody otherwise. A client that goes does not cut it.
+Events that come while a reply is being written all wait for the next turn, and are told
+in one reply. An event waiting when a message comes goes in ahead of the message, and
+the reply to the message tells it.
 """
 
 import asyncio
@@ -57,6 +66,7 @@ from app.entities.history import TimeTold, mode_line, shown, told
 from app.entities.instructions import instruction_layers, joined
 from app.entities.late_results import LateResult
 from app.entities.model import LLM, ModelName, is_openai, model_for
+from app.entities.pending_events import PendingEvent, told_events
 from app.entities.tools import gem_toolbox
 from app.entities.written_ent import WrittenConversation, WrittenEvent
 
@@ -69,6 +79,9 @@ class ChatEvent(BaseModel):
     - `chat.result` a search the gem started in an earlier reply has come back, and a
                     reply about it follows, unasked. `text` is what the search showed
                     (its query). A result told in the reply to a message has none
+    - `chat.event`  an event one of the gem's watches caught has come in, and a reply
+                    about it follows, unasked. `text` says what came in. An event told
+                    in the reply to a message has none
     - `chat.text`   the next piece of the reply, as it is written
     - `chat.tool`   the gem is using a tool. `text` says what, such as what a search
                     looks up
@@ -80,7 +93,15 @@ class ChatEvent(BaseModel):
     `gem` is the gem's id as the client sent it.
     """
 
-    type: Literal["chat.result", "chat.text", "chat.tool", "chat.done", "chat.cut", "chat.error"]
+    type: Literal[
+        "chat.result",
+        "chat.event",
+        "chat.text",
+        "chat.tool",
+        "chat.done",
+        "chat.cut",
+        "chat.error",
+    ]
     gem: str
     text: str
 
@@ -92,7 +113,8 @@ type Deliver = Callable[[ChatEvent], Awaitable[None]]
 class ChatTurn:
     """One reply of a gem's, from when it is asked for until it is stored.
 
-    Most answer a message. One with no message tells the user of late search results.
+    Most answer a message. One with no message tells the user of late search results,
+    or of events that came in.
     """
 
     def __init__(self) -> None:
@@ -154,9 +176,9 @@ class ChatEntityClass:
         # The tool servers gems can use. Without it, no gem is offered a connection's tools.
         self._connections = connections
         # The latest message to each gem, by `gem_key`: its id as the client spelled it,
-        # and its client. A late result is told to that client.
+        # and its client. A late result, or an event, is told to that client.
         self._latest: dict[str, tuple[str, Deliver]] = {}
-        # A gem's late results are told here, in writing.
+        # A gem's late results and events are told here, in writing.
         conversations.tell_results_with(self._tell_when_quiet)
 
     def send(
@@ -229,12 +251,13 @@ class ChatEntityClass:
             if not turn.was_cut:
                 self._latest[key] = (gem_id, deliver)
             # A call lost to a restart is closed before the new message. Late results
-            # waiting go in ahead of it, so the reply to it tells them too. No
-            # `chat.result` goes before that reply: the client takes one as the start of
-            # a reply nobody asked for. A message cut already leaves them to the next.
+            # and events waiting go in ahead of it, so the reply to it tells them too.
+            # No `chat.result` or `chat.event` goes before that reply: the client takes
+            # one as the start of a reply nobody asked for. A message cut already leaves
+            # them to the next.
             kept = self._conversations.gem(key)
             results = [] if turn.was_cut else kept.late.take()
-            history = await self._load(ready.gem.id, results)
+            history, _ = await self._load(ready.gem.id, results, events=not turn.was_cut)
             await self._write(
                 turn, key, ready, history, text, at, gem_id, deliver, time_zone=time_zone
             )
@@ -278,10 +301,12 @@ class ChatEntityClass:
         deliver: Deliver,
         *,
         time_zone: str | None = None,
+        woken_by: Literal["background_result", "event"] = "background_result",
     ) -> None:
         """Write one reply from `history`, deliver it, store it, and send its last frame.
 
-        `text` is the user's new message, or None for a reply with no message.
+        `text` is the user's new message, or None for a reply with no message: then
+        `woken_by` says what it tells.
         """
         tell = _teller(gem_id, deliver)
         gem = ready.gem
@@ -323,7 +348,7 @@ class ChatEntityClass:
             time_told=TimeTold(time_zone, history.last_time),
         )
         turn.begin(conversation)
-        ended, failure = await _read(conversation, text, at, gem_id, deliver)
+        ended, failure = await _read(conversation, text, at, gem_id, deliver, woken_by)
         try:
             # What the reply added was handed to the gem's log as it was added. The
             # reply's last frame waits until it is stored.
@@ -371,13 +396,13 @@ class ChatEntityClass:
                 turn.cut()
 
     def _tell_when_quiet(self, key: str) -> None:
-        """If results are waiting and no reply is being written to the gem, tell them.
+        """If results or events wait and no reply is being written to the gem, tell them.
 
         Whether the gem is quiet and the taking of its slot are done with no `await`
         between them, so a message that arrives at that instant waits for this reply.
         """
         kept = self._conversations.find(key)
-        if kept is None or not kept.late.ready:
+        if kept is None or not (kept.late.ready or kept.events.ready):
             return
         if kept.writer is not None or kept.call is not None:
             return
@@ -386,11 +411,14 @@ class ChatEntityClass:
         turn.task = asyncio.create_task(self._tell(turn, key))
 
     async def _tell(self, turn: ChatTurn, key: str) -> None:
-        """Add the waiting results to the stored conversation, then have the gem tell them.
+        """Add the waiting results and events to the stored conversation, then have the
+        gem tell them.
 
         The reply has no new message. It goes to the client of the latest message to the
-        gem, if that client is still there. If it is not, the results are only stored:
-        the gem's instructions tell it to bring them up when it next answers.
+        gem, if that client is still there. If it is not, results alone are only stored:
+        the gem's instructions tell it to bring them up when it next answers. An event
+        wakes the gem whoever is there: its reply is written and stored all the same,
+        and sent to nobody. Nor does a client that goes cut it.
         """
         kept = self._conversations.gem(key)
         # The client the reply is for, once `chat.result` has reached it: it is then owed
@@ -403,52 +431,91 @@ class ChatEntityClass:
             # Taken at once, so that whatever happens next they are not taken again.
             results = kept.late.take()
             if not await self._gems.exists(key):
-                return  # the gem went, and its conversation with it: they are dropped
+                # The gem went, and its conversation with it: they are dropped.
+                kept.events.take()
+                return
             gem_oid = ObjectId(key)
-            history = await self._load(gem_oid, results)
+            history, events = await self._load(gem_oid, results, events=True)
             if await self._conversations.gone(gem_oid):
                 return  # deleted while they were stored
             latest = self._latest.get(key)
-            if latest is None:
+            if latest is None and not events:
                 return  # nobody is there to read a reply: the results are only stored
-            gem_id, deliver = latest
-            # Noted with no `await` since the client was read, so that if it goes from
-            # here on, `left` finds this reply and cuts it.
-            turn.unasked_for = deliver
+            if latest is None:
+                # An event wakes the gem whoever is there: its reply goes to nobody.
+                deliver = _nowhere
+            elif events:
+                # A reply about an event is not cut by its client going: it goes on to
+                # nobody, and is stored all the same.
+                gem_id, deliver = latest[0], _quietly(latest[1])
+            else:
+                gem_id, deliver = latest
+                # Noted with no `await` since the client was read, so that if it goes
+                # from here on, `left` finds this reply and cuts it.
+                turn.unasked_for = deliver
             ready = await self._ready(key)
             if isinstance(ready, str) or turn.was_cut:
                 # No reply can be made, or a message came first (or the client went): the
-                # results are stored, and the gem's instructions tell it to bring them up
-                # when it answers.
+                # results and events are stored, and the gem's instructions tell it to
+                # bring them up when it answers.
                 return
             try:
                 for late in results:
                     text = shown(late.call) or ""
                     await deliver(ChatEvent(type="chat.result", gem=gem_id, text=text))
+                for event in events:
+                    await deliver(ChatEvent(type="chat.event", gem=gem_id, text=event.line))
             except Exception:
                 return  # the client has gone: the results stay stored, untold
             owed = deliver
-            await self._write(turn, key, ready, history, None, datetime.now(UTC), gem_id, deliver)
+            await self._write(
+                turn,
+                key,
+                ready,
+                history,
+                None,
+                datetime.now(UTC),
+                gem_id,
+                deliver,
+                woken_by="event" if events else "background_result",
+            )
         except Exception as exc:
             # As when the store is out of reach. A result taken and not stored is lost:
-            # its placeholder is closed as lost before the next reply. A client sent
-            # `chat.result` is owed a last frame: `_write` sends one only once nothing
-            # after it can fail.
+            # its placeholder is closed as lost before the next reply. Events not taken
+            # yet wait in the log, to be read back when the conversation is next read:
+            # left here, they would start another reply at once, and fail again. A
+            # client sent `chat.result` is owed a last frame: `_write` sends one only
+            # once nothing after it can fail.
+            if kept.events.ready:
+                kept.events.take()
+                kept.events.lost()
             if owed is not None:
                 await _teller(gem_id, owed)("chat.error", f"no reply could be made: {exc}")
         finally:
             self._release(turn, key)
 
-    async def _load(self, gem_id: ObjectId, results: list[LateResult]) -> Stored:
+    async def _load(
+        self, gem_id: ObjectId, results: list[LateResult], *, events: bool
+    ) -> tuple[Stored, list[PendingEvent]]:
         """The gem's conversation as stored, with the late results taken added after it.
 
-        They are added in writing: after a call, a line says so first.
+        With `events`, the events waiting are taken and added after the results, and
+        returned. They are added in writing: after a call, a line says so first. Events
+        that could not be stored wait in the log, and are read again from it the next
+        time the conversation is read.
         """
         history = await self._conversations.load(gem_id, told=results)
-        added = told(results)
+        kept = self._conversations.gem(str(gem_id))
+        taken = kept.events.take() if events else []
+        added = [*told(results), *told_events(taken)]
         if added:
             added = [*mode_line("chat", history.mode), *added]
-        return await self._conversations.add(gem_id, history, added, "chat")
+        try:
+            return await self._conversations.add(gem_id, history, added, "chat"), taken
+        except BaseException:
+            if taken:
+                kept.events.lost()
+            raise
 
 
 def _teller(
@@ -462,12 +529,31 @@ def _teller(
     return tell
 
 
+async def _nowhere(event: ChatEvent) -> None:
+    """Where a reply goes when nobody is there to read it: it is only stored."""
+
+
+def _quietly(deliver: Deliver) -> Deliver:
+    """Send frames to a client for as long as it is there, and then to nobody.
+
+    A reply sent so is not ended by its client going: it is written and stored all the
+    same.
+    """
+
+    async def send(event: ChatEvent) -> None:
+        with contextlib.suppress(Exception):
+            await deliver(event)
+
+    return send
+
+
 async def _read(
     conversation: WrittenConversation,
     text: str | None,
     at: datetime,
     gem_id: str,
     deliver: Deliver,
+    woken_by: Literal["background_result", "event"] = "background_result",
 ) -> tuple[WrittenEvent | None, Exception | None]:
     """Deliver one reply as it is written. Return the event that ended it, or its failure.
 
@@ -475,7 +561,7 @@ async def _read(
     then nothing ended it that can be told.
     """
     try:
-        async with contextlib.aclosing(conversation.send(text, at=at)) as stream:
+        async with contextlib.aclosing(conversation.send(text, at=at, woken_by=woken_by)) as stream:
             async for event in stream:
                 if event.type in ("done", "cut"):
                     return event, None
