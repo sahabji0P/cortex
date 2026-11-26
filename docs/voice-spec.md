@@ -251,7 +251,7 @@ Every request to the conversation model is built the same way, in this order (En
 | --- | --- | --- |
 | 1. Instructions | The text under [The instructions](#the-instructions) | No |
 | 2. Tools | `web_search`, `cancel_tool_call`, `tool_search` when a connection is deferred, then the tools of the gem's connections (a deferred one marked so, or on OpenAI left out), then any tool the history holds a call of that is no longer offered (declared as not available). Or none | No |
-| 3. History | The gem's stored conversation, then everything the call has added, oldest first: the user's words as each turn ends, each reply as heard, and on the second and later calls of one reply what was said before the search, the call and its result | Only grows at its end |
+| 3. History | The gem's stored conversation (as it is sent after the call's check for a cold start), then everything the call has added, oldest first: the user's words as each turn ends, each reply as heard, and on the second and later calls of one reply what was said before the search, the call and its result | Only grows at its end |
 
 Set per request:
 
@@ -288,10 +288,18 @@ words in the call (and with a tool result before it, if the written part ended i
 
 - **The history only grows at its end.** (Enforced) Each request starts with the whole
   of the one before it, so a prompt cache stays valid. The tests check this on every
-  model call.
-- **Nothing changes after being sent.** (Enforced) Everything is added the moment it is
-  final, before the request that carries it. Nothing is ever rewritten: no result is
-  cleared.
+  model call, and allow one exception only where a test says a request starts cold.
+- **Nothing changes after being sent, until the cache is gone.** (Enforced) Everything
+  is added the moment it is final, before the request that carries it, and nothing
+  stored is ever rewritten. A call checks once, as it opens, whether it starts cold: the
+  gem's last request was sent longer ago than its provider keeps a cache (see
+  [Models](models.md#one-history-two-providers)), or the model, the instructions or the
+  tools changed. If it does, the cache is gone anyway, so long tool results that were
+  sent before are sent expired, for the whole call, and the log says `cache.cold`.
+  Searches that load tools, placeholders, cancels and stub results are never expired.
+  Never during a call: from its first request on, each starts with the whole of the one
+  before. The same check is made for each reply in writing (see
+  [the contract](chat-contract.md#a-cold-start)).
 - **The instructions and the tool list are the same for the whole call.** (Enforced)
   Nothing in the instructions changes by itself: they are the same in every call and
   every written reply with the same gem, Darbar text and model, on any day. The date and
@@ -412,6 +420,7 @@ Everything in the history that neither the user nor the model wrote (all Enforce
 | Greeting note | Note, after the stored conversation and the call-start line | The call opens with the assistant speaking first | "The call has just connected and the user has not said anything yet. Greet them in one short sentence and ask what you can do for them." |
 | Lost stub | A call written by the server, then its result | A placeholder whose search was lost to a restart, when the call opens | "This call was lost before it finished, and its result will not arrive. Make it again if it is still needed." |
 | Cut mark | The end of a reply's text | A reply was cut part-way | "…" |
+| Expired result | In place of a stored result's output, in what is sent only | A call or a reply in writing starts cold: each long tool result sent before, but no search's, placeholder, cancel or stub result (which ones: [the contract](chat-contract.md#a-cold-start)) | "[Result expired: no longer kept. If you need it, call the tool again. If it was an action, it already happened: do not repeat it.]" |
 | No-words note | Note, after the cut reply | A turn with no words cut a reply the user was hearing | "The user made a sound there, with no words in it." |
 | Placeholder result | The result of the model's own call | A tool call was still running when the user spoke | "Still running in the background, under call_id {call_id}. [...]" |
 | Background result | A call written by the server, then its result | The call finished; added at the next quiet moment, or ahead of the user's words if their turn ends first | `{"deferred_result_for": "<id>"}`, then the real result |
@@ -469,6 +478,12 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
   conversation again (4,968 tokens). With the second mark (see
   [Caching](models.md#caching)) it read 4,255 and wrote the 712 new ones, and the request
   after it read all of it and wrote 14.
+- **A cold start writes once, then is read** (Haiku 5.5, in writing, 26 November 2026).
+  A conversation of a long note and one long search result: the first reply wrote
+  21,261 tokens to the cache. With the clock moved on six minutes, the next reply started
+  cold, with the search result expired, and wrote 13,721, reading none. The reply right
+  after read those 13,721 from the cache and wrote 23. `/sent` showed the expired
+  result for both, and every `exact` was true.
 
 ## Known gaps
 
