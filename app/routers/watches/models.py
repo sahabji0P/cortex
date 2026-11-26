@@ -3,7 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.entities.gem_event import WatchSource
+from app.entities.gem_event import WatchDelivery, WatchSource
 from app.entities.watch_ent import WatchState
 
 
@@ -22,6 +22,8 @@ class WatchesModels:
                 # What it is for, in the gem's own words.
                 about: str
                 source: WatchSource
+                # How its events reach us now: "push", "webhook" or "poll", or null.
+                delivery: WatchDelivery | None
                 state: WatchState
                 # Why it is failing or paused, or null.
                 reason: str | None

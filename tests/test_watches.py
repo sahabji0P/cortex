@@ -1093,6 +1093,8 @@ async def test_the_app_lists_a_gem_s_watches_without_their_secrets(
         setup.one.id, "Triage new issues.", _OPENED, {"repo": "example/app"}
     )
     await setup.watches.add_webhook(setup.two.id, "Not hers.")
+    await _until(lambda: str(event.id) in setup.mcp.deliveries)
+    await setup.mcp.deliveries[str(event.id)]("push")
 
     answer = await routes.get(f"/v1/gems/{setup.one.id}/watches")
 
@@ -1106,6 +1108,7 @@ async def test_the_app_lists_a_gem_s_watches_without_their_secrets(
             "gem": str(setup.one.id),
             "about": "Triage new issues.",
             "source": "mcp",
+            "delivery": "push",
             "state": "active",
             "reason": None,
             "connection": _OPENED.connection_id,
@@ -1123,6 +1126,7 @@ async def test_the_app_lists_a_gem_s_watches_without_their_secrets(
             "gem": str(setup.one.id),
             "about": "Review pull requests.",
             "source": "webhook",
+            "delivery": "webhook",
             "state": "active",
             "reason": None,
             "connection": None,
@@ -1140,6 +1144,7 @@ async def test_the_app_lists_a_gem_s_watches_without_their_secrets(
             "gem": str(setup.one.id),
             "about": "Check the inbox.",
             "source": "timer",
+            "delivery": None,
             "state": "active",
             "reason": None,
             "connection": None,

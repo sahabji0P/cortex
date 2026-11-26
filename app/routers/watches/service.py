@@ -27,6 +27,7 @@ class WatchesServiceV1Class:
             gem=str(watch.gem_id),
             about=watch.about,
             source=watch.source,
+            delivery=watch.delivery,
             state=watch.state,
             reason=watch.reason,
             connection=None if mcp is None else mcp.connection_id,
