@@ -96,6 +96,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Compaction: only when the user asks, from the app's pill, offered past 100,000 estimated tokens. Everything before it is sent as a summary the gem's own model wrote; nothing is kept whole. Built 2026-11-27, made manual the same day.
 - The first request after a compaction starts cold, with the reason `compaction`.
 - A compaction's own request is never checked for a cold start, and keeps no cache alive: it reads none. No `cache.cold` inside a compaction. Fixed 2026-11-27.
+- To fix: a compaction that fails after writing `settings.changed` leaves the next reply not cold for the change (cold only if quiet); the same for a failed compaction straight after a stored one.
 - A compaction is no turn: `compaction.started` (its id) to `compaction.ended`, its entries name it; turn numbers count only replies. Ruled by the owner 2026-11-27.
 - The app's prompt shows what keeping the conversation and compacting it would cost, from the price table.
 - A compaction's size starts from what the latest request was billed. Counted from the text alone it came to about half of what Anthropic billed.
