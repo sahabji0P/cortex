@@ -407,6 +407,40 @@ async def test_a_compaction_that_cannot_be_stored_fails_and_changes_nothing(
     await _close(setup.socket, setup.linked)
 
 
+async def test_a_compaction_stopped_while_it_is_stored_is_done_once_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    told: list[str] = []
+
+    async def listener(gem: str) -> None:
+        told.append(gem)
+
+    setup.compactions.listen(listener)
+    setup.llm.then(_summary())
+    setup.docdb.slow = asyncio.Event()
+    compacting = asyncio.create_task(setup.compactions.compact(str(setup.gem.id)))
+    await _eventually_asked(setup, 4)
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    # Stopped (the backend shuts down) while the compaction is written.
+    compacting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await compacting
+    assert told == []
+    setup.docdb.slow.set()
+    await _quiet(setup.compactions)
+    setup.docdb.slow = None
+
+    log = await _log(setup)
+    [compacted] = _of(log, "context.compacted")
+    [closed] = [e for e in _of(log, "turn.closed") if e["turn"] == compacted["turn"]]
+    assert closed["outcome"] == "finished"
+    assert told == [str(setup.gem.id)]
+    await _close(setup.socket, setup.linked)
+
+
 async def test_a_message_sent_during_a_compaction_waits_for_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

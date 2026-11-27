@@ -36,6 +36,7 @@ shows is `context`.
 """
 
 import asyncio
+import functools
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -265,15 +266,32 @@ class CompactionEntityClass:
             raise UpstreamError(f"the summary could not be written: {exc}")
         summary = exact(text, replaced(stored.entries, before, stored.compacted, line))
         holding.keep()
-        try:
-            await self._conversations.log.record_compacted(
+        # On its own, so that a write under way is finished even if this is stopped.
+        writing = asyncio.ensure_future(
+            self._conversations.log.record_compacted(
                 gem_id, turn.number, summary=summary, through=line, by=by
             )
+        )
+        try:
+            await asyncio.shield(writing)
+        except asyncio.CancelledError:
+            # Stopped while it is stored (the backend shuts down): once it is, it is done.
+            writing.add_done_callback(functools.partial(self._landed, key, turn))
+            raise
         except BaseException as exc:
             _failed(turn, exc)
             raise
         turn.closed(finished=True, kept=None)
         return Compacted(summary, line)
+
+    def _landed(self, key: str, turn: TurnRecord, writing: asyncio.Future[int]) -> None:
+        """A compaction stopped while it was stored is done once it is, or failed."""
+        error = asyncio.CancelledError() if writing.cancelled() else writing.exception()
+        if error is not None:
+            _failed(turn, error)
+            return
+        turn.closed(finished=True, kept=None)
+        self._conversations.settled(key, "compaction")
 
     async def _sitting(self, gem_id: ObjectId, stored: Stored) -> int | None:
         """The number of the cold start the latest sitting begins after, or None.
