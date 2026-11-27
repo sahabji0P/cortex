@@ -94,6 +94,8 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The Darbar text does not mention the time line: the line explains itself.
 - To watch: a zone changed by the user may show only once the ten minutes are up.
 - Compaction: past 100,000 estimated tokens the older part is sent as a summary the gem's own model wrote, by itself 2 minutes before the cache expires (it reads the cache) or from the app's pill; the latest sitting stays whole. Built 2026-11-27.
+- A compaction's size starts from what the latest request was billed. Counted from the text alone it came to about half of what Anthropic billed.
+- To watch: on OpenAI, not measured whether a summary request with tool use off reads the cache, nor whether a call of a tool loaded by a search before the line is accepted.
 
 ### Watches (decided 2026-11-26)
 
