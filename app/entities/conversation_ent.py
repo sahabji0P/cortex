@@ -26,7 +26,8 @@ whoever asked is told of the reset (`when_reset`), as the gem's watches are.
 
 Every reply in writing, and every call when it starts, checks first whether the
 conversation starts cold, and is sent it as the latest cold start has it sent (`sent`,
-see `cold_start.py`).
+see `cold_start.py`), and as the compaction in force has it sent: what came before its
+line is sent as its summary (see `compaction.py`).
 
 A gem with none of these is not kept. Running calls live in this process's memory, so a
 restart loses them. A placeholder whose call is gone is closed with a stub saying so,
@@ -43,7 +44,8 @@ from typing import Any, Literal, Protocol
 from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError
-from app.entities.cold_start import Cache, Numbered, as_sent, cold
+from app.entities.cold_start import Cache, Numbered, cold
+from app.entities.compaction import Compacted, asked, view
 from app.entities.conversation_store import EVENT_RECEIVED, ConversationStoreClass, Remembered
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
@@ -125,6 +127,8 @@ class Stored:
     last_time: datetime | None = None
     # Where the gem's cache stood when the conversation was read (see `cold_start.py`).
     cache: Cache = field(default_factory=Cache)
+    # The compaction in force when the conversation was read, if any (see `compaction.py`).
+    compacted: Compacted | None = None
 
     @property
     def items(self) -> list[Item]:
@@ -314,8 +318,17 @@ class ConversationEntityClass:
             kept.events.refresh(await self.pending_events(gem_id))
         found = await self._store.load(gem_id)
         mode = found[-1].data.mode if found else "chat"
-        last_time = next((e.at for e in reversed(found) if e.data.source == "time-line"), None)
-        stored = Stored(_numbered(found), mode, last_time, await self._store.cache(gem_id))
+        compacted = await self._store.compacted(gem_id)
+        since = 0 if compacted is None else compacted.through
+        # The last line that gave the time that the model is still sent whole: one a
+        # summary stands for is not.
+        last_time = next(
+            (e.at for e in reversed(found) if e.data.source == "time-line" and e.seq >= since),
+            None,
+        )
+        stored = Stored(
+            _numbered(found), mode, last_time, await self._store.cache(gem_id), compacted
+        )
         lost = self._lost(str(gem_id), found, told)
         return await self.add(gem_id, stored, stubs(lost, "lost-call"), stored.mode)
 
@@ -343,7 +356,7 @@ class ConversationEntityClass:
         times = [one.at for one in added if one.source == "time-line"]
         last_time = times[-1] if times else stored.last_time
         numbered = [Numbered(None, one.item, one.mark, one.delivers) for one in added]
-        return Stored([*stored.entries, *numbered], mode, last_time, stored.cache)
+        return Stored([*stored.entries, *numbered], mode, last_time, stored.cache, stored.compacted)
 
     def sent(self, record: Recording, stored: Stored, *, changed: bool) -> list[Item]:
         """The conversation as the model is to be sent it, once it is checked for a cold start.
@@ -352,7 +365,8 @@ class ConversationEntityClass:
         `record` is described: `changed` is what that said. A cold start is written down
         (`cache.cold`), and must be stored like what the gem remembers. Long results
         before its line are sent expired, as they are after the latest cold start before
-        it (see `cold_start.py`).
+        it (see `cold_start.py`). With a compaction in force, what came before its line
+        is sent as its summary (see `compaction.py`).
         """
         before = stored.cache.before
         if record.provider is not None and stored.cache.sent is not None:
@@ -360,7 +374,7 @@ class ConversationEntityClass:
             if reason is not None:
                 before = stored.cache.sent
                 record.cold(reason, before)
-        return as_sent(stored.entries, before)
+        return view(stored.entries, before, stored.compacted)
 
     async def stored(self, gem_id: ObjectId) -> None:
         """Wait until what the gem remembers so far is stored.
@@ -402,10 +416,12 @@ class ConversationEntityClass:
 
         Its items are what the gem remembered by then: every remembered entry before
         the request's own since the gem was last reset, in order, as the latest cold
-        start before it had them sent (see `cold_start.py`). With them come the model,
-        instructions and tools in force. `exact` is False if the items do not come to the
-        count the request wrote down: an entry before it was lost. Raises
-        `NotFoundError` if `seq` is not a request of this gem.
+        start and the latest compaction before it had them sent (see `cold_start.py` and
+        `compaction.py`). A compaction's own request was sent one more line of ours,
+        the one that asks for the summary. With them come the model, instructions and
+        tools in force. `exact` is False if the items do not come to the count the
+        request wrote down: an entry before it was lost. Raises `NotFoundError` if `seq`
+        is not a request of this gem.
         """
         if not await self._gems.exists(gem_id):
             raise NotFoundError("Gem")
@@ -416,7 +432,12 @@ class ConversationEntityClass:
             raise NotFoundError("Request")
         remembered = await self._store.load(found, before=seq)
         cache = await self._store.cache(found, before=seq)
-        items = as_sent(_numbered(remembered), cache.before)
+        compacted = await self._store.compacted(found, before=seq)
+        items = view(_numbered(remembered), cache.before, compacted)
+        if request.turn is not None:
+            opened = await self._store.opened(found, request.turn)
+            if opened is not None and opened.data.get("by") == "compaction":
+                items.append(asked())
         return {
             "request": request.data.get("request"),
             "items": items,

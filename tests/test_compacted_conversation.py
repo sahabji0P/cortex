@@ -1,0 +1,116 @@
+"""What a gem's conversation is sent with a compaction in force, and what its log says it was.
+
+The compaction here is written straight into the log, as a compaction leaves it (see
+`compaction.py`): how one is made is tested in `test_compactions.py`.
+"""
+
+import json
+from typing import Any
+
+from bson import ObjectId
+
+from app.entities.compaction import summed_up
+from app.routers.gems.service import GemsServiceV1Class
+from tests.test_chat import _chat, _close, _open, _said
+from tests.time_lines import TIME_LINE
+
+
+async def _talked(*replies: str) -> Any:
+    """A gem that has answered a message with each of `replies`, one after the other."""
+    setup = await _chat(*(_said(reply) for reply in replies))
+    socket, linked = await _open(setup.service())
+    for count, _ in enumerate(replies, start=1):
+        socket.send(setup.gem.id, f"message {count}")
+        await socket.until("chat.done", count)
+    setup.socket, setup.linked = socket, linked
+    return setup
+
+
+async def _log(setup: Any) -> list[dict[str, Any]]:
+    service = GemsServiceV1Class(setup.gems, setup.conversations)
+    return (await service.get_log(str(setup.gem.id), before=None, limit=500)).entries
+
+
+async def _said_at(setup: Any, text: str) -> int:
+    """The number of the entry that remembers the user saying `text`."""
+    return next(
+        entry["seq"]
+        for entry in await _log(setup)
+        if entry["kind"] == "user.said" and entry["item"]["content"] == text
+    )
+
+
+async def _compact(setup: Any, through: int, summary: str = "They talked.") -> None:
+    gem_id = ObjectId(setup.gem.id)
+    await setup.conversations.log.record_compacted(
+        gem_id, None, summary=summary, through=through, by="user"
+    )
+
+
+async def test_a_reply_is_sent_the_summary_then_everything_from_its_line_on() -> None:
+    setup = await _talked("One.", "Two.")
+    await _compact(setup, await _said_at(setup, "message 2"))
+    setup.llm.then(_said("Three."))
+
+    setup.socket.send(setup.gem.id, "message 3")
+    await setup.socket.until("chat.done", 3)
+
+    # The line that gave the time is summed up, so the message is given the time again.
+    assert setup.llm.requests[-1]["input"] == [
+        summed_up("They talked."),
+        {"role": "user", "content": "message 2"},
+        {"role": "assistant", "content": "Two."},
+        TIME_LINE,
+        {"role": "user", "content": "message 3"},
+    ]
+    # What is stored is not changed, and the history shows it all.
+    assert [text for _, text in await setup.shown()][:2] == ["message 1", "One."]
+    await _close(setup.socket, setup.linked)
+
+
+async def test_the_requests_after_a_compaction_keep_every_byte() -> None:
+    setup = await _talked("One.", "Two.")
+    await _compact(setup, await _said_at(setup, "message 2"))
+    setup.llm.then(_said("Three."), _said("Four."))
+
+    for count in (3, 4):
+        setup.socket.send(setup.gem.id, f"message {count}")
+        await setup.socket.until("chat.done", count)
+
+    before, after = (json.dumps(request["input"]) for request in setup.llm.requests[-2:])
+    assert after.startswith(before[:-1])
+    await _close(setup.socket, setup.linked)
+
+
+async def test_what_a_request_was_sent_is_read_back_with_the_compaction_in_force() -> None:
+    setup = await _talked("One.", "Two.")
+    await _compact(setup, await _said_at(setup, "message 2"))
+    setup.llm.then(_said("Three."))
+    setup.socket.send(setup.gem.id, "message 3")
+    await setup.socket.until("chat.done", 3)
+
+    requests = [entry for entry in await _log(setup) if entry["kind"] == "request.sent"]
+    service = GemsServiceV1Class(setup.gems, setup.conversations)
+    gem_id = str(setup.gem.id)
+    before = await service.get_log_sent(gem_id, requests[1]["seq"])
+    after = await service.get_log_sent(gem_id, requests[2]["seq"])
+
+    assert before["exact"] and after["exact"]
+    assert after["items"] == setup.llm.requests[2]["input"]
+    assert after["items"][0] == summed_up("They talked.")
+    # A request before the compaction was sent everything whole.
+    assert before["items"] == setup.llm.requests[1]["input"]
+    await _close(setup.socket, setup.linked)
+
+
+async def test_a_reset_ends_the_compaction_in_force() -> None:
+    setup = await _talked("One.", "Two.")
+    await _compact(setup, await _said_at(setup, "message 2"))
+    setup.llm.then(_said("Three."))
+
+    await setup.conversations.reset(str(setup.gem.id))
+    setup.socket.send(setup.gem.id, "message 3")
+    await setup.socket.until("chat.done", 3)
+
+    assert setup.llm.requests[-1]["input"] == [TIME_LINE, {"role": "user", "content": "message 3"}]
+    await _close(setup.socket, setup.linked)
