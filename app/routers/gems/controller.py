@@ -45,6 +45,26 @@ async def reset_gem(gem_id: str, service: GemsServiceRegistry.V1) -> Response:
     return Response(status_code=204)
 
 
+@router.post("/{gem_id}/compact")
+async def compact_gem(
+    gem_id: str, service: GemsServiceRegistry.V1
+) -> GemsModels.V1.Output.Compacted:
+    """Compact the gem's conversation now: what came before `through` is sent as `summary`.
+
+    Allowed whenever the gem is between turns, warm or cold. A reply being written is
+    not cut: it is done first. Refused with 409 while the gem is in a call, or when
+    there is nothing to compact. 502 if the summary could not be written: nothing
+    changes then.
+    """
+    return await service.compact_gem(gem_id)
+
+
+@router.get("/{gem_id}/context")
+async def get_context(gem_id: str, service: GemsServiceRegistry.V1) -> GemsModels.V1.Output.Context:
+    """Where the gem's context stands: its size, when its cache expires, and when to compact."""
+    return await service.get_context(gem_id)
+
+
 @router.get("/{gem_id}/log")
 async def get_log(
     gem_id: str,

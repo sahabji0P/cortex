@@ -1,6 +1,7 @@
 from app.adapters import AdapterRegistry
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
+from app.entities.compaction_ent import CompactionEntityClass
 from app.entities.connection_ent import Connection, ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass
 from app.entities.conversation_store import ConversationStoreClass, LogEntry
@@ -94,6 +95,14 @@ class EntitiesRegistry:
             search=adapter.Parallel,
             connections=cls.Connections,
             watches=cls.Watches,
+        )
+        # A gem's conversation is compacted as a reply in writing would be sent it.
+        cls.Compaction = CompactionEntityClass(
+            gems=cls.Gems,
+            darbar=cls.Darbar,
+            store=cls.ConversationStore,
+            conversations=cls.Conversations,
+            chat=cls.Chat,
         )
         cls.Voice = VoiceEntityClass(
             stt=adapter.CartesiaSTT,

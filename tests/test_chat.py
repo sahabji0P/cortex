@@ -20,6 +20,7 @@ from app.core.errors import ConflictError, NotFoundError
 from app.entities import chat_ent, conversation_ent, late_results
 from app.entities.call_ent import CallEntityClass
 from app.entities.chat_ent import ChatEntityClass
+from app.entities.compaction import asked
 from app.entities.conversation_ent import ConversationEntityClass, gem_key
 from app.entities.conversation_store import (
     REMEMBERED,
@@ -309,7 +310,9 @@ class _LLM:
     apart by its first message after the line that gives the time, which every one
     starts with), which is the rule the history keeps: the one thing that may change is
     the user's open turn, the last item, which can gain a line. A test that expects the
-    next request to start cold says so (`starts_cold`): results may then be expired.
+    next request to start cold says so (`starts_cold`): results may then be expired. A
+    compaction's request, which ends with the message that asks for the summary, is no
+    start for the next: that message is not part of the conversation.
     """
 
     configured = True
@@ -328,7 +331,11 @@ class _LLM:
 
     async def stream_response(self, **request: Any) -> Any:
         sent = [dict(item) for item in request["input"]]
-        same = [r for r in self.requests if _first(r["input"]) == _first(sent)]
+        same = [
+            r
+            for r in self.requests
+            if _first(r["input"]) == _first(sent) and r["input"][-1:] != [asked()]
+        ]
         if same:
             _assert_only_grew(same[-1]["input"], sent, cold=self._cold)
         self._cold = False
@@ -512,7 +519,7 @@ async def test_a_reply_is_streamed_stored_and_shown() -> None:
     socket.send(setup.gem.id, "hello")
     await socket.until("chat.done")
 
-    assert socket.frames[0] == {"type": "link.ready", "version": 7}
+    assert socket.frames[0] == {"type": "link.ready", "version": 8}
     assert socket.frames[1:] == [
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "Hi "},
         {"type": "chat.text", "gem": str(setup.gem.id), "text": "there."},

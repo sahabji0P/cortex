@@ -2,10 +2,11 @@
 
 The gem's log holds nothing of what a request was sent. It is read back as every entry
 the gem remembered before the request, since the gem was last reset, as the latest cold
-start before it has them sent (see `gem_log.py` and `cold_start.py`). That is only true
-while a conversation hands each thing to the log before the request that carries it, so
-every request made in every test is checked against what its gem remembers at that
-moment, sent so.
+start and the latest compaction before it have them sent (see `gem_log.py`,
+`cold_start.py` and `compaction.py`), and for a compaction's own request, the message
+that asks for the summary after them. That is only true while a conversation hands each
+thing to the log before the request that carries it, so every request made in every
+test is checked against what its gem remembers at that moment, sent so.
 """
 
 from collections.abc import Iterator, Sequence
@@ -14,8 +15,9 @@ from typing import Any
 import pytest
 from bson import ObjectId
 
-from app.entities.cold_start import Numbered, Reason, as_sent
-from app.entities.conversation_store import COLD, REMEMBERED, RESET, LogEntry
+from app.entities.cold_start import Numbered, Reason
+from app.entities.compaction import Compacted, asked, view
+from app.entities.conversation_store import COLD, COMPACTED, REMEMBERED, RESET, LogEntry
 from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, Mode
 from app.entities.model import Item
@@ -76,13 +78,31 @@ def every_request_is_sent_what_its_gem_remembers(monkeypatch: pytest.MonkeyPatch
         lines.update(colds.get((id(log), gem_id), {}))
         cold = [before for seq, before in sorted(lines.items()) if seq > since]
         remembered = [numbered for seq, numbered in sorted(everything.items()) if seq > since]
-        return as_sent(remembered, cold[-1] if cold else None)
+        # A compaction is written at once, so the database has every one there is.
+        compactions = sorted(
+            (d["seq"], Compacted(d["data"]["summary"], d["data"]["through"]))
+            for d in documents
+            if d["kind"] == COMPACTED and d["seq"] > since
+        )
+        compacted = compactions[-1][1] if compactions else None
+        return view(remembered, cold[-1] if cold else None, compacted)
 
-    def requesting(self: Recording, turn: int | None, items: Sequence[Item], think: bool) -> Any:
+    def requesting(
+        self: Recording,
+        turn: int | None,
+        items: Sequence[Item],
+        think: bool,
+        *,
+        compaction: int | None = None,
+    ) -> Any:
         remembered = remembered_now(self)
+        old = list(items[-1:]) == [asked()]  # as an older log wrote one, in a turn
+        if remembered is not None and (compaction is not None or old):
+            # A compaction's own request: the message that asks for the summary comes last.
+            remembered = [*remembered, asked()]
         if remembered is not None and list(items) != remembered:
             differed.append((list(items), remembered))
-        return request(self, turn, items, think)
+        return request(self, turn, items, think, compaction=compaction)
 
     monkeypatch.setattr(LogEntityClass, "remember", remembering)
     monkeypatch.setattr(LogEntityClass, "give_up", giving_up)

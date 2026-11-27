@@ -177,23 +177,29 @@ class _LLM:
     """The model: each call plays the next scripted list of stream events.
 
     A script entry of `asyncio.Event` pauses the stream there until the test sets it.
-    A test that expects the next request to start cold says so (`starts_cold`).
+    A test that expects the next request to start cold says so (`starts_cold`), and one
+    that expects it to start with a compaction's summary says so too (`starts_anew`).
     """
 
     def __init__(self, *rounds: list) -> None:
         self._rounds = list(rounds)
         self.requests: list[dict] = []
         self._cold = False
+        self._anew = False
 
     def starts_cold(self) -> None:
         """The next request may send results of the one before it expired, and only it."""
         self._cold = True
 
+    def starts_anew(self) -> None:
+        """The next request may start with anything: a compaction changed its start."""
+        self._anew = True
+
     async def stream_response(self, **request):
         sent = [dict(item) for item in request["input"]]
-        if self.requests:
+        if self.requests and not self._anew:
             _assert_only_grew(self.requests[-1]["input"], sent, cold=self._cold)
-        self._cold = False
+        self._cold = self._anew = False
         self.requests.append({**request, "input": sent})
         script = self._rounds.pop(0)
 

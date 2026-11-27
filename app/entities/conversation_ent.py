@@ -24,9 +24,13 @@ reset takes the gem as a reply does, so a message sent meanwhile is answered by 
 gem as it is after the reset. Events still waiting are dropped with the rest, and
 whoever asked is told of the reset (`when_reset`), as the gem's watches are.
 
+Whoever asks is told each time a gem is let go after a reply, a call, a reset or a
+compaction (`when_settled`): what the gem would be sent next has changed.
+
 Every reply in writing, and every call when it starts, checks first whether the
 conversation starts cold, and is sent it as the latest cold start has it sent (`sent`,
-see `cold_start.py`).
+see `cold_start.py`), and as the compaction in force has it sent: what came before its
+line is sent as its summary (see `compaction.py`).
 
 A gem with none of these is not kept. Running calls live in this process's memory, so a
 restart loses them. A placeholder whose call is gone is closed with a stub saying so,
@@ -38,19 +42,20 @@ import json
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError
-from app.entities.cold_start import Cache, Numbered, as_sent, cold
+from app.entities.cold_start import CACHE_LIFETIME, Cache, Numbered, cold
+from app.entities.compaction import INSTRUCTIONS, Compacted, asked, view
 from app.entities.conversation_store import EVENT_RECEIVED, ConversationStoreClass, Remembered
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, Mode, stubs
 from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
-from app.entities.model import Item
+from app.entities.model import Item, tools_declared
 from app.entities.pending_events import PendingEvent, PendingEvents, pending
 
 __all__ = [
@@ -58,10 +63,15 @@ __all__ = [
     "ConversationEntityClass",
     "GemConversation",
     "Message",
+    "Settled",
     "Stored",
     "Writer",
     "gem_key",
+    "numbered",
 ]
+
+# What a gem was let go after.
+type Settled = Literal["reply", "call", "reset", "compaction"]
 
 # The result a call lost to a restart is given, so its placeholder does not promise a
 # result for ever. THE OWNER HAS NOT RULED ON THIS WORDING.
@@ -125,6 +135,8 @@ class Stored:
     last_time: datetime | None = None
     # Where the gem's cache stood when the conversation was read (see `cold_start.py`).
     cache: Cache = field(default_factory=Cache)
+    # The compaction in force when the conversation was read, if any (see `compaction.py`).
+    compacted: Compacted | None = None
 
     @property
     def items(self) -> list[Item]:
@@ -184,6 +196,8 @@ class ConversationEntityClass:
         self._quiet: Callable[[str], None] = _nobody
         # Told the id of each gem that is reset, once the reset is stored.
         self._resets: list[Callable[[ObjectId], Awaitable[None]]] = []
+        # Told the key of each gem that is let go, and after what.
+        self._settled: list[Callable[[str, Settled], None]] = []
 
     def tell_results_with(self, quiet: Callable[[str], None]) -> None:
         """Who tells a gem's late results: `quiet` is given the gem's key when one comes in.
@@ -199,6 +213,22 @@ class ConversationEntityClass:
         The reset is over only once each is done, and fails if one raises.
         """
         self._resets.append(told)
+
+    def when_settled(self, told: Callable[[str, Settled], None]) -> None:
+        """Tell `told` each gem that is let go after a reply, a call, a reset or a compaction.
+
+        It is told the gem's key, at once: it must not raise, and must not wait.
+        """
+        self._settled.append(told)
+
+    def settled(self, key: str, after: Settled) -> None:
+        """The gem is let go after `after`: tell whoever asked."""
+        for told in self._settled:
+            told(key, after)
+
+    def wake(self, key: str) -> None:
+        """Tell the gem's late results and events that wait, if nothing holds it."""
+        self._quiet(key)
 
     def gem(self, key: str) -> GemConversation:
         """What is kept of a gem's conversation, made if there is none yet."""
@@ -230,6 +260,7 @@ class ConversationEntityClass:
             return
         kept.call = None
         self._quiet(key)
+        self.settled(key, "call")
         self.let_go(key)
 
     async def reset(self, gem_id: str) -> None:
@@ -268,6 +299,7 @@ class ConversationEntityClass:
                 kept.writer = None
                 # An event that came after the reset, while it held the gem, wakes it now.
                 self._quiet(key)
+            self.settled(key, "reset")
             self.let_go(key)
 
     async def messages(self, gem_id: str) -> list[Message]:
@@ -314,8 +346,17 @@ class ConversationEntityClass:
             kept.events.refresh(await self.pending_events(gem_id))
         found = await self._store.load(gem_id)
         mode = found[-1].data.mode if found else "chat"
-        last_time = next((e.at for e in reversed(found) if e.data.source == "time-line"), None)
-        stored = Stored(_numbered(found), mode, last_time, await self._store.cache(gem_id))
+        compacted = await self._store.compacted(gem_id)
+        since = 0 if compacted is None else compacted.through
+        # The last line that gave the time that the model is still sent whole: one a
+        # summary stands for is not.
+        last_time = next(
+            (e.at for e in reversed(found) if e.data.source == "time-line" and e.seq >= since),
+            None,
+        )
+        stored = Stored(
+            numbered(found), mode, last_time, await self._store.cache(gem_id), compacted
+        )
         lost = self._lost(str(gem_id), found, told)
         return await self.add(gem_id, stored, stubs(lost, "lost-call"), stored.mode)
 
@@ -343,24 +384,29 @@ class ConversationEntityClass:
         times = [one.at for one in added if one.source == "time-line"]
         last_time = times[-1] if times else stored.last_time
         numbered = [Numbered(None, one.item, one.mark, one.delivers) for one in added]
-        return Stored([*stored.entries, *numbered], mode, last_time, stored.cache)
+        return Stored([*stored.entries, *numbered], mode, last_time, stored.cache, stored.compacted)
 
-    def sent(self, record: Recording, stored: Stored, *, changed: bool) -> list[Item]:
+    def sent(
+        self, record: Recording, stored: Stored, *, changed: bool, check_cold: bool = True
+    ) -> list[Item]:
         """The conversation as the model is to be sent it, once it is checked for a cold start.
 
         Asked once for each reply in writing and once when a call starts, right after
         `record` is described: `changed` is what that said. A cold start is written down
         (`cache.cold`), and must be stored like what the gem remembers. Long results
         before its line are sent expired, as they are after the latest cold start before
-        it (see `cold_start.py`).
+        it (see `cold_start.py`). With a compaction in force, what came before its line
+        is sent as its summary (see `compaction.py`). Without `check_cold` (a
+        compaction's request, which reads no cache), nothing is checked: it is sent with
+        the latest cold start's line.
         """
         before = stored.cache.before
-        if record.provider is not None and stored.cache.sent is not None:
+        if check_cold and record.provider is not None and stored.cache.sent is not None:
             reason = cold(stored.cache, record.provider, changed=changed, now=datetime.now(UTC))
             if reason is not None:
                 before = stored.cache.sent
                 record.cold(reason, before)
-        return as_sent(stored.entries, before)
+        return view(stored.entries, before, stored.compacted)
 
     async def stored(self, gem_id: ObjectId) -> None:
         """Wait until what the gem remembers so far is stored.
@@ -402,10 +448,13 @@ class ConversationEntityClass:
 
         Its items are what the gem remembered by then: every remembered entry before
         the request's own since the gem was last reset, in order, as the latest cold
-        start before it had them sent (see `cold_start.py`). With them come the model,
-        instructions and tools in force. `exact` is False if the items do not come to the
-        count the request wrote down: an entry before it was lost. Raises
-        `NotFoundError` if `seq` is not a request of this gem.
+        start and the latest compaction before it had them sent (see `cold_start.py` and
+        `compaction.py`). With them come the model, instructions and tools in force. A
+        compaction's own request was sent one more message, the one that asks for the
+        summary, and our instructions in place of the gem's, and the tools only where
+        the history needed them (see `model.tools_declared`). `exact` is False if the
+        items do not come to the count the request wrote down: an entry before it was
+        lost. Raises `NotFoundError` if `seq` is not a request of this gem.
         """
         if not await self._gems.exists(gem_id):
             raise NotFoundError("Gem")
@@ -416,13 +465,35 @@ class ConversationEntityClass:
             raise NotFoundError("Request")
         remembered = await self._store.load(found, before=seq)
         cache = await self._store.cache(found, before=seq)
-        items = as_sent(_numbered(remembered), cache.before)
+        compacted = await self._store.compacted(found, before=seq)
+        items = view(numbered(remembered), cache.before, compacted)
+        settings = await self._settings(found, upto=seq)
+        if await self._store.of_compaction(found, request):
+            items.append(asked())
+            settings["instructions"] = [{"name": "compaction", "text": INSTRUCTIONS}]
+            model, tools = settings["model"], settings["tools"]
+            names = {str(tool["name"]) for tool in cast("list[dict[str, Any]]", tools or [])}
+            if model is not None and not tools_declared(model["provider"], items, names):
+                settings["tools"] = []
         return {
             "request": request.data.get("request"),
             "items": items,
             "exact": len(items) == request.data.get("count"),
-            **await self._settings(found, upto=seq),
+            **settings,
         }
+
+    async def cache_until(self, gem_id: ObjectId, cache: Cache) -> datetime | None:
+        """When the gem's cache expires: its last request's time and its provider's lifetime.
+
+        The provider is the one of the model in force when that request was sent. None
+        if no request was sent since the gem was last reset.
+        """
+        if cache.sent is None or cache.sent_at is None:
+            return None
+        model = (await self._settings(gem_id, upto=cache.sent))["model"]
+        if model is None or model.get("provider") not in CACHE_LIFETIME:
+            return None
+        return cache.sent_at + CACHE_LIFETIME[model["provider"]]
 
     async def _settings(self, gem_id: ObjectId, *, upto: int) -> dict[str, Any]:
         """The model, instructions and tools in force before entry `upto`, as last written."""
@@ -509,7 +580,7 @@ class ConversationEntityClass:
             kept.events.stale = False
 
 
-def _numbered(found: Sequence[Remembered]) -> list[Numbered]:
+def numbered(found: Sequence[Remembered]) -> list[Numbered]:
     """Stored entries, with what decides how each is sent."""
     return [Numbered(e.seq, e.data.item, e.data.mark, e.data.delivers) for e in found]
 

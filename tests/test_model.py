@@ -25,11 +25,14 @@ from app.entities.model import (
     Model,
     ModelCall,
     RoundDone,
+    Structured,
     TextDelta,
     ToolSpec,
     Usage,
     model_for,
+    own_instructions,
     to_messages,
+    tools_declared,
 )
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
 from tests.test_voice_conversation import (
@@ -424,6 +427,163 @@ async def test_each_openai_model_is_called_by_name_and_thinks_only_as_much_as_it
         normally,
         asked_to_think,
     ]
+
+
+_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"done": {"type": "array", "items": {"type": "string"}}},
+    "required": ["done"],
+    "additionalProperties": False,
+}
+_STRUCTURED = Structured(name="summary", schema=_SCHEMA, max_tokens=32_000)
+
+# A history in which a search loaded a deferred tool, and the tool was called.
+_DEFERRED = ToolSpec(
+    name="weather",
+    description="The weather in a city.",
+    parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    deferred=True,
+)
+_LOOKUP = ToolSpec(
+    name=SEARCH_TOOL,
+    description="Find a tool.",
+    parameters={"type": "object", "properties": {}, "additionalProperties": False},
+)
+_SEARCHED: list[Item] = [
+    {"role": "user", "content": "weather in Pune?"},
+    {"type": "function_call", "call_id": "s1", "name": SEARCH_TOOL, "arguments": "{}"},
+    {"type": "function_call_output", "call_id": "s1", "output": '{"tools": ["weather"]}'},
+    {"type": "function_call", "call_id": "c1", "name": "weather", "arguments": "{}"},
+    {"type": "function_call_output", "call_id": "c1", "output": "31C"},
+]
+
+
+async def test_a_structured_anthropic_round_writes_to_a_schema_with_no_tool_use_or_marks() -> None:
+    llm = _Claude([_text('{"done": []}'), _final()])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_SEARCH])
+
+    async for _ in model.round(
+        [{"role": "user", "content": "hi"}],
+        instructions="Ours.",
+        think=False,
+        structured=_STRUCTURED,
+    ):
+        pass
+
+    (request,) = llm.requests
+    assert request["system"] == "Ours."
+    assert request["max_tokens"] == 32_000
+    assert request["output_config"] == {"format": {"type": "json_schema", "schema": _SCHEMA}}
+    assert request["tool_choice"] == {"type": "none"}
+    # A history with no search loading a tool needs no tools.
+    assert request["tools"] == []
+    # Nothing is marked for a cache: not the request, not a block far back.
+    assert "cache_control" not in request
+    assert not any(
+        "cache_control" in block for message in request["messages"] for block in message["content"]
+    )
+
+
+async def test_a_structured_round_keeps_opus_thinking_as_little_as_it_can() -> None:
+    llm = _Claude([_text('{"done": []}'), _final()])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Opus 5.5", [_SEARCH])
+
+    async for _ in model.round(
+        [{"role": "user", "content": "hi"}], instructions="", think=False, structured=_STRUCTURED
+    ):
+        pass
+
+    assert llm.requests[0]["output_config"] == {
+        "effort": "low",
+        "format": {"type": "json_schema", "schema": _SCHEMA},
+    }
+
+
+async def test_a_structured_anthropic_round_is_told_of_the_tools_when_a_search_loaded_one() -> None:
+    llm = _Claude([_text('{"done": []}'), _final()])
+    model = model_for(cast("AnthropicAdapterClass", llm), "Haiku 5.5", [_LOOKUP, _DEFERRED])
+
+    async for _ in model.round(_SEARCHED, instructions="", think=False, structured=_STRUCTURED):
+        pass
+
+    (request,) = llm.requests
+    assert [tool["name"] for tool in request["tools"]] == [SEARCH_TOOL, "weather"]
+    assert request["tool_choice"] == {"type": "none"}
+
+
+def test_which_histories_need_the_tools_told() -> None:
+    names = {SEARCH_TOOL, "weather"}
+    plain_calls = _SEARCHED[:1] + _SEARCHED[3:]
+    found_nothing: list[Item] = [
+        *_SEARCHED[:2],
+        {"type": "function_call_output", "call_id": "s1", "output": "the search failed"},
+    ]
+
+    assert tools_declared("Anthropic", _SEARCHED, names)
+    # Calls and results alone are taken with no tools declared (measured on Haiku 5.5
+    # and Sonnet 5.5); a search's result that loads a tool is not.
+    assert not tools_declared("Anthropic", plain_calls, names)
+    assert not tools_declared("Anthropic", found_nothing, names)
+    assert not tools_declared("Anthropic", _SEARCHED, {SEARCH_TOOL})
+    # Not measured on OpenAI: it is always told of them.
+    assert tools_declared("OpenAI", [{"role": "user", "content": "hi"}], names)
+
+
+async def test_a_structured_openai_round_writes_to_a_strict_schema_with_tool_use_off() -> None:
+    openai = _OpenAI()
+    model = model_for(cast("OpenAIAdapterClass", openai), "6 Luna", [_SEARCH])
+
+    for structured in (None, _STRUCTURED):
+        async for _ in model.round(
+            [{"role": "user", "content": "hi"}],
+            instructions="",
+            think=False,
+            structured=structured,
+        ):
+            pass
+
+    reply, written = openai.requests
+    assert (reply["tool_choice"], written["tool_choice"]) == ("auto", "none")
+    assert "text" not in reply
+    assert written["text"] == {
+        "format": {"type": "json_schema", "name": "summary", "schema": _SCHEMA, "strict": True}
+    }
+    # No ceiling is sent to this provider, and it is told of the same tools.
+    assert "max_output_tokens" not in written
+    assert written["tools"] == reply["tools"]
+
+
+async def test_an_openai_refusal_raises() -> None:
+    class _Refusing(_OpenAI):
+        async def stream_response(self, **request):
+            self.requests.append(request)
+
+            async def stream():
+                yield SimpleNamespace(type="response.refusal.delta", delta="I can't.")
+                yield SimpleNamespace(
+                    type="response.completed", response=SimpleNamespace(output=[])
+                )
+
+            return stream()
+
+    model = model_for(cast("OpenAIAdapterClass", _Refusing()), "6 Luna", [])
+
+    with pytest.raises(RuntimeError, match="declined"):
+        async for _ in model.round(
+            [{"role": "user", "content": "hi"}],
+            instructions="",
+            think=False,
+            structured=_STRUCTURED,
+        ):
+            pass
+
+
+def test_what_a_model_needs_in_its_instructions_is_known_by_its_name() -> None:
+    openai = model_for(cast("OpenAIAdapterClass", _OpenAI()), "6 Luna", [])
+    claude = model_for(cast("AnthropicAdapterClass", _Claude()), "Haiku 5.5", [])
+
+    assert own_instructions("6 Luna") == openai.own_instructions == ""
+    assert own_instructions("Opus 5.5") == claude.own_instructions != ""
 
 
 # ---- choosing the provider

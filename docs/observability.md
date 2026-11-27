@@ -29,6 +29,20 @@ it. Every kind of entry and its fields are in
   (`event.came`), with all that is known of it, and again when the gem is told it
   (`event.received`, which names the first by its `seq`). The turn it woke opens `by`
   `event`. One written down and never told is still waiting.
+- **When was the conversation summed up, and what did that cost?** A compaction is no
+  turn: it runs from `compaction.started`, whose `seq` is its id, to `compaction.ended`
+  (`done`, `failed` or `cut`), and every entry between that is its own names it
+  (`compaction`). Those are its request, with its tokens and cost, then
+  `context.compacted` with the summary, its line (`through`, the `seq` of its own
+  `request.sent`) and who asked (always `user`). It takes no turn number. An older log
+  may hold one as a turn opened `by` `compaction`, and is still read. The request's `request.done` `text` is
+  the JSON the model wrote; the summary is what the backend wrote from it. Its `/sent`
+  shows our instructions, not the gem's. The next request's `cache.cold` has the reason
+  `compaction`.
+- **How big is the gem's next request?** The size the app is shown
+  ([`/context`](chat-contract.md#get-v1gemsgem_idcontext)) is read from the log: what the
+  latest `request.done` was billed, and what was remembered after its `request.sent`.
+  When that request says nothing of the next one, it is estimated from the text instead.
 - **What changed, and when?** A new model, an edited instruction, a connection whose
   tools changed, a switch from the API key to the ChatGPT proxy: each is written down
   before the first request it applies to.
@@ -95,14 +109,16 @@ entry it is, at the moment it is final.
 | | Kinds | Sent to a model? |
 | --- | --- | --- |
 | **What the gem remembers** | `user.said`, `note.written`, `gem.said`, `tool.called`, `tool.result`, `event.received` | Yes. The gem's conversation is these entries since the latest reset, in order, and nothing else |
-| **What happened** | `call.opened`, `call.closed`, `gem.reset`, `turn.opened`, `turn.closed`, `settings.changed`, `cache.cold`, `request.sent`, `request.done`, `tool.started`, `tool.backgrounded`, `tool.done`, `event.came`, `watch.added`, `watch.removed` | Never |
+| **What happened** | `call.opened`, `call.closed`, `gem.reset`, `turn.opened`, `turn.closed`, `settings.changed`, `cache.cold`, `context.compacted`, `request.sent`, `request.done`, `tool.started`, `tool.backgrounded`, `tool.done`, `event.came`, `watch.added`, `watch.removed` | Never, but the `summary` of the latest `context.compacted`, which is sent in place of what it sums up |
 
 So the log is not a copy kept beside the conversation: it *is* the conversation, with
 everything else that happened written in between. A `gem.reset` is where the user reset
 the gem: the conversation is what the gem remembers after the latest one, and
 what came before stays in the log. A `cache.cold` is where the conversation started
 cold: from there on, long tool results before its `before` are sent expired (see
-[the contract](chat-contract.md#a-cold-start)). An `event.came` is an event that came in;
+[the contract](chat-contract.md#a-cold-start)). A `context.compacted` is where the
+conversation was summed up: from there on, everything the gem remembered before its
+`through` is sent as its `summary`, and only what came after it whole (see [the contract](chat-contract.md#a-compaction)). An `event.came` is an event that came in;
 the gem knows of it only from the `event.received` that tells it, and an `event.came`
 that none tells is waiting (see [the contract](chat-contract.md#an-event)).
 
@@ -114,9 +130,12 @@ that none tells is waiting (see [the contract](chat-contract.md#an-event)).
   never by `at`.
 - **A request holds a count, not a copy.** It was sent every remembered entry before it,
   since the latest reset, and `count` says how many, each as stored or, before the line
-  of the latest `cache.cold`, expired. That is how `/sent` rebuilds it, and how a lost
-  entry shows: the numbers do not add up, and `exact` is false. A `cache.cold` is kept
-  like what the gem remembers, since what was sent depends on it.
+  of the latest `cache.cold`, expired; with a `context.compacted` before it, its summary
+  in place of everything before its `through`; and for a compaction's own request, the
+  message that asks for the summary last. `count` counts those too. That is how
+  `/sent` rebuilds it, and how a lost entry shows: the numbers do not add up, and
+  `exact` is false. A `cache.cold` is kept like what the gem remembers, since what was
+  sent depends on it.
 - **A change comes before what it applies to.** What a reply or a call is made with (the
   model and the way to its provider, each layer of the instructions, every tool) is
   compared with what was last written down, and only the part that differs is written,
@@ -132,7 +151,8 @@ that none tells is waiting (see [the contract](chat-contract.md#an-event)).
   it is stored. If it cannot be, the reply or the call fails. So does a `cache.cold`, and
   a reply in writing waits for it to be stored before its first request. An `event.came`
   is written at once, on its own, like a `gem.reset`: the event counts as come in only
-  once it is stored, and a reply that fails never takes it down with it.
+  once it is stored, and a reply that fails never takes it down with it. So is a
+  `context.compacted`: a compaction counts only once it is stored, and fails otherwise.
 - **It changes nothing.** With a log or without one, the model is sent the same: a test
   sends a scripted reply both ways and compares the requests.
 

@@ -384,6 +384,21 @@ def test_a_version_2_config_has_the_default_instructions_after_its_own(
     assert gem.instructions == instructions
 
 
+async def test_a_gem_has_no_say_in_when_it_is_compacted() -> None:
+    # Only the user compacts a gem. A config or a patch that names a setting for it, as
+    # an app built for one may send, loads and changes the rest all the same.
+    service = GemsServiceV1Class(_gems()[0])
+    made = await service.create_gem(GemsModels.V1.Input.CreateGem(name="Gem Two"))
+
+    patch = GemsModels.V1.Input.UpdateGem.model_validate({"compaction": "never", "name": "Two"})
+    changed = await service.update_gem(made.id, patch)
+
+    assert GEM_CONFIG_VERSION == 3
+    assert "compaction" not in changed.model_dump()
+    assert changed.name == "Two"
+    assert "compaction" not in GemConfig.model_validate(_stored(compaction="never")).model_dump()
+
+
 async def test_an_older_gem_with_long_instructions_still_loads_and_can_be_changed() -> None:
     # The limit is on what a user saves. The step to version 3 adds the defaults after
     # the gem's own text, which can take it past the limit: it must load all the same,
@@ -528,6 +543,11 @@ def test_the_routes_are_the_ones_a_client_expects() -> None:
         ("GET", "/v1/gems/{gem_id}/chat", None),
         # Resets it: the gem starts again, knowing nothing from before.
         ("POST", "/v1/gems/{gem_id}/reset", 204),
+        # Compacts it: what it remembers is sent as a summary.
+        ("POST", "/v1/gems/{gem_id}/compact", None),
+        # Its size, when its cache expires, when to offer a compaction, and what keeping
+        # it and compacting it would cost.
+        ("GET", "/v1/gems/{gem_id}/context", None),
         ("GET", "/v1/gems/{gem_id}/log", None),
         ("GET", "/v1/gems/{gem_id}/log/{seq}", None),
         ("GET", "/v1/gems/{gem_id}/log/{seq}/sent", None),

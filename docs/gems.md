@@ -98,6 +98,8 @@ change, in [`app/entities/darbar_ent.py`](../app/entities/darbar_ent.py).
 | `DELETE /v1/gems/{gem_id}` | deletes it (204), with its conversation and its log. It is taken out of every connection that names it |
 | `GET /v1/gems/{gem_id}/chat` | its conversation so far, calls included |
 | `POST /v1/gems/{gem_id}/reset` | resets it (204): it starts again, knowing nothing from before. Its config and its log stay. 409 while it is in a call (see [the contract](chat-contract.md#post-v1gemsgem_idreset)) |
+| `POST /v1/gems/{gem_id}/compact` | compacts its conversation now, as only the user does: everything it remembers so far is sent as a summary from then on (200, with `summary` and `through`). 409 in a call or with nothing to compact, 502 if the summary could not be written, 500 if it could not be stored (see [the contract](chat-contract.md#post-v1gemsgem_idcompact)) |
+| `GET /v1/gems/{gem_id}/context` | where its context stands: its estimated size, when its cache expires, when to offer a compaction, and what keeping the conversation and compacting it would cost (see [the contract](chat-contract.md#get-v1gemsgem_idcontext)) |
 | `GET /v1/gems/{gem_id}/log` | its log (see [Observability](observability.md)) |
 
 The Darbar text is read and set at `/v1/darbar` (see

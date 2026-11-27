@@ -97,7 +97,8 @@ class LinkModels:
                 # 7: an event a gem watches for can wake it (`chat.event`), and a
                 # gem's watch that is added, removed or changes state is told
                 # (`watch.changed`).
-                version: Literal[7] = 7
+                # 8: a gem whose context changed is told (`context.changed`).
+                version: Literal[8] = 8
 
             class LogEntry(BaseModel):
                 """One entry of a gem's log, as it is written down, for a socket that watches it.
@@ -135,6 +136,17 @@ class LinkModels:
                 type: Literal["watch.changed"] = "watch.changed"
                 gem: str
                 watch: str
+
+            class ContextChanged(BaseModel):
+                """What a gem would be sent next has changed: read its context again
+                (`GET /v1/gems/{gem}/context`).
+
+                Sent to every socket after a reply, a call, a compaction or a reset of
+                the gem. `gem` is the gem's id.
+                """
+
+                type: Literal["context.changed"] = "context.changed"
+                gem: str
 
             class CallReady(BaseModel):
                 """The call is open. Its audio and events follow."""

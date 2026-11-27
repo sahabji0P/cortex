@@ -63,16 +63,17 @@ from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass, Stored, Writer, gem_key
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemConfig, GemEntityClass
-from app.entities.history import TimeTold, mode_line, shown, told
-from app.entities.instructions import instruction_layers, joined
+from app.entities.gem_log import Recording
+from app.entities.history import Mode, TimeTold, mode_line, shown, told
+from app.entities.instructions import Layer, instruction_layers, joined
 from app.entities.late_results import LateResult
-from app.entities.model import LLM, ModelName, is_openai, model_for
+from app.entities.model import LLM, Item, Model, ModelName, is_openai, model_for
 from app.entities.pending_events import PendingEvent, told_events
-from app.entities.tools import gem_toolbox
+from app.entities.tools import Toolbox, gem_toolbox
 from app.entities.watch_ent import WatchEntityClass
 from app.entities.written_ent import WrittenConversation, WrittenEvent
 
-__all__ = ["ChatEntityClass", "ChatEvent", "ChatTurn", "Deliver"]
+__all__ = ["ChatEntityClass", "ChatEvent", "ChatTurn", "Deliver", "NextRequest", "Ready"]
 
 
 class ChatEvent(BaseModel):
@@ -149,12 +150,23 @@ class ChatTurn:
 
 
 @dataclass(frozen=True, slots=True)
-class _Ready:
+class Ready:
     """What a reply of a gem's is made with."""
 
     gem: GemConfig
     llm: LLM
     name: ModelName
+
+
+@dataclass(frozen=True, slots=True)
+class NextRequest:
+    """What a gem's next request in writing is made with, and the items it is sent."""
+
+    model: Model
+    tools: Toolbox
+    layers: list[Layer]
+    record: Recording
+    sent: list[Item]
 
 
 class ChatEntityClass:
@@ -247,7 +259,7 @@ class ChatEntityClass:
             # The reply before this one is stored first, so this one is made from it.
             if previous is not None:
                 await previous.over.wait()
-            ready = await self._ready(gem_id)
+            ready = await self.ready(gem_id)
             if isinstance(ready, str):
                 await tell("chat.error", ready)
                 return
@@ -281,7 +293,7 @@ class ChatEntityClass:
         finally:
             turn.over.set()
 
-    async def _ready(self, gem_id: str) -> _Ready | str:
+    async def ready(self, gem_id: str) -> Ready | str:
         """The gem and the model to answer with, or why no reply can be made."""
         try:
             gem = await self._gems.get(gem_id)
@@ -295,13 +307,13 @@ class ChatEntityClass:
         if not llm.configured:
             provider = "OpenAI" if is_openai(name) else "Anthropic"
             return f"no {provider} key is set, so {name} cannot be used"
-        return _Ready(gem, llm, name)
+        return Ready(gem, llm, name)
 
     async def _write(
         self,
         turn: ChatTurn,
         key: str,
-        ready: _Ready,
+        ready: Ready,
         history: Stored,
         text: str | None,
         at: datetime,
@@ -318,40 +330,14 @@ class ChatEntityClass:
         """
         tell = _teller(gem_id, deliver)
         gem = ready.gem
-        kept = self._conversations.gem(key)
-        late = kept.late
-        # Read for every reply, so a connection opened or closed to the gem applies
-        # from the next message.
-        connected = [] if self._connections is None else await self._connections.tools_for(gem.id)
-        if self._watches is not None:
-            connected = [*connected, *self._watches.tools_for(gem.id)]
-        tools = gem_toolbox(gem.tools, self._search, late.tool, history.items, connected)
-        model = model_for(ready.llm, ready.name, tools.specs)
-        # Read for every reply, so a change to it applies from the next message.
-        darbar = (await self._darbar.read()).text
-        layers = instruction_layers(darbar=darbar, gem=gem, model_needs=model.own_instructions)
-        # What happens in the reply is written down in the gem's log. Any change to what
-        # its requests are made with is written first, before the reply's turn opens.
-        record = self._conversations.recording(gem.id, "chat")
-        changed = record.describe(
-            model=ready.name,
-            via=lambda: getattr(ready.llm, "via", "api"),
-            layers=layers,
-            tools=tools.tools,
-        )
-        # A FIRST RULE, TO BE TRIED OUT, NOT A SETTLED ONE: the whole stored conversation
-        # is sent to the model every time. Nothing is trimmed or summed up, so the
-        # context only grows, and quickly when searches are used. Only once the cache is
-        # gone (a cold start) are old long tool results sent expired (see `cold_start.py`).
-        sent = self._conversations.sent(record, history, changed=changed)
-        if record.started_cold:
-            # Stored before the first request that is sent by it.
-            await self._conversations.stored(gem.id)
+        late = self._conversations.gem(key).late
+        made = await self.next_request(ready, key, history)
+        record = made.record
         conversation = WrittenConversation(
-            model=model,
-            tools=tools,
-            instructions=joined(layers),
-            history=sent,
+            model=made.model,
+            tools=made.tools,
+            instructions=joined(made.layers),
+            history=made.sent,
             last_mode=history.mode,
             late=late,
             record=record,
@@ -380,6 +366,62 @@ class ChatEntityClass:
         elif ended is not None:
             await tell("chat.done" if ended.type == "done" else "chat.cut", ended.text)
 
+    async def next_request(
+        self,
+        ready: Ready,
+        key: str,
+        history: Stored,
+        *,
+        mode: Mode = "chat",
+        record: Recording | None = None,
+        check_cold: bool = True,
+    ) -> NextRequest:
+        """What the gem's next request in writing is made with, from `history`.
+
+        Its tools, model and instructions are read as they are now, and written down in
+        the gem's log if they changed (`mode` is what the log says of it), and the
+        conversation is checked for a cold start, unless `check_cold` is False. A cold
+        start is stored before this returns: raises if it cannot be. It is written down
+        with `record`, if given.
+        """
+        gem = ready.gem
+        tools = await self.toolbox(gem, key, history.items)
+        model = model_for(ready.llm, ready.name, tools.specs)
+        # Read for every reply, so a change to it applies from the next message.
+        darbar = (await self._darbar.read()).text
+        layers = instruction_layers(darbar=darbar, gem=gem, model_needs=model.own_instructions)
+        # What happens in the reply is written down in the gem's log. Any change to what
+        # its requests are made with is written first, before the reply's turn opens.
+        if record is None:
+            record = self._conversations.recording(gem.id, mode)
+        changed = record.describe(
+            model=ready.name,
+            via=lambda: getattr(ready.llm, "via", "api"),
+            layers=layers,
+            tools=tools.tools,
+        )
+        # The whole stored conversation is sent to the model, but for two things. Once
+        # the cache is gone (a cold start), old long tool results are sent expired (see
+        # `cold_start.py`). Once the conversation is compacted, what came before the
+        # compaction's line is sent as its summary (see `compaction.py`).
+        sent = self._conversations.sent(record, history, changed=changed, check_cold=check_cold)
+        if record.started_cold:
+            # Stored before the first request that is sent by it.
+            await self._conversations.stored(gem.id)
+        return NextRequest(model, tools, layers, record, sent)
+
+    async def toolbox(self, gem: GemConfig, key: str, history: Sequence[Item]) -> Toolbox:
+        """The tools the gem's next request is offered, in the conversation `history`.
+
+        Read for every reply, so a connection opened or closed to the gem applies from
+        the next message. Nothing is written down.
+        """
+        late = self._conversations.gem(key).late
+        connected = [] if self._connections is None else await self._connections.tools_for(gem.id)
+        if self._watches is not None:
+            connected = [*connected, *self._watches.tools_for(gem.id)]
+        return gem_toolbox(gem.tools, self._search, late.tool, history, connected)
+
     def _release(self, turn: ChatTurn, key: str) -> None:
         """A reply is stored and its last frame sent: free the gem's slot."""
         turn.over.set()
@@ -388,6 +430,7 @@ class ChatEntityClass:
             kept.writer = None
         # Results that came in while it was written are told now.
         self._tell_when_quiet(key)
+        self._conversations.settled(key, "reply")
         self._conversations.let_go(key)
 
     def joined(self, deliver: Deliver) -> None:
@@ -475,7 +518,7 @@ class ChatEntityClass:
                 # Noted with no `await` since the client was read, so that if it goes
                 # from here on, `left` finds this reply and cuts it.
                 turn.unasked_for = deliver
-            ready = await self._ready(key)
+            ready = await self.ready(key)
             if isinstance(ready, str) or turn.was_cut:
                 # No reply can be made, or a message came first (or the client went): the
                 # results and events are stored, and the gem's instructions tell it to

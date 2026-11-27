@@ -57,6 +57,8 @@ config ← core ← adapters ← entities ← routers ← main
 | `pending_events.py` | events that came in for a gem's watches, held until they are told: one copy for a call and for chat |
 | `events_ent.py` | where every watch hands its events (the `EventSink`), and waking gems with events waiting after a restart |
 | `cold_start.py` | when a conversation starts cold, and the items as they are sent from then on, with old long tool results expired |
+| `compaction.py` | what there is to compact, the summary request's instructions, ask and schema, how the summary is written from what the model wrote, the items as they are sent with a compaction in force (its summary, then what came after it), the estimated size of a request, and what keeping and compacting would cost |
+| `compaction_ent.py` | compacting a gem's conversation when the user asks, and where its context stands |
 | `gem_log.py` | everything that happens with a gem, numbered and written down as it happens |
 | `model.py` | either provider's model behind one interface, and the list of models |
 | `prices.py` | what a model request cost, from its tokens |
@@ -139,11 +141,16 @@ loses nothing: a socket that closes cuts its replies, and they are stored as cut
 - **Calls lost to a restart.** Background calls run in the process's memory, so a
   restart loses them. Before the next reply, written or in a call, each one lost is
   closed with a stub call and a result saying it was lost and will not arrive.
-- **The whole conversation is sent every time.** Nothing is trimmed or summed up. The
-  context grows with every message, and quickly when tools are used. A message is at
-  most 20,000 characters, so one stray paste cannot ride along in every request after
-  it. The one thing sent other than as stored: after a cold start (rule 3 below), old
-  long tool results are sent expired.
+- **The whole conversation is sent every time, until it is compacted.** The context
+  grows with every message, and quickly when tools are used. A message is at most 20,000
+  characters, so one stray paste cannot ride along in every request after it. Two
+  things are sent other than as stored: after a cold start (rule 3 below), old long tool
+  results are sent expired; and once the conversation is compacted, everything before
+  the compaction is sent as its summary (rule 4 below).
+- **A compaction takes the gem as a reply does.** It is made only when the user asks. It
+  waits for a reply being written, is refused in a call, and a message or a call that
+  comes meanwhile waits for it. Nothing cuts it
+  ([`compaction_ent.py`](../app/entities/compaction_ent.py)).
 - **The user can reset the gem.** It then starts again, knowing nothing from before.
   A reset takes the gem as a reply does: one being written is cut first, a message sent
   meanwhile waits and is answered after the reset, and a call refuses it. Background
@@ -161,7 +168,7 @@ The writer and the background calls of each gem are kept in
 ## What a gem remembers
 
 The history is what the model is sent on every request: the gem's stored conversation.
-Nothing is stored at the provider. It follows three rules, the same in a call and in
+Nothing is stored at the provider. It follows four rules, the same in a call and in
 writing.
 
 1. **It holds what was delivered, not what was generated.** A reply joins the history
@@ -186,8 +193,9 @@ writing.
    the same, so a prompt cache stays valid. One consequence: what the model said before
    a tool call is kept whole once it is sent back with the result, even if the user cut
    it off part-way. **One exception: a cold start.** Once the provider's cache has
-   gone (the gem was quiet longer than the cache lasts, or its model,
-   instructions or tools changed), everything is sent at full price anyway. So then, and
+   gone (its model, instructions or tools changed, the conversation was compacted, or
+   the gem was quiet longer than the cache lasts), everything is sent at full price
+   anyway. So then, and
    only then, long tool results that were sent before are sent expired: a fixed line in
    place of their output. Some results are never expired
    ([which](chat-contract.md#a-cold-start)). What is stored never changes, and from
@@ -195,6 +203,22 @@ writing.
    checked for each reply in writing and once when a call starts, and written down as
    `cache.cold` ([`cold_start.py`](../app/entities/cold_start.py), and
    [the contract](chat-contract.md#a-cold-start)).
+4. **When the user asks, everything is sent summed up.** A compaction has the gem's own
+   model write a summary of the whole conversation, in one plain call of its own: our
+   instructions, the items its next reply would be sent (with no check for a cold start:
+   it reads no cache), a plain message that asks for the summary, no tool use, no
+   cache, and JSON held to a schema. The backend writes the
+   summary from that JSON, and adds the identifiers and the user's own words, copied
+   exactly. From then on every request is sent that summary, as one line of ours, then
+   only what was remembered after the compaction's request, whole. The first request
+   after it starts cold (rule 3). The summary, and in the compaction's own request our
+   instructions and the message that asks for it, are the only things sent that are not
+   something the gem remembers. What is stored never changes, and each request
+   again starts with the whole of the one before. A compaction is no turn: it is
+   written down from `compaction.started` to `compaction.ended`, and its summary as
+   `context.compacted`
+   ([`compaction.py`](../app/entities/compaction.py), and
+   [the contract](chat-contract.md#a-compaction)).
 
 **What the user says is stored as it was said, as a message of its own.** Words said, or
 a message sent, before a reply to the one before has got through are one more user

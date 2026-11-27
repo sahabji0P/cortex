@@ -8,6 +8,7 @@ import pytest
 from bson import ObjectId
 
 from app.entities.cold_start import Cache
+from app.entities.compaction import Compacted, asked
 from app.entities.conversation_ent import ConversationEntityClass, Stored
 from app.entities.conversation_store import (
     REMEMBERED,
@@ -812,6 +813,127 @@ async def test_the_cache_is_read_since_the_last_reset() -> None:
     # A reset forgets both.
     await conversations.log.record_reset(gem_id)
     assert await store.cache(gem_id) == Cache()
+
+
+# ---- compaction
+
+
+async def test_a_request_knows_the_number_of_its_request_sent() -> None:
+    docdb, _, conversations = await _conversations()
+    gem_id = ObjectId()
+    await conversations.log.open(gem_id)
+
+    request = conversations.recording(gem_id, "chat").turn("user").sent([], False)
+
+    await conversations.log.written()
+    [sent] = [d for d in _log(docdb) if d["kind"] == "request.sent"]
+    assert request.seq == sent["seq"]
+    # With no log, nothing is written down, and it has no number.
+    assert Recording().turn("user").sent([], False).seq is None
+
+
+async def test_a_compaction_is_no_turn_and_its_entries_name_it() -> None:
+    docdb, _, conversations = await _conversations()
+    gem_id = ObjectId()
+    await conversations.log.open(gem_id)
+    recording = conversations.recording(gem_id, "chat")
+
+    compaction = recording.compaction()  # 0
+    request = compaction.sent([asked()])  # 1
+    request.done("{}", [], Usage(input=10, cache_read=0, cache_write=0, output=2))  # 2
+    compaction.ended(done=True)  # 3
+    compaction.ended(done=False)  # written once
+    # The next reply's turn is the first: a compaction takes no turn number.
+    reply = recording.turn("user")  # 4
+    reply.sent([], False).done("Hi.", [], None)  # 5, 6
+
+    await conversations.log.written()
+    log = _log(docdb)
+    assert compaction.seq == 0
+    assert [(d["kind"], d["turn"]) for d in log] == [
+        ("compaction.started", None),
+        ("request.sent", None),
+        ("request.done", None),
+        ("compaction.ended", None),
+        ("turn.opened", 1),
+        ("request.sent", 1),
+        ("request.done", 1),
+    ]
+    assert log[0]["data"] == {}
+    assert (log[1]["data"]["compaction"], log[2]["data"]["compaction"]) == (0, 0)
+    assert log[3]["data"] == {"compaction": 0, "outcome": "done", "error": None}
+    # Every other request is as it was: it names no compaction.
+    assert "compaction" not in log[5]["data"]
+    assert "compaction" not in log[6]["data"]
+
+
+@pytest.mark.parametrize(
+    ("error", "outcome", "said"),
+    [
+        (RuntimeError("the model went away"), "failed", "the model went away"),
+        (asyncio.CancelledError(), "cut", None),
+    ],
+)
+async def test_a_compaction_that_failed_or_was_stopped_ends_so(
+    error: BaseException, outcome: str, said: str | None
+) -> None:
+    docdb, _, conversations = await _conversations()
+    gem_id = ObjectId()
+    await conversations.log.open(gem_id)
+    compaction = conversations.recording(gem_id, "chat").compaction()
+
+    if isinstance(error, Exception):
+        compaction.failed(error)
+        compaction.failed(RuntimeError("a later one"))
+    compaction.ended(done=False)
+
+    await conversations.log.written()
+    [ended] = [d for d in _log(docdb) if d["kind"] == "compaction.ended"]
+    assert ended["data"] == {"compaction": compaction.seq, "outcome": outcome, "error": said}
+
+
+async def test_a_compaction_is_written_at_once_and_read_back_in_force() -> None:
+    docdb, store, conversations = await _conversations()
+    gem_id = ObjectId()
+    log = conversations.log
+    await log.open(gem_id)
+    compaction = conversations.recording(gem_id, "chat").compaction()  # 0
+
+    first = await log.record_compacted(gem_id, compaction.seq or 0, summary="One.", through=7)
+    second = await log.record_compacted(gem_id, 5, summary="Two.", through=9)
+
+    await log.written()
+    assert [d["kind"] for d in _log(docdb)] == [
+        "compaction.started",
+        "context.compacted",
+        "context.compacted",
+    ]
+    [one] = [d for d in _log(docdb) if d["seq"] == first]
+    assert (one["turn"], one["data"]) == (
+        None,
+        {"summary": "One.", "through": 7, "by": "user", "compaction": 0},
+    )
+    # The latest is in force, and before it the one before.
+    assert await store.compacted(gem_id) == Compacted("Two.", 9)
+    assert (await store.cache(gem_id)).compacted == second
+    assert (await store.cache(gem_id, before=second)).compacted == first
+    assert await store.compacted(gem_id, before=second) == Compacted("One.", 7)
+    assert await store.compacted(gem_id, before=first) is None
+    # A reset clears it.
+    await log.record_reset(gem_id)
+    assert await store.compacted(gem_id) is None
+
+
+async def test_a_compaction_that_cannot_be_stored_raises_and_nothing_is_kept() -> None:
+    docdb, store, conversations = await _conversations()
+    gem_id = ObjectId()
+    await conversations.log.open(gem_id)
+    docdb.breaks_on_kind = "context.compacted"
+
+    with pytest.raises(ConnectionError, match="the database went away"):
+        await conversations.log.record_compacted(gem_id, 0, summary="One.", through=7)
+
+    assert await store.compacted(gem_id) is None
 
 
 # ---- events: what came in, and the gem told of it

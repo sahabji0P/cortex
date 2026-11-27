@@ -59,6 +59,21 @@ def test_a_change_of_settings_is_a_cold_start_however_soon() -> None:
     assert cold(cache, "Anthropic", changed=True, now=later) == "settings"
 
 
+def test_a_compaction_since_the_last_request_is_a_cold_start_however_soon() -> None:
+    # The last request (7) was the compaction's own; the compaction was stored after it.
+    cache = Cache(sent=7, sent_at=_SENT_AT, compacted=9)
+
+    assert cold(cache, "Anthropic", changed=False, now=_SENT_AT) == "compaction"
+    # The settings come first, then the compaction, then the time.
+    later = _SENT_AT + timedelta(hours=1)
+    assert cold(cache, "Anthropic", changed=True, now=later) == "settings"
+    assert cold(cache, "Anthropic", changed=False, now=later) == "compaction"
+    # A request after the compaction is no compaction since: only the time can say.
+    after = cache._replace(sent=11)
+    assert cold(after, "Anthropic", changed=False, now=_SENT_AT) is None
+    assert cold(after, "Anthropic", changed=False, now=later) == "quiet"
+
+
 def test_with_nothing_sent_since_the_latest_cold_start_it_is_not_cold_again() -> None:
     # A call that opened cold and was hung up before anyone spoke sent nothing.
     cache = Cache(sent=7, sent_at=_SENT_AT, before=7)

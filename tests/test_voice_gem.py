@@ -384,6 +384,9 @@ class _NothingStored:
     async def cache(self, gem_id: object) -> Cache:
         return Cache()
 
+    async def compacted(self, gem_id: object) -> None:
+        return None
+
     async def last(self, gem_id: object, kind: str | None = None) -> None:
         return None
 

@@ -93,6 +93,15 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - When it is written: as a call opens, and in writing before a message when there is none yet, the last is over ten minutes old, or the date has changed.
 - The Darbar text does not mention the time line: the line explains itself.
 - To watch: a zone changed by the user may show only once the ten minutes are up.
+- Compaction: only when the user asks, from the app's pill, offered past 100,000 estimated tokens. Everything before it is sent as a summary the gem's own model wrote; nothing is kept whole. Built 2026-11-27, made manual the same day.
+- The first request after a compaction starts cold, with the reason `compaction`.
+- A compaction's own request is never checked for a cold start, and keeps no cache alive: it reads none. No `cache.cold` inside a compaction. Fixed 2026-11-27.
+- To fix: a compaction that fails after writing `settings.changed` leaves the next reply not cold for the change (cold only if quiet); the same for a failed compaction straight after a stored one.
+- A compaction is no turn: `compaction.started` (its id) to `compaction.ended`, its entries name it; turn numbers count only replies. Ruled by the owner 2026-11-27.
+- The app's prompt shows what keeping the conversation and compacting it would cost, from the price table.
+- A compaction's size starts from what the latest request was billed. Counted from the text alone it came to about half of what Anthropic billed.
+- The summary is one plain structured call: our own instructions, a plain user ask, JSON per heading; code adds the identifiers and the user's own words. Asked as a note it was refused 9 of 9 on Haiku 5.5; this way 4 of 4 on Haiku and 1 of 1 on Sonnet wrote it. Decided 2026-11-27.
+- To watch: on OpenAI, not measured: a structured summary request, what it takes without tools declared, and whether a call of a deferred tool with no search in the history is accepted (on Haiku 5.5 it is).
 
 ### Watches (decided 2026-11-26)
 
@@ -189,7 +198,6 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Which mode each message was in, in the history route's answer: on hold.
 - A reply that plays to its end is stored only when the user next speaks or the call ends.
 - A long conversation is sent whole at the start of every call. Trimming comes with Gyan Kosh.
-- Compaction: a summary in place of the older part. Next, with the caching work.
 - OpenAI's explicit cache marks: put off until they can be run on the API key. They need a mark on every message, not one at the end. The proxy takes them and they do nothing.
 - A round's calls as one message, and their results as one: the cache counts each run as one block, so no round is too long for it. Needs a round's id in what is stored. Put off.
 - Rewind to a turn, instead of resetting everything: put off.
