@@ -367,14 +367,20 @@ class ChatEntityClass:
             await tell("chat.done" if ended.type == "done" else "chat.cut", ended.text)
 
     async def next_request(
-        self, ready: Ready, key: str, history: Stored, *, mode: Mode = "chat"
+        self,
+        ready: Ready,
+        key: str,
+        history: Stored,
+        *,
+        mode: Mode = "chat",
+        record: Recording | None = None,
     ) -> NextRequest:
         """What the gem's next request in writing is made with, from `history`.
 
         Its tools, model and instructions are read as they are now, and written down in
         the gem's log if they changed (`mode` is what the log says of it), and the
         conversation is checked for a cold start. A cold start is stored before this
-        returns: raises if it cannot be.
+        returns: raises if it cannot be. It is written down with `record`, if given.
         """
         gem = ready.gem
         tools = await self.toolbox(gem, key, history.items)
@@ -384,7 +390,8 @@ class ChatEntityClass:
         layers = instruction_layers(darbar=darbar, gem=gem, model_needs=model.own_instructions)
         # What happens in the reply is written down in the gem's log. Any change to what
         # its requests are made with is written first, before the reply's turn opens.
-        record = self._conversations.recording(gem.id, mode)
+        if record is None:
+            record = self._conversations.recording(gem.id, mode)
         changed = record.describe(
             model=ready.name,
             via=lambda: getattr(ready.llm, "via", "api"),
