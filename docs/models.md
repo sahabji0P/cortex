@@ -89,6 +89,11 @@ more than input (see [Cost](#cost)).
   `before_expiry` compacts itself 2 minutes before its cache expires (see
   [the contract](chat-contract.md#compaction)). On OpenAI it was not measured. The request
   after a compaction starts with the summary, so it writes the cache again.
+- **A summary has more room than a reply.** On Anthropic a reply may write at most 8,192
+  tokens, thinking included, and one that reaches it fails. The summary request may write
+  32,000, which every model a gem can use allows. A larger ceiling was measured not to
+  lose the cache: on Haiku 5.5 the summary request read everything the reply before it
+  wrote. OpenAI is sent no ceiling.
 
 ## OpenAI through a ChatGPT login
 

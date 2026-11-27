@@ -150,8 +150,8 @@ loses nothing: a socket that closes cuts its replies, and they are stored as cut
 - **A compaction takes the gem as a reply does.** The user's waits for a reply being
   written, is refused in a call, and a message sent meanwhile waits for it. One the gem
   makes by itself before its cache expires is stopped by anything that takes the gem
-  first, and cut by a message or a call while it runs
-  ([`compaction_ent.py`](../app/entities/compaction_ent.py)).
+  first, cut by a message or a call while it runs, and stops by itself if the cache is
+  gone when it runs ([`compaction_ent.py`](../app/entities/compaction_ent.py)).
 - **The user can reset the gem.** It then starts again, knowing nothing from before.
   A reset takes the gem as a reply does: one being written is cut first, a message sent
   meanwhile waits and is answered after the reset, and a call refuses it. Background
@@ -206,9 +206,11 @@ writing.
 4. **Past a size, the older part is sent summed up.** A compaction has the gem's own
    model write a summary of the conversation, from the very request its next reply would
    be sent, so a warm cache is read. From then on every request is sent that summary, as
-   one line of ours, and then everything from the compaction's line on, whole: the latest
+   one line of ours, then the tool searches from before the line (what they loaded stays
+   loaded), and then everything from the compaction's line on, whole: the latest
    sitting, at most about 20,000 estimated tokens of it, from the start of a turn. The
-   summary is the one thing sent that is not something the gem remembers. What is
+   summary, and in the compaction's own request the line that asks for it, are the only
+   things sent that are not something the gem remembers. What is
    stored never changes, and each request again starts with the whole of the one
    before. It is written down as `context.compacted`
    ([`compaction.py`](../app/entities/compaction.py), and
