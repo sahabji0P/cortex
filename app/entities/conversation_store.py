@@ -37,6 +37,10 @@ such entry.
 A conversation can start cold (`cache.cold`, see `cold_start.py`): from then on, long
 tool results before its line are sent expired. What is stored stays as it was.
 
+A conversation can be compacted (`context.compacted`, see `compaction.py`): from then on,
+what the gem remembers before its line is sent as its summary. The latest since the gem
+was last reset is in force (`compacted`). What is stored stays as it was.
+
 An event that comes in is written down at once (`event.came`), before the gem is told it,
 and it waits until an `event.received` delivers it. The events waiting are those since
 the latest reset that no `event.received` delivers yet (`pending_events`).
@@ -57,12 +61,14 @@ from pydantic_mongo import PydanticObjectId
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.core.times import UtcDatetime, in_utc
 from app.entities.cold_start import Cache
+from app.entities.compaction import Compacted
 from app.entities.history import Added, Mode, Source
 from app.entities.loop import ResultMark
 from app.entities.model import Item
 
 __all__ = [
     "COLD",
+    "COMPACTED",
     "EVENT_CAME",
     "EVENT_RECEIVED",
     "REMEMBERED",
@@ -95,6 +101,9 @@ RESET = "gem.reset"
 
 # The kind of entry that says a conversation started cold (see `cold_start.py`).
 COLD = "cache.cold"
+
+# The kind of entry that says a conversation was compacted (see `compaction.py`).
+COMPACTED = "context.compacted"
 
 # The kind of entry that says an event came in, for a watch of the gem's.
 EVENT_CAME = "event.came"
@@ -258,6 +267,28 @@ class ConversationStoreClass:
             sent=None if sent is None else sent.seq,
             sent_at=None if sent is None else sent.at,
             before=None if started_cold is None else int(started_cold.data["before"]),
+            cold_at=None if started_cold is None else started_cold.seq,
+        )
+
+    async def compacted(self, gem_id: ObjectId, *, before: int | None = None) -> Compacted | None:
+        """The compaction in force: the latest since the gem was last reset, if any.
+
+        With `before`, the one in force just before that entry.
+        """
+        found = await self._docdb.get_many(
+            LogEntry,
+            filters={"gem_id": gem_id, "kind": COMPACTED, "seq": await self._since(gem_id, before)},
+            sort=[("seq", -1)],
+            limit=1,
+        )
+        if not found:
+            return None
+        return Compacted(str(found[0].data["summary"]), int(found[0].data["through"]))
+
+    async def opened(self, gem_id: ObjectId, turn: int) -> LogEntry | None:
+        """The entry that opened a turn, if it was written down."""
+        return await self._docdb.get(
+            LogEntry, filters={"gem_id": gem_id, "kind": "turn.opened", "turn": turn}
         )
 
     async def pending_events(self, gem_id: ObjectId) -> list[LogEntry]:

@@ -29,7 +29,9 @@ unless it says otherwise:
                      `gem` or the `user`). No turn. Written by `watch_ent.py`.
 - `turn.opened`      a reply was asked for. `by` says by what: the `user`, the `gem`
                      speaking first, a `background_result` that is to be told, or an
-                     `event` that came in. `mode` is `call` or `chat`.
+                     `event` that came in. Or it is no reply but a summary of the
+                     conversation, which nobody is shown: `compaction`. `mode` is
+                     `call` or `chat`.
 - `settings.changed` the model, the instructions or the tools differ from what was
                      last written down. Only the parts that changed, each in full.
                      Written when a conversation says what its requests are made
@@ -43,8 +45,11 @@ unless it says otherwise:
                      the gem remembers, it must be stored: what is sent depends on it.
 - `request.sent`     a request went to the model. It was sent everything the gem
                      remembered by then: every remembered entry before this one since
-                     the last reset, and nothing else, as the latest `cache.cold` before
-                     it has them sent. `count` is how many that is.
+                     the last reset, and nothing else, as the latest `cache.cold` and
+                     `context.compacted` before it have them sent (the second puts its
+                     summary, a line of ours, in place of what came before its line). A
+                     compaction's request is sent one more line of ours after them:
+                     what asks for the summary. `count` is how many items that is.
 - `request.done`     how the request ended: `done`, `failed`, or `cut` while the model
                      was still producing. Everything the model produced, in full: its
                      text and its tool calls. When the first of it came, the tokens
@@ -65,6 +70,13 @@ and the call by its `call_id`. So a call that went on in the background reads, i
 order of time: started, backgrounded, done, and then delivered, or cancelled, or closed
 as lost after a restart (a stub whose `source` is `lost-call`).
 
+- `context.compacted`  the conversation was compacted (see `compaction.py`), in the
+                     turn of the request that wrote the summary: `summary`, `through`
+                     (the first entry still sent whole) and `by` (the `user`, or `auto`
+                     before the cache expired). From here on, what the gem remembers
+                     before `through` is sent as the summary. Like a reset, it cannot
+                     be lost: the compaction is done only once it is stored
+                     (`record_compacted`).
 - `turn.closed`      the reply was settled into what the gem remembers: `finished`,
                      `cut` or `failed`. What is kept of it is not written here: it is
                      the turn's `gem.said` entries, and a cut reply with none of them
@@ -120,6 +132,7 @@ from bson import ObjectId
 from app.entities.cold_start import Reason
 from app.entities.conversation_store import (
     COLD,
+    COMPACTED,
     EVENT_CAME,
     REMEMBERED,
     RESET,
@@ -148,7 +161,7 @@ MUST_STORE: tuple[str, ...] = (*REMEMBERED, COLD)
 type Listener = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
 # What opened a turn.
-type OpenedBy = Literal["user", "gem", "background_result", "event"]
+type OpenedBy = Literal["user", "gem", "background_result", "event", "compaction"]
 
 
 class _Gem:
@@ -306,6 +319,34 @@ class LogEntityClass:
         entry = LogEntry(gem_id=gem_id, kind=RESET, seq=seq, at=datetime.now(UTC))
         await self._store.write([entry])
         self._gems[gem_id].reset = max(self._gems[gem_id].reset, seq)
+        self._tell(gem_id, entry.shown())
+        return seq
+
+    async def record_compacted(
+        self,
+        gem_id: ObjectId,
+        turn: int | None,
+        *,
+        summary: str,
+        through: int,
+        by: Literal["user", "auto"],
+    ) -> int:
+        """Write down that the conversation is compacted, once it is stored. Return its number.
+
+        The log must be open. Like a reset, it decides what the model is sent from here
+        on, so it is written at once, and raises if it could not be stored. A write
+        that is under way is finished, even when whoever waits for it is stopped.
+        """
+        (seq,) = self.take(gem_id)
+        entry = LogEntry(
+            gem_id=gem_id,
+            kind=COMPACTED,
+            seq=seq,
+            at=datetime.now(UTC),
+            turn=turn,
+            data={"summary": summary, "through": through, "by": by},
+        )
+        await asyncio.shield(self._store.write([entry]))
         self._tell(gem_id, entry.shown())
         return seq
 

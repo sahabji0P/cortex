@@ -95,6 +95,9 @@ class Cache(NamedTuple):
     # The line drawn by the latest cold start: results before it are sent expired. None
     # if there was none.
     before: int | None = None
+    # The number of the latest cold start's own entry, which the sitting begins after.
+    # None if there was none.
+    cold_at: int | None = None
 
 
 def cold(cache: Cache, provider: Provider, *, changed: bool, now: datetime) -> Reason | None:
