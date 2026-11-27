@@ -77,12 +77,13 @@ HEADINGS: tuple[str, ...] = (
 # The line of ours that asks for the summary, after everything the gem is sent.
 # THE OWNER HAS NOT RULED ON THIS WORDING.
 ASK = (
-    "The conversation so far is about to be shortened. Write a summary to stand in for "
-    "its older part. The latest part of the conversation will follow your summary word "
-    "for word, so give the older part its weight: keep what it holds that the latest "
-    "part does not. Write only the summary, under these headings, in this order:\n"
+    "This conversation is about to be replaced by a summary. Write that summary: from "
+    "here on it is all that is kept of the conversation, the latest exchange included, "
+    "so leave out nothing needed to carry on from where it stands. Write only the "
+    "summary, under these headings, in this order:\n"
     + "\n".join(f"- {heading}" for heading in HEADINGS)
     + "\nKeep names, numbers, dates, amounts and promises exactly as they were. Under "
+    "Open, say where the latest exchange left off and what was to happen next. Under "
     "Unverified, put what was said or assumed and never checked. Under a heading with "
     "nothing to say, write 'None'."
 )

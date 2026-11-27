@@ -5,7 +5,16 @@ from typing import Any, cast
 
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.entities.cold_start import EXPIRED, KEEP_UNDER, Numbered
-from app.entities.compaction import Compacted, anything_new, asked, exact, size, summed_up, view
+from app.entities.compaction import (
+    HEADINGS,
+    Compacted,
+    anything_new,
+    asked,
+    exact,
+    size,
+    summed_up,
+    view,
+)
 from app.entities.model import Item, ToolSpec, to_input, to_messages
 
 _LONG = "x" * KEEP_UNDER
@@ -212,9 +221,18 @@ def test_a_deferred_tool_called_after_the_summary_with_no_search_is_sent_on_anth
     assert "tool_reference" not in json.dumps(messages)
 
 
-def test_the_ask_is_a_line_of_ours() -> None:
+def test_the_ask_is_a_line_of_ours_for_a_summary_of_the_whole_conversation() -> None:
+    text = asked()["content"]
+
     assert asked()["role"] == "developer"
-    assert "word for word" in asked()["content"]
+    # Nothing follows the summary word for word: it holds the latest exchange too.
+    assert "the latest exchange included" in text
+    assert "word for word" not in text
+    assert "older part" not in text
+    # Its headings, in order.
+    places = [text.index(f"- {heading}\n") for heading in HEADINGS[:-1]]
+    assert places == sorted(places)
+    assert text.index(f"- {HEADINGS[-1]}\n") > places[-1]
 
 
 # ---- what is copied exactly
