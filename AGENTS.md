@@ -98,9 +98,10 @@ What that means in practice:
   holds a reply up and never fails one. What the gem remembers must be stored: a reply
   or a call that cannot store it fails. So must a `cache.cold` and a
   `context.compacted`, which decide what the model is sent. Nothing in the log but what
-  the gem remembers is ever sent to a model, with one exception: the `summary` of the
-  compaction in force, text of ours that stands in for the remembered entries before
-  its `through`.
+  the gem remembers is ever sent to a model, with two exceptions, both text of ours: the
+  `summary` of the compaction in force, which stands in for the remembered entries
+  before its `through`, and the line that asks for it (`ASK`), sent last in a
+  compaction's own request.
 - **Cost comes from the log.** No provider reports a cost, so the backend works it out
   from the tokens and its own price table (`app/entities/prices.py`), which is kept by
   hand. A cost is null when it is not known, never zero. The app's figures are sums of

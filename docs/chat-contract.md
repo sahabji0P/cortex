@@ -395,9 +395,11 @@ When, is the gem's `compaction` (see [Gems](gems.md#a-gems-config)):
 - `before_expiry`, the default: after a reply or a call, if the conversation is over
   100,000 estimated tokens, the backend compacts it by itself 2 minutes before its cache
   expires. A message, a call, an event or a background result that comes first stops
-  it; a message or a call cuts it while it runs, and nothing is stored of it. It never
-  runs during a call, never speaks, and sends no frame but `context.changed`. A restart
-  of the backend loses it: the app's offer is the fallback.
+  it; a message or a call cuts it while it runs, and nothing is stored of it. If the
+  cache is gone when it runs (the model, the instructions or the tools changed
+  meanwhile), it stops before the model is asked: only its `cache.cold` is written. It
+  never runs during a call, never speaks, and sends no frame but `context.changed`. A
+  restart of the backend loses it: the app's offer is the fallback.
 - `on_return`: only when the user asks.
 - `never`: the app does not offer it. Asked all the same, it is done.
 
@@ -414,18 +416,29 @@ Where the gem's context stands:
 }
 ```
 
-- `tokens` is the estimated size of the gem's next request: the characters of its
-  instructions and of what it would be sent (with the compaction in force, and the
-  expiry a cold start would apply now), divided by four. Its tools are not counted. It
-  can be well under what the provider counts: on a text dense with numbers it was
-  measured at about half.
+- `tokens` is the estimated size of the gem's next request. It starts from the gem's
+  latest request: all of the input it was billed (`input`, `cache_read` and
+  `cache_write` of its `request.done`), and the characters of what was remembered after
+  its `request.sent`, divided by four. When that request says nothing of the next one,
+  `tokens` is the characters of the next request's instructions, of what it would be
+  sent (with the compaction in force, and the expiry a cold start would apply now), and
+  of its tools that are not deferred (as JSON), divided by four. That is when the latest
+  request was a compaction's own, reported no tokens, or was followed by a `gem.reset`,
+  a `context.compacted`, a `cache.cold` or a `settings.changed`. Neither a cold start
+  nor a change to the gem's instructions or tools not yet written down is seen: the
+  results a cold start would expire are still counted.
+  Counted from characters, it can be well under what the provider counts: on a text
+  dense with numbers it was measured at about half.
 - `cache_until` is when the gem's cache expires, in UTC (ISO 8601, with fractions of a
   second when there are any): its last `request.sent` and how long its
   provider keeps a cache (see [how long](models.md#caching)). Null while nothing was sent
-  since the latest reset.
+  since the latest reset, and after a compaction until the next request: what a
+  compaction's own request cached starts with what is now summed up, and no request
+  reads it.
 - `compact_from` is when to start offering a compaction (the "Compact" pill):
   `cache_until`, if `tokens` is over 100,000 and `compaction` is not `never`. Otherwise
-  null. Before it, a gem set to `before_expiry` compacts itself.
+  null, so null too after a compaction until the next request. Before it, a gem set to
+  `before_expiry` compacts itself.
 - `compaction` is the gem's setting.
 - A gem that is not there is a 404.
 
@@ -443,14 +456,19 @@ gem is between turns, its cache warm or cold. 200 when it is done:
 `summary` is what the model is sent from now on in place of everything before
 `through`, the `seq` of the first entry still sent whole.
 
-- A reply being written is not cut: the compaction starts once it is done. A message
-  sent while it runs waits, and is answered after it, from the summary.
+- A reply being written is not cut: the compaction starts once it is done. While the
+  compaction waits for it, a new message does not cut that reply either. A message sent
+  while the compaction waits or runs waits, and is answered after it, from the summary.
+- A `call.start` sent while it waits or runs is not refused: the call opens once the
+  compaction is done, on the compacted conversation.
 - While the gem is in a call it is refused: a 409, `{"code": "conflict", "message": "the
   gem is in a call"}`.
 - With nothing before where its line would fall, it is refused: a 409,
   `{"code": "conflict", "message": "nothing to compact"}`.
 - If the summary could not be written: a 502, `{"code": "upstream_failed", "message":
   …}` with the reason. Nothing changes.
+- If the summary was written but could not be stored: a 500, with the plain text body
+  `Internal Server Error`. Nothing changes.
 - A gem that is not there is a 404.
 
 ## A gem's log
@@ -485,10 +503,11 @@ ended, not as running.
 
 Six kinds are what the gem remembers. The gem's conversation is these entries since the
 latest `gem.reset`, in the order of `seq`, and nothing else: every reply and every call
-starts from them, and no model is ever sent anything else from the log, with one
-exception. The `summary` of the compaction in force is text of ours that reaches the
-model without being a remembered entry: it stands in for the remembered entries before
-its `through` (see [A compaction](#a-compaction)). Each has the same fields:
+starts from them, and no model is ever sent anything else from the log, with two
+exceptions, both text of ours that reaches the model without being a remembered entry:
+the `summary` of the compaction in force, which stands in for the remembered entries
+before its `through`, and the line that asks for the summary, sent last in a
+compaction's own request (see [A compaction](#a-compaction)). Each has the same fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -627,14 +646,17 @@ It is a turn of its own: `turn.opened` with `by` `compaction`, the request that 
 the summary (`request.sent` and `request.done`, with its tokens and its cost), then
 `context.compacted`, then `turn.closed`. It may follow a `settings.changed` and a
 `cache.cold`, as a reply would. The request was sent what the gem's next reply would
-be, then a line of ours that asks for a summary under fixed headings, with tool use off.
+be, then a line of ours that asks for a summary under fixed headings, with tool use off
+and room for a long summary (see [Models](models.md#caching)).
 Its `request.done` `text` is what the model wrote; the `summary` is that, and after it a
 section of the backend's own: identifiers copied exactly from the part it replaces
 (addresses, ids, amounts), the latest 50 at most.
 
 From the latest `context.compacted` since the latest reset, every request is sent its
-`summary`, as one line of ours, then every remembered entry from its `through` on, with a
-cold start's expiry still applied. A request sent so starts with the same bytes as the
+`summary`, as one line of ours, then every `tool_search` call and its result from before
+its `through` (what a search loaded stays loaded, so a deferred tool it loaded can still
+be called), then every remembered entry from its `through` on, with a cold start's
+expiry still applied. A request sent so starts with the same bytes as the
 one before it, until the next compaction or cold start.
 
 Where `through` falls: at the start of the latest sitting, which begins after the latest
@@ -814,9 +836,10 @@ Everything the request written down as entry `seq` (a `request.sent`) was sent, 
 from the log by the backend: the `item` of every remembered entry before it since the
 latest reset, in order, as sent (tool results before the line of the latest
 `cache.cold` before it are expired, see [A cold start](#a-cold-start); with a
-`context.compacted` before it, its summary first and nothing before its `through`, see
-[A compaction](#a-compaction); for a compaction's own request, the line that asks for
-the summary last), and the settings in force.
+`context.compacted` before it, its summary first, then the searches from before its
+`through`, and nothing else before it, see [A compaction](#a-compaction); for a
+compaction's own request, the line that asks for the summary last), and the settings in
+force.
 
 ```json
 {
