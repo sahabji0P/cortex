@@ -69,7 +69,7 @@ from app.entities.conversation_ent import (
     gem_key,
     numbered,
 )
-from app.entities.conversation_store import ConversationStoreClass
+from app.entities.conversation_store import COMPACTED, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import TurnRecord
@@ -91,7 +91,8 @@ class Context:
     `tokens` is the estimated size of its next request. `cache_until` is when its cache
     expires, and `compact_from` when the app is to offer a compaction: `cache_until`,
     if the conversation is over `COMPACT_OVER` and its setting is not `never`. Both are
-    None while nothing was sent.
+    None while nothing was sent, and after a compaction until the next request: no
+    request reads what a compaction's own cached.
     """
 
     tokens: int
@@ -196,6 +197,11 @@ class CompactionEntityClass:
         layers = instruction_layers(darbar=darbar, gem=gem, model_needs=own_instructions(name))
         tokens = size(joined(layers), items)
         cache_until = await self._conversations.cache_until(found, cache)
+        compacted = await self._store.last(found, COMPACTED)
+        if compacted is not None and cache.sent is not None and compacted.seq > cache.sent:
+            # The last request was a compaction's own: what it cached starts with what
+            # is now summed up, and no request sends that again.
+            cache_until = None
         offered = tokens > COMPACT_OVER and gem.compaction != "never"
         return Context(
             tokens=tokens,

@@ -692,6 +692,37 @@ async def test_the_context_says_its_size_when_the_cache_expires_and_when_to_comp
     await _close(socket, linked)
 
 
+@pytest.mark.usefixtures("_small")
+async def test_after_a_compaction_no_cache_is_offered_until_the_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch, compaction="on_return")
+    gem_id = str(setup.gem.id)
+    failed = SimpleNamespace(
+        type="response.failed",
+        response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
+    )
+    setup.llm.then([failed], _summary(), _said("Four."))
+
+    # A summary that failed changed nothing: its request read the cache, and kept it.
+    with pytest.raises(UpstreamError):
+        await setup.compactions.compact(gem_id)
+    failing = await setup.compactions.context(gem_id)
+    await setup.compactions.compact(gem_id)
+    compacted = await setup.compactions.context(gem_id)
+    setup.socket.send(setup.gem.id, "message 4")
+    await setup.socket.until("chat.done", 4)
+    after = await setup.compactions.context(gem_id)
+
+    assert failing.cache_until is not None
+    assert failing.compact_from == failing.cache_until
+    # What the compaction's own request cached is read by no request after it.
+    assert (compacted.cache_until, compacted.compact_from) == (None, None)
+    assert after.cache_until is not None
+    assert after.compact_from == after.cache_until
+    await _close(setup.socket, setup.linked)
+
+
 async def test_the_size_counts_what_is_sent_summed_up_and_expired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
