@@ -377,13 +377,7 @@ class ChatEntityClass:
         returns: raises if it cannot be.
         """
         gem = ready.gem
-        late = self._conversations.gem(key).late
-        # Read for every reply, so a connection opened or closed to the gem applies
-        # from the next message.
-        connected = [] if self._connections is None else await self._connections.tools_for(gem.id)
-        if self._watches is not None:
-            connected = [*connected, *self._watches.tools_for(gem.id)]
-        tools = gem_toolbox(gem.tools, self._search, late.tool, history.items, connected)
+        tools = await self.toolbox(gem, key, history.items)
         model = model_for(ready.llm, ready.name, tools.specs)
         # Read for every reply, so a change to it applies from the next message.
         darbar = (await self._darbar.read()).text
@@ -406,6 +400,18 @@ class ChatEntityClass:
             # Stored before the first request that is sent by it.
             await self._conversations.stored(gem.id)
         return NextRequest(model, tools, layers, record, sent)
+
+    async def toolbox(self, gem: GemConfig, key: str, history: Sequence[Item]) -> Toolbox:
+        """The tools the gem's next request is offered, in the conversation `history`.
+
+        Read for every reply, so a connection opened or closed to the gem applies from
+        the next message. Nothing is written down.
+        """
+        late = self._conversations.gem(key).late
+        connected = [] if self._connections is None else await self._connections.tools_for(gem.id)
+        if self._watches is not None:
+            connected = [*connected, *self._watches.tools_for(gem.id)]
+        return gem_toolbox(gem.tools, self._search, late.tool, history, connected)
 
     def _release(self, turn: ChatTurn, key: str) -> None:
         """A reply is stored and its last frame sent: free the gem's slot."""
