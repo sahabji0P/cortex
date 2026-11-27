@@ -213,7 +213,8 @@ writing.
    after it starts cold (rule 3). The summary, and in the compaction's own request our
    instructions and the message that asks for it, are the only things sent that are not
    something the gem remembers. What is stored never changes, and each request
-   again starts with the whole of the one before. It is written down as
+   again starts with the whole of the one before. A compaction is no turn: it is
+   written down from `compaction.started` to `compaction.ended`, and its summary as
    `context.compacted`
    ([`compaction.py`](../app/entities/compaction.py), and
    [the contract](chat-contract.md#a-compaction)).

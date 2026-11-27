@@ -29,10 +29,13 @@ it. Every kind of entry and its fields are in
   (`event.came`), with all that is known of it, and again when the gem is told it
   (`event.received`, which names the first by its `seq`). The turn it woke opens `by`
   `event`. One written down and never told is still waiting.
-- **When was the conversation summed up, and what did that cost?** A compaction is a turn
-  of its own (`turn.opened` `by` `compaction`): its request, with its tokens and cost,
-  then `context.compacted` with the summary, its line (`through`, the `seq` of its own
-  `request.sent`) and who asked (always `user`). The request's `request.done` `text` is
+- **When was the conversation summed up, and what did that cost?** A compaction is no
+  turn: it runs from `compaction.started`, whose `seq` is its id, to `compaction.ended`
+  (`done`, `failed` or `cut`), and every entry between that is its own names it
+  (`compaction`). Those are its request, with its tokens and cost, then
+  `context.compacted` with the summary, its line (`through`, the `seq` of its own
+  `request.sent`) and who asked (always `user`). It takes no turn number. An older log
+  may hold one as a turn opened `by` `compaction`, and is still read. The request's `request.done` `text` is
   the JSON the model wrote; the summary is what the backend wrote from it. Its `/sent`
   shows our instructions, not the gem's. The next request's `cache.cold` has the reason
   `compaction`.

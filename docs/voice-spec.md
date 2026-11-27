@@ -439,7 +439,8 @@ model round before the reply. The tool list and the instructions do not change.
 ### A compaction's request
 
 A compaction (see [A compaction](chat-contract.md#a-compaction)) is not a reply, and is
-not told the Darbar text or the gem's own instructions. Its instructions are these
+not told the Darbar text or the gem's own instructions. It is no turn either: its
+request is written down in the log with no turn, naming the compaction. Its instructions are these
 (`INSTRUCTIONS` in [`compaction.py`](../app/entities/compaction.py)), in full:
 
 ```
