@@ -273,7 +273,7 @@ Every request to the conversation model is built the same way, in this order (En
 | --- | --- | --- |
 | 1. Instructions | The text under [The instructions](#the-instructions) | No |
 | 2. Tools | `web_search`, `cancel_tool_call`, `tool_search` when a connection is deferred, then the tools of the gem's connections (a deferred one marked so, or on OpenAI left out), then any tool the history holds a call of that is no longer offered (declared as not available). Or none | No |
-| 3. History | The gem's stored conversation (as it is sent after the call's check for a cold start, and with the compaction in force: its summary first, as a note, then everything from its line on; see [A compaction](chat-contract.md#a-compaction)), then everything the call has added, oldest first: the user's words as each turn ends, each reply as heard, and on the second and later calls of one reply what was said before the search, the call and its result | Only grows at its end |
+| 3. History | The gem's stored conversation (as it is sent after the call's check for a cold start, and with the compaction in force: its summary first, as a note, then the tool searches from before its line, then everything from its line on; see [A compaction](chat-contract.md#a-compaction)), then everything the call has added, oldest first: the user's words as each turn ends, each reply as heard, and on the second and later calls of one reply what was said before the search, the call and its result | Only grows at its end |
 
 Set per request:
 
@@ -323,10 +323,12 @@ words in the call (and with a tool result before it, if the written part ended i
   before. The same check is made for each reply in writing (see
   [the contract](chat-contract.md#a-cold-start)).
 - **A call starts from the compacted conversation.** (Enforced) With a compaction in
-  force, a call is sent its summary, as a note, then everything from its line on, as a
+  force, a call is sent its summary, as a note, then the tool searches from before its
+  line (what they loaded stays loaded), then everything from its line on, as a
   reply in writing is. A compaction never happens during a call: the user's is refused
   with a 409, and one the gem makes by itself is stopped by the call, or cut by it if it
-  is already running (see [Compaction](chat-contract.md#compaction)).
+  is already running. A call started while the user's compaction runs opens once it is
+  done (see [Compaction](chat-contract.md#compaction)).
 - **The instructions and the tool list are the same for the whole call.** (Enforced)
   Nothing in the instructions changes by itself: they are the same in every call and
   every written reply with the same gem, Darbar text and model, on any day. The date and
@@ -515,6 +517,15 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
   reply was sent the summary first and the latest sitting whole (`/sent` exact), and
   wrote the cache anew (6,995 tokens on Haiku 5.5). The summary was written under the
   asked headings in 3 of 4 runs on Haiku 5.5 and in the one run on Opus 5.5.
+- **A compaction keeps what a search loaded** (Haiku 5.5, in writing, 27 November 2026).
+  A search loaded a deferred tool in the first sitting; the tool was called in the
+  second, after a cold start. The user's compaction drew its line at the second
+  sitting. The summary request, with room for 32,000 tokens, read 15,664 of its 15,933
+  input tokens from the cache: everything the reply before it wrote. The next reply was
+  sent the summary, then the search and its result, then the second sitting with the
+  tool's call, and was accepted (`/sent` exact). The context's size before it, estimated
+  from the text, was 1,233 where 2,482 was billed; before the reply after that, started
+  from what was billed, it was 2,484 where 2,511 was billed.
 - **A cold start writes once, then is read** (Haiku 5.5, in writing, 26 November 2026).
   A conversation of a long note and one long search result: the first reply wrote
   21,261 tokens to the cache. With the clock moved on six minutes, the next reply started
