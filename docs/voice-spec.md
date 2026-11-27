@@ -436,6 +436,37 @@ A deferred connection's tools are loaded by a search first (Enforced): the model
 model calls one in the next round. So a deferred tool's first use in a call is one more
 model round before the reply. The tool list and the instructions do not change.
 
+### A compaction's request
+
+A compaction (see [A compaction](chat-contract.md#a-compaction)) is not a reply, and is
+not told the Darbar text or the gem's own instructions. Its instructions are these
+(`INSTRUCTIONS` in [`compaction.py`](../app/entities/compaction.py)), in full:
+
+```
+You sum up a conversation between a user and an assistant. The conversation is about to be replaced by your summary: from then on, the summary is all the assistant has of it. Summarise the whole conversation, the latest exchange included, so that it can be carried on from the summary alone.
+
+- Keep names, numbers, dates, amounts and promises exactly as they were.
+- Under "open", say where the conversation left off: what was asked last, and what was to happen next.
+- Under "unverified", put what was assumed or said and never checked.
+- Not every line is the user's. Some are notes from the system the assistant runs in (the date and the time, a call starting or ending, an event that came in), some in tags, and some are tool calls and their results. Use what they say, but credit the user only with what the user said.
+- If the conversation opens with an earlier summary, carry forward what in it still matters.
+- Write each point short and plain. Leave a field empty when there is nothing for it.
+```
+
+After the whole conversation comes one plain user message:
+`Summarise the conversation above.` It may not call a tool, and writes JSON with one
+list of strings for each field, every field required and no other allowed:
+
+| Field | Heading in the summary | What goes in it (the schema's description) |
+| --- | --- | --- |
+| `user_wants` | What the user wants | What the user is trying to get done. |
+| `preferences` | Preferences | How the user wants things done, as they said it. |
+| `decisions` | Decisions | What was decided. |
+| `done` | Done | What has been done already, tool calls and what they found included. |
+| `open` | Open | Where the conversation left off: what was asked last, what is pending, and what was to happen next. |
+| `exact_details` | Exact details (names, numbers, dates) | Names, numbers, dates, amounts, addresses and promises, exactly as they were. |
+| `unverified` | Unverified | What was assumed or said and never checked. |
+
 ## What the server writes into the history
 
 Everything in the history that neither the user nor the model wrote (all Enforced).
@@ -507,28 +538,22 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
   conversation again (4,968 tokens). With the second mark (see
   [Caching](models.md#caching)) it read 4,255 and wrote the 712 new ones, and the request
   after it read all of it and wrote 14.
-- **A summary request made while the cache is warm reads it** (in writing, 27 November
-  2026). With tool use off, on a conversation of three long notes, the summary request
-  read 15,439 tokens from the cache and wrote 270 on Haiku 5.5 ($0.0005), and read
-  15,432 and wrote 257 on Opus 5.5 ($0.03): everything the reply before it wrote. With
-  room for 32,000 tokens, on Haiku 5.5, it read 15,664 of its 15,933. The summary was
-  written under the asked headings in 3 of 4 runs on Haiku 5.5 and in the one run on
-  Opus 5.5.
-- **A compaction sums up everything, and the next request starts cold** (Haiku 5.5, in
-  writing, 27 November 2026). A short conversation of two messages, with a search that
-  loaded a deferred tool and a call of it between them. The summary request read 1,848
-  from the cache and wrote 269. Its `request.sent` was the compaction's `through`. The
-  next reply was sent three items (the summary, a new line that gave the time, the
-  message: `/sent` exact, no search), wrote `cache.cold` with the reason `compaction`
-  and `before` the summary request, and wrote the cache anew (1,675). A call of the
-  deferred tool added after the summary, with no search in the history, as a late
-  result's stub would be, was accepted, and the request after it read the cache.
-- **The summary was refused as a note** (Haiku 5.5, in writing, 27 November 2026). In that
-  short conversation the model would not write the summary in 9 of 9 runs, with the
-  current words and with the ones before them: "I won't write that summary", then a
-  short account of where things stood, without the headings. It took the line that asks,
-  sent as a note, for a request injected into the conversation. The same words sent as a
-  plain user message were answered with the summary under the headings in 4 of 4 runs.
+- **A compaction is one structured call, and the next request starts cold** (in writing,
+  27 November 2026). A short made-up conversation of two messages, with a search that
+  loaded a deferred tool and a call of it between them, compacted 4 times on Haiku 5.5
+  and once on Sonnet 5.5. Every run stored a summary under all the headings, with no
+  refusal, the user's two messages quoted exactly. The summary request read and wrote no
+  cache: on Haiku 5.5 2,188 to 2,249 tokens read in full and 340 to 404 written, about
+  $0.0004 each; on Sonnet 5.5 2,320 read and 442 written, $0.0091. It was told of the
+  tools, since the search's result loads one, and `/sent` was exact, with our
+  instructions. The next reply was sent the summary, then what came after, and wrote the
+  cache anew (about 2,000 tokens).
+- **The summary was refused when asked as a note** (Haiku 5.5, in writing, 27 November
+  2026). With the gem's instructions and the ask sent as a note (`<note>` in a user
+  message), the model would not write the summary in 9 of 9 runs on one short
+  conversation: "I won't write that summary", then a short account of where things
+  stood. It took the ask for a request injected into the conversation. So the ask is a
+  plain user message, and the job is said in instructions of ours.
 - **A cold start writes once, then is read** (Haiku 5.5, in writing, 26 November 2026).
   A conversation of a long note and one long search result: the first reply wrote
   21,261 tokens to the cache. With the clock moved on six minutes, the next reply started
@@ -588,9 +613,12 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
   is sent its whole conversation until the user compacts it: it never compacts itself.
   Whether a gem keeps to what a summary says as well as to the turns themselves has no
   recorded live run.
-- **A summary request may be refused.** Asked as a note, Haiku 5.5 refused it in every
-  run on one short conversation (see [measured](#measured-in-live-runs)). What it wrote
-  instead is stored as the summary all the same: nothing checks it.
+- **A summary is held to its shape, not its truth.** The schema keeps the headings, and
+  a refusal fails the compaction, but nothing checks what the points say. A refusal
+  written inside the fields would be stored.
+- **A failed compaction's request still counts as the gem's last request.** It reads no
+  cache, but `cache_until`, and whether the next reply starts cold, are reckoned from it,
+  so after a failed compaction the cache can be taken to last longer than it does.
 - **One context with both speaking and writing in it has no recorded live run.** Whether
   a gem keeps to its call rules after a written stretch, and to its writing rules after
   a call, is to be tried out.

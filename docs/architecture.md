@@ -57,7 +57,7 @@ config ← core ← adapters ← entities ← routers ← main
 | `pending_events.py` | events that came in for a gem's watches, held until they are told: one copy for a call and for chat |
 | `events_ent.py` | where every watch hands its events (the `EventSink`), and waking gems with events waiting after a restart |
 | `cold_start.py` | when a conversation starts cold, and the items as they are sent from then on, with old long tool results expired |
-| `compaction.py` | what there is to compact, the items as they are sent with a compaction in force (its summary, then what came after it), the estimated size of a request, and what keeping and compacting would cost |
+| `compaction.py` | what there is to compact, the summary request's instructions, ask and schema, how the summary is written from what the model wrote, the items as they are sent with a compaction in force (its summary, then what came after it), the estimated size of a request, and what keeping and compacting would cost |
 | `compaction_ent.py` | compacting a gem's conversation when the user asks, and where its context stands |
 | `gem_log.py` | everything that happens with a gem, numbered and written down as it happens |
 | `model.py` | either provider's model behind one interface, and the list of models |
@@ -204,12 +204,15 @@ writing.
    `cache.cold` ([`cold_start.py`](../app/entities/cold_start.py), and
    [the contract](chat-contract.md#a-cold-start)).
 4. **When the user asks, everything is sent summed up.** A compaction has the gem's own
-   model write a summary of the whole conversation, from the very request its next reply
-   would be sent, so a warm cache is read. From then on every request is sent that
-   summary, as one line of ours, then only what was remembered after the compaction's
-   request, whole. The first request after it starts cold (rule 3). The summary, and in
-   the compaction's own request the line that asks for it, are the only things sent that
-   are not something the gem remembers. What is stored never changes, and each request
+   model write a summary of the whole conversation, in one plain call of its own: our
+   instructions, the items its next reply would be sent, a plain message that asks for
+   the summary, no tool use, no cache, and JSON held to a schema. The backend writes the
+   summary from that JSON, and adds the identifiers and the user's own words, copied
+   exactly. From then on every request is sent that summary, as one line of ours, then
+   only what was remembered after the compaction's request, whole. The first request
+   after it starts cold (rule 3). The summary, and in the compaction's own request our
+   instructions and the message that asks for it, are the only things sent that are not
+   something the gem remembers. What is stored never changes, and each request
    again starts with the whole of the one before. It is written down as
    `context.compacted`
    ([`compaction.py`](../app/entities/compaction.py), and

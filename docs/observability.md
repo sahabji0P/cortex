@@ -32,8 +32,10 @@ it. Every kind of entry and its fields are in
 - **When was the conversation summed up, and what did that cost?** A compaction is a turn
   of its own (`turn.opened` `by` `compaction`): its request, with its tokens and cost,
   then `context.compacted` with the summary, its line (`through`, the `seq` of its own
-  `request.sent`) and who asked (always `user`). The next request's `cache.cold` has
-  the reason `compaction`.
+  `request.sent`) and who asked (always `user`). The request's `request.done` `text` is
+  the JSON the model wrote; the summary is what the backend wrote from it. Its `/sent`
+  shows our instructions, not the gem's. The next request's `cache.cold` has the reason
+  `compaction`.
 - **How big is the gem's next request?** The size the app is shown
   ([`/context`](chat-contract.md#get-v1gemsgem_idcontext)) is read from the log: what the
   latest `request.done` was billed, and what was remembered after its `request.sent`.
@@ -127,7 +129,7 @@ that none tells is waiting (see [the contract](chat-contract.md#an-event)).
   since the latest reset, and `count` says how many, each as stored or, before the line
   of the latest `cache.cold`, expired; with a `context.compacted` before it, its summary
   in place of everything before its `through`; and for a compaction's own request, the
-  line that asks for the summary last. `count` counts those lines too. That is how
+  message that asks for the summary last. `count` counts those too. That is how
   `/sent` rebuilds it, and how a lost entry shows: the numbers do not add up, and
   `exact` is false. A `cache.cold` is kept like what the gem remembers, since what was
   sent depends on it.

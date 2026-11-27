@@ -82,18 +82,21 @@ more than input (see [Cost](#cost)).
   the proxy it is not known). After that, when the model, the instructions or the tools
   change, or after a compaction, a conversation starts cold (see
   [the contract](chat-contract.md#a-cold-start)).
-- **A compaction made while the cache is warm reads it.** The summary request is sent
-  the same instructions, tools and items as the gem's next reply would be, with one line
-  of ours after them and tool use off (`tool_choice` none). Turning tool use off was
-  measured not to lose the cache on Anthropic: on Haiku 5.5, Sonnet 5.5 and Opus 5.5 such
-  a request read everything the request before it wrote. On OpenAI it was not measured.
-  The request after a compaction starts with the summary, so it writes the cache again:
-  it is a cold start, with the reason `compaction`.
+- **A compaction reads no cache.** Its summary request is told our instructions, not
+  the gem's, so it does not start as the gem's requests do. It is not marked for a cache
+  on Anthropic, and is read in full: measured on Haiku 5.5 and Sonnet 5.5, it read and
+  wrote nothing. The request after a compaction starts with the summary, so it writes
+  the cache again: it is a cold start, with the reason `compaction`.
+- **A summary request is one structured call.** Tool use is off (`tool_choice` none),
+  and it writes JSON held to a schema: on Anthropic by `output_config.format`
+  (`json_schema`), on OpenAI by `text.format` (`json_schema`, strict). A refusal raises
+  on both. Anthropic takes a history of tool calls and results with no tools declared,
+  but refuses a search's result that loads a tool not declared (measured on Haiku 5.5
+  and Sonnet 5.5), so it is told of the tools only when the history holds such a
+  result. OpenAI is always told of them: what it takes without them is not measured.
 - **A summary has more room than a reply.** On Anthropic a reply may write at most 8,192
   tokens, thinking included, and one that reaches it fails. The summary request may write
-  32,000, which every model a gem can use allows. A larger ceiling was measured not to
-  lose the cache: on Haiku 5.5 the summary request read everything the reply before it
-  wrote. OpenAI is sent no ceiling.
+  32,000, which every model a gem can use allows. OpenAI is sent no ceiling.
 
 ## OpenAI through a ChatGPT login
 
@@ -155,6 +158,6 @@ A request's tokens and cost are written to the gem's log
 From the same table, a gem's context estimates what is to come
 ([`/context`](chat-contract.md#get-v1gemsgem_idcontext)): what its next request would
 cost with the conversation kept and the cache gone (writing all of it to the cache), and
-what compacting it would cost (the summary request reading a warm cache or writing a
-cold one, about 2,000 tokens written out, then about 2,000 written to the cache by the
+what compacting it would cost (the summary request read in full at the plain input
+price, about 2,000 tokens written out, then about 2,000 written to the cache by the
 next request). Both are unknown where a price is.
