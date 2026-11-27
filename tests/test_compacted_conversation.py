@@ -12,6 +12,7 @@ from bson import ObjectId
 from app.entities.compaction import summed_up
 from app.routers.gems.service import GemsServiceV1Class
 from tests.test_chat import _chat, _close, _open, _said
+from tests.test_one_conversation import _hang_up, _said_and_heard, _spoken, _world
 from tests.time_lines import TIME_LINE
 
 
@@ -114,3 +115,29 @@ async def test_a_reset_ends_the_compaction_in_force() -> None:
 
     assert setup.llm.requests[-1]["input"] == [TIME_LINE, {"role": "user", "content": "message 3"}]
     await _close(setup.socket, setup.linked)
+
+
+async def test_a_call_starts_from_the_summary_and_what_follows_its_line() -> None:
+    world = await _world(_said("One."), _said("Two."), _spoken("Hello."))
+    await world.write("message 1")
+    await world.write("message 2")
+    log = await world.store.page(world.gem.id, before=None, limit=500)
+    second = next(
+        e.seq for e in log if e.kind == "user.said" and e.data["item"]["content"] == "message 2"
+    )
+    await world.conversations.log.record_compacted(
+        world.gem.id, None, summary="They talked.", through=second, by="user"
+    )
+
+    world.llm.starts_anew()
+    call, f, keeping = await world.call()
+    await _said_and_heard(f, "hello")
+    await _hang_up(call, keeping)
+
+    sent = world.llm.requests[-1]["input"]
+    assert sent[:3] == [
+        summed_up("They talked."),
+        {"role": "user", "content": "message 2"},
+        {"role": "assistant", "content": "Two."},
+    ]
+    assert {"role": "user", "content": "message 1"} not in sent
