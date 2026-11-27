@@ -81,6 +81,14 @@ more than input (see [Cost](#cost)).
   (ours ask for no longer) and 30 minutes on OpenAI (its default from GPT-5.6 on; through
   the proxy it is not known). After that, or when the model, the instructions or the
   tools change, a conversation starts cold (see [the contract](chat-contract.md#a-cold-start)).
+- **A compaction made while the cache is warm reads it.** The summary request is sent
+  the same instructions, tools and items as the gem's next reply would be, with one line
+  of ours after them and tool use off (`tool_choice` none). Turning tool use off was
+  measured not to lose the cache on Anthropic: on Haiku 5.5, Sonnet 5.5 and Opus 5.5 such
+  a request read everything the request before it wrote. That is why a gem set to
+  `before_expiry` compacts itself 2 minutes before its cache expires (see
+  [the contract](chat-contract.md#compaction)). On OpenAI it was not measured. The request
+  after a compaction starts with the summary, so it writes the cache again.
 
 ## OpenAI through a ChatGPT login
 

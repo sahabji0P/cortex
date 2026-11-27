@@ -33,6 +33,9 @@ It is a personal project and an experiment. It runs on your own Mac, for one use
 - **Tools.** Web search, and the tools of any [MCP](https://modelcontextprotocol.io)
   server you connect, with browser sign-in (OAuth) and per-gem permissions. A tool call
   carries on in the background when a reply is cut, and its result is told later.
+- **Compaction.** Past a size, the older part of a gem's conversation is sent as a
+  summary its own model wrote, by itself while the cache is still warm, or when the
+  user asks. The log keeps everything.
 - **Events.** Something a gem watches for wakes it: the event is told to the gem as
   outside data at its next turn, and a quiet gem answers it unasked, even with the app
   closed.
@@ -149,7 +152,7 @@ Never commit credentials.
 | Route | What it is |
 | --- | --- |
 | `WS /v1/link` | The standing socket: written chat, calls and their audio, and the log as it is written |
-| `/v1/gems` | The gems and their configs, a gem's conversation (`/chat`), its log (`/log`), and a reset (`/reset`) |
+| `/v1/gems` | The gems and their configs, a gem's conversation (`/chat`), its log (`/log`), a reset (`/reset`), a compaction (`/compact`), and where its context stands (`/context`) |
 | `/v1/gems/{id}/watches` | A gem's watches, which the gem makes, removing one, and a webhook's address and secret when the user asks (`/{watch_id}/hook`) |
 | `POST /v1/hooks/{token}` | Where a watch's webhook is posted to, from outside. The only route a tunnel should expose |
 | `/v1/darbar` | The Darbar text, which every gem is told first |
