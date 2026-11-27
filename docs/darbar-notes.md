@@ -93,6 +93,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - When it is written: as a call opens, and in writing before a message when there is none yet, the last is over ten minutes old, or the date has changed.
 - The Darbar text does not mention the time line: the line explains itself.
 - To watch: a zone changed by the user may show only once the ten minutes are up.
+- Compaction: past 100,000 estimated tokens the older part is sent as a summary the gem's own model wrote, by itself 2 minutes before the cache expires (it reads the cache) or from the app's pill; the latest sitting stays whole. Built 2026-11-27.
 
 ### Watches (decided 2026-11-26)
 
@@ -189,7 +190,6 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Which mode each message was in, in the history route's answer: on hold.
 - A reply that plays to its end is stored only when the user next speaks or the call ends.
 - A long conversation is sent whole at the start of every call. Trimming comes with Gyan Kosh.
-- Compaction: a summary in place of the older part. Next, with the caching work.
 - OpenAI's explicit cache marks: put off until they can be run on the API key. They need a mark on every message, not one at the end. The proxy takes them and they do nothing.
 - A round's calls as one message, and their results as one: the cache counts each run as one block, so no round is too long for it. Needs a round's id in what is stored. Put off.
 - Rewind to a turn, instead of resetting everything: put off.
