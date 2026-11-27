@@ -423,8 +423,8 @@ Where the gem's context stands:
   Counted from characters, it can be well under what the provider counts: on a text
   dense with numbers it was measured at about half.
 - `cache_until` is when the gem's cache expires, in UTC (ISO 8601, with fractions of a
-  second when there are any): its last `request.sent` and how long its
-  provider keeps a cache (see [how long](models.md#caching)). Null while nothing was sent
+  second when there are any): its last `request.sent` that is not a compaction's own
+  (which reads no cache and writes none) and how long its provider keeps a cache (see [how long](models.md#caching)). Null while nothing was sent
   since the latest reset, and after a compaction until the next request: the cache the
   gem had is never read again.
 - `compact_from` is when to start offering a compaction (the "Compact" pill):
@@ -583,7 +583,7 @@ from then on, old tool results are sent expired instead of whole. Nothing stored
 changes: only what the model is sent.
 
 It is checked once for each reply in writing, and once when a call starts, never during
-a call. It is a cold start if the gem has had a `request.sent` since its latest
+a call, and never for a compaction's own request, which reads no cache. It is a cold start if the gem has had a `request.sent` since its latest
 `gem.reset`, and one of these holds; the first that does is the `reason`:
 
 - `settings`: the model (`via` too), the instructions or the tools changed;
@@ -591,8 +591,9 @@ a call. It is a cold start if the gem has had a `request.sent` since its latest
   request was the compaction's own, which caches nothing, and the cache the gem had
   starts with what is now summed up, so no request reads it. The first request after a
   compaction is always cold;
-- `quiet`: the last one was sent longer ago than its provider keeps a cache (see
-  [how long](models.md#caching)).
+- `quiet`: the last one that is not a compaction's own was sent longer ago than its
+  provider keeps a cache (see [how long](models.md#caching)). A compaction's request
+  reads no cache and writes none, so one that failed leaves the cache as old as it was.
 
 It is then written down as `cache.cold`,
 which, like what the gem remembers, must be stored: a reply whose cold start cannot be
@@ -666,9 +667,10 @@ turn, and takes no turn number. Its entries, in order:
 3. On success, `context.compacted`, with `compaction`.
 4. `compaction.ended`, last, whatever happened: `done`, `failed` or `cut`.
 
-All of them have `turn` null. Between the first two there may be a `settings.changed`
-and a `cache.cold`, as before a reply; that `cache.cold` has its true reason (`quiet`
-when the cache had already gone), and no turn.
+All of them have `turn` null. Between the first two there may be a `settings.changed`,
+as before a reply, but never a `cache.cold`: the summary request reads no cache, so it
+is not checked for a cold start. The first request after the compaction starts cold for
+it (see [A cold start](#a-cold-start)).
 
 An older log may hold a compaction written as a turn of its own: `turn.opened` with `by`
 `compaction`, its request, `context.compacted` and `turn.closed`, all with that turn,
@@ -676,8 +678,9 @@ and no `compaction` field. The backend still reads it: its request is the compac
 own for `/sent` and for the context.
 
 The request is one plain call, not a reply. It is sent the whole conversation as the
-gem's next reply would be (after the compaction in force, with a cold start's expiry),
-then one plain user message, `Summarise the conversation above.` It is told
+gem's next reply would be, after the compaction in force, but with the expiry of the
+latest `cache.cold` (no cold start is checked for), then one plain user message,
+`Summarise the conversation above.` It is told
 instructions of ours in place of the Darbar text and the gem's own (their words are in
 [the spec](voice-spec.md#a-compactions-request)). It may not call a tool, and is
 told of the tools only where the history needs them. It is not marked for a cache, so
