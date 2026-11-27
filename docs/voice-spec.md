@@ -273,7 +273,7 @@ Every request to the conversation model is built the same way, in this order (En
 | --- | --- | --- |
 | 1. Instructions | The text under [The instructions](#the-instructions) | No |
 | 2. Tools | `web_search`, `cancel_tool_call`, `tool_search` when a connection is deferred, then the tools of the gem's connections (a deferred one marked so, or on OpenAI left out), then any tool the history holds a call of that is no longer offered (declared as not available). Or none | No |
-| 3. History | The gem's stored conversation (as it is sent after the call's check for a cold start), then everything the call has added, oldest first: the user's words as each turn ends, each reply as heard, and on the second and later calls of one reply what was said before the search, the call and its result | Only grows at its end |
+| 3. History | The gem's stored conversation (as it is sent after the call's check for a cold start, and with the compaction in force: its summary first, as a note, then everything from its line on; see [A compaction](chat-contract.md#a-compaction)), then everything the call has added, oldest first: the user's words as each turn ends, each reply as heard, and on the second and later calls of one reply what was said before the search, the call and its result | Only grows at its end |
 
 Set per request:
 
@@ -322,6 +322,11 @@ words in the call (and with a tool result before it, if the written part ended i
   Never during a call: from its first request on, each starts with the whole of the one
   before. The same check is made for each reply in writing (see
   [the contract](chat-contract.md#a-cold-start)).
+- **A call starts from the compacted conversation.** (Enforced) With a compaction in
+  force, a call is sent its summary, as a note, then everything from its line on, as a
+  reply in writing is. A compaction never happens during a call: the user's is refused
+  with a 409, and one the gem makes by itself is stopped by the call, or cut by it if it
+  is already running (see [Compaction](chat-contract.md#compaction)).
 - **The instructions and the tool list are the same for the whole call.** (Enforced)
   Nothing in the instructions changes by itself: they are the same in every call and
   every written reply with the same gem, Darbar text and model, on any day. The date and
@@ -501,6 +506,15 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
   conversation again (4,968 tokens). With the second mark (see
   [Caching](models.md#caching)) it read 4,255 and wrote the 712 new ones, and the request
   after it read all of it and wrote 14.
+- **A compaction made while the cache is warm reads it** (in writing, 27 November 2026).
+  A conversation of three long notes, the third after the clock moved on six minutes (a
+  new sitting), with the size a gem compacts itself past lowered to 5,000. The gem
+  compacted itself at its cache's expiry less 2 minutes. On Haiku 5.5 the reply before
+  it read 10,678 and wrote 4,761; the summary request, tool use off, read 15,439 and
+  wrote 270, for $0.0005. On Opus 5.5 it read 15,432 and wrote 257, for $0.03. The next
+  reply was sent the summary first and the latest sitting whole (`/sent` exact), and
+  wrote the cache anew (6,995 tokens on Haiku 5.5). The summary was written under the
+  asked headings in 3 of 4 runs on Haiku 5.5 and in the one run on Opus 5.5.
 - **A cold start writes once, then is read** (Haiku 5.5, in writing, 26 November 2026).
   A conversation of a long note and one long search result: the first reply wrote
   21,261 tokens to the cache. With the clock moved on six minutes, the next reply started
@@ -555,9 +569,11 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
 - **An event's tag has no recorded live run.** Whether a model treats what is in it as
   outside data, and not as orders from the user, is to be tried out. Its wording is not
   ruled on.
-- **A long history is sent whole.** A call now starts from everything stored, so its
-  first request is as long as the gem's whole conversation. Nothing is trimmed, but for
-  results expired at a cold start.
+- **A long history is sent whole until it is compacted.** A call starts from everything
+  stored, but for results expired at a cold start and what a compaction summed up. A gem
+  set to `on_return` or `never`, or one whose compaction was lost to a restart, is sent
+  its whole conversation until the user compacts it. Whether a gem keeps to what a
+  summary says as well as to the turns themselves has no recorded live run.
 - **One context with both speaking and writing in it has no recorded live run.** Whether
   a gem keeps to its call rules after a written stretch, and to its writing rules after
   a call, is to be tried out.
