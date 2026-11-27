@@ -33,17 +33,21 @@ all of it from the cache if the cache is warm, or writes it if not, and writes a
 of about `SUMMARY_ESTIMATE` tokens; then the next request writes the much smaller
 conversation to the cache, about `AFTER_ESTIMATE` tokens.
 
-The summary request is the gem's own model, sent the same instructions, tools and items
-as its next request would be, so a warm cache is read, then one line of ours that asks
-for the summary (`ASK`), with tool use off and room to write it (`SUMMARY_TOKENS`). After
-what the model writes, the code adds a section of its own: identifiers copied exactly
-from what it replaces (`exact`).
+The summary request is one plain call of the gem's own model, not a reply. It is told
+our instructions (`INSTRUCTIONS`), not the gem's, and sent the items the gem's next
+request would be, then one plain user message that asks for the summary (`ASK`). It
+may not call a tool, is not cached, and writes JSON held to `SCHEMA`: a list of points
+for each heading, with room to write it (`SUMMARY_TOKENS`). What does not fit the schema
+fails the compaction (`read`). The code writes the summary from the fields (`written`):
+a line of ours, the points under their headings, then two sections of its own, taken
+from the part it replaces: identifiers copied exactly, and the user's own words, quoted
+exactly.
 """
 
 import json
 import re
 from collections.abc import Sequence
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 from app.entities.cold_start import Numbered, as_sent
 from app.entities.model import Item, Message, ModelName, ToolSpec, Usage
@@ -54,16 +58,19 @@ __all__ = [
     "ASK",
     "COMPACT_OVER",
     "HEADINGS",
+    "INSTRUCTIONS",
+    "SCHEMA",
     "SUMMARY_ESTIMATE",
     "SUMMARY_TOKENS",
     "Compacted",
     "anything_new",
     "asked",
     "costs",
-    "exact",
+    "read",
     "size",
     "summed_up",
     "view",
+    "written",
 ]
 
 # Past this many estimated tokens, a gem's conversation is to be compacted.
@@ -79,37 +86,79 @@ SUMMARY_TOKENS = 32_000
 SUMMARY_ESTIMATE = 2_000
 AFTER_ESTIMATE = 2_000
 
-# The headings the summary is written under, in order.
-HEADINGS: tuple[str, ...] = (
-    "What the user wants",
-    "Preferences",
-    "Decisions",
-    "Done",
-    "Open",
-    "Exact details (names, numbers, dates)",
-    "Unverified",
+# What the summary is made of: each field the model writes, as a list of short points,
+# the heading it is shown under, and what goes in it. In this order.
+_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("user_wants", "What the user wants", "What the user is trying to get done."),
+    ("preferences", "Preferences", "How the user wants things done, as they said it."),
+    ("decisions", "Decisions", "What was decided."),
+    ("done", "Done", "What has been done already, tool calls and what they found included."),
+    (
+        "open",
+        "Open",
+        "Where the conversation left off: what was asked last, what is pending, and "
+        "what was to happen next.",
+    ),
+    (
+        "exact_details",
+        "Exact details (names, numbers, dates)",
+        "Names, numbers, dates, amounts, addresses and promises, exactly as they were.",
+    ),
+    ("unverified", "Unverified", "What was assumed or said and never checked."),
 )
 
-# The line of ours that asks for the summary, after everything the gem is sent.
-# THE OWNER HAS NOT RULED ON THIS WORDING.
-ASK = (
-    "This conversation is about to be replaced by a summary. Write that summary: from "
-    "here on it is all that is kept of the conversation, the latest exchange included, "
-    "so leave out nothing needed to carry on from where it stands. Write only the "
-    "summary, under these headings, in this order:\n"
-    + "\n".join(f"- {heading}" for heading in HEADINGS)
-    + "\nKeep names, numbers, dates, amounts and promises exactly as they were. Under "
-    "Open, say where the latest exchange left off and what was to happen next. Under "
-    "Unverified, put what was said or assumed and never checked. Under a heading with "
-    "nothing to say, write 'None'."
-)
+HEADINGS: tuple[str, ...] = tuple(heading for _, heading, _ in _FIELDS)
 
-# What the summary is sent under, in the line of ours that carries it.
+# The JSON the model writes: every field, a list of strings, and nothing else.
+SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        key: {"type": "array", "items": {"type": "string"}, "description": description}
+        for key, _, description in _FIELDS
+    },
+    "required": [key for key, _, _ in _FIELDS],
+    "additionalProperties": False,
+}
+
+# What the model is told, in place of the gem's instructions.
+INSTRUCTIONS = """\
+You sum up a conversation between a user and an assistant. The conversation is about to \
+be replaced by your summary: from then on, the summary is all the assistant has of it. \
+Summarise the whole conversation, the latest exchange included, so that it can be \
+carried on from the summary alone.
+
+- Keep names, numbers, dates, amounts and promises exactly as they were.
+- Under "open", say where the conversation left off: what was asked last, and what was \
+to happen next.
+- Under "unverified", put what was assumed or said and never checked.
+- Not every line is the user's. Some are notes from the system the assistant runs in \
+(the date and the time, a call starting or ending, an event that came in), some in \
+tags, and some are tool calls and their results. Use what they say, but credit the \
+user only with what the user said.
+- If the conversation opens with an earlier summary, carry forward what in it still \
+matters.
+- Write each point short and plain. Leave a field empty when there is nothing for it.
+"""
+
+# What asks for the summary: a plain message, after the whole conversation.
+ASK = "Summarise the conversation above."
+
+# What the summary is sent under, in the line of ours that carries it. The app knows a
+# summary by it.
 _SUMMED_UP = "The conversation before this point, summed up:\n\n"
 
-# The section the code adds after the summary, and how much it holds at most.
+# The summary's own first line.
+_FOR_REFERENCE = "It is for reference: do not redo what it lists as done."
+
+# What a heading with nothing under it says.
+_NONE = "None"
+
+# The two sections the code adds after the headings, and how much each holds at most:
+# identifiers, and characters of the user's words.
 _EXACT = "Copied exactly from the earlier conversation:"
 _EXACT_MAX = 50
+_WORDS = "The user's own words, quoted exactly:"
+_WORDS_MAX = 2_000
 
 # What is copied exactly: addresses, e-mail addresses, amounts of money, and ids (a run
 # of letters and digits with both in it, at least six long).
@@ -130,8 +179,8 @@ class Compacted(NamedTuple):
 
 
 def asked() -> Item:
-    """The line of ours that asks for the summary."""
-    return Message(role="developer", content=ASK)
+    """The message that asks for the summary."""
+    return Message(role="user", content=ASK)
 
 
 def summed_up(summary: str) -> Item:
@@ -204,20 +253,85 @@ def costs(model: ModelName, tokens: int, *, warm: bool) -> tuple[float | None, f
     return (None if keep is None else float(keep), None if compact is None else float(compact))
 
 
-def exact(summary: str, replaced: Sequence[Item]) -> str:
-    """The summary, with the identifiers in what it replaces copied after it.
+def read(text: str) -> dict[str, list[str]]:
+    """The fields of what the model wrote. Raises `ValueError` if it does not fit `SCHEMA`."""
+    try:
+        found = json.loads(text)
+    except ValueError as exc:
+        raise ValueError("the model wrote no JSON") from exc
+    if not isinstance(found, dict):
+        raise ValueError("the model wrote no object")
+    fields = cast("dict[str, object]", found)
+    if set(fields) != {key for key, _, _ in _FIELDS}:
+        raise ValueError("the model wrote other fields than the summary's")
+    read: dict[str, list[str]] = {}
+    for key, value in fields.items():
+        if not isinstance(value, list):
+            raise ValueError(f"the model wrote no list for {key!r}")
+        points = cast("list[object]", value)
+        if not all(isinstance(point, str) for point in points):
+            raise ValueError(f"the model wrote something other than text in {key!r}")
+        read[key] = [point.strip() for point in cast("list[str]", points) if point.strip()]
+    if not any(read.values()):
+        raise ValueError("the model wrote an empty summary")
+    return read
 
-    Found by pattern in `replaced` (the items it stands for, as the summary request was
-    sent them, the summary in force among them), each once, the latest `_EXACT_MAX` of
-    them.
+
+def written(fields: dict[str, list[str]], replaced: Sequence[Item], said: Sequence[str]) -> str:
+    """The summary: our line, the fields under their headings, then the code's own sections.
+
+    A heading with nothing under it says so. After the headings come the identifiers in
+    what it replaces (`replaced`: the items it stands for, as the summary request was
+    sent them), and the user's own words (`said`: what the user said in the part it
+    replaces, in order). Each section is left out when it holds nothing.
     """
+    parts = [_FOR_REFERENCE]
+    for key, heading, _ in _FIELDS:
+        points = fields[key]
+        parts.append(f"{heading}:\n" + ("\n".join(f"- {p}" for p in points) or _NONE))
+    copied = _identifiers(replaced)
+    if copied:
+        parts.append(f"{_EXACT}\n" + "\n".join(f"- {one}" for one in copied))
+    quoted = _quoted(said)
+    if quoted:
+        parts.append(f"{_WORDS}\n" + "\n".join(quoted))
+    return "\n\n".join(parts)
+
+
+def _identifiers(replaced: Sequence[Item]) -> list[str]:
+    """The identifiers in `replaced`, each once, the latest `_EXACT_MAX` of them."""
     found: dict[str, None] = {}
     for item in replaced:
         for match in _IDENTIFIERS.findall(_text(item)):
             found.pop(match, None)
             found[match] = None
-    copied = list(found)[-_EXACT_MAX:]
-    summary = summary.strip()
-    if not copied:
-        return summary
-    return f"{summary}\n\n{_EXACT}\n" + "\n".join(f"- {one}" for one in copied)
+    return list(found)[-_EXACT_MAX:]
+
+
+def _quoted(said: Sequence[str]) -> list[str]:
+    """The user's words to quote, each exactly as said, in order, within `_WORDS_MAX`.
+
+    The first message, then as many of the newest as fit, with where some are left out
+    marked. A message is never cut: one that does not fit is left out whole, the first
+    too.
+    """
+    room = _WORDS_MAX
+    first = bool(said) and len(said[0]) <= room
+    if first:
+        room -= len(said[0])
+    newest: list[str] = []
+    for text in reversed(said[1:]):
+        if len(text) > room:
+            break
+        newest.insert(0, text)
+        room -= len(text)
+    kept = [*said[:1], *newest] if first else newest
+    if not kept:
+        return []
+    lines = [f'"{text}"' for text in newest]
+    left_out = len(said) - len(kept)
+    if left_out:
+        lines.insert(0, f"[{left_out} message{'s' if left_out > 1 else ''} left out here]")
+    if first:
+        lines.insert(0, f'"{said[0]}"')
+    return lines

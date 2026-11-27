@@ -19,9 +19,19 @@ from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError, UpstreamError
 from app.entities import compaction_ent, prices
-from app.entities.compaction import ASK, SUMMARY_TOKENS, Compacted, costs, summed_up
+from app.entities.compaction import (
+    INSTRUCTIONS,
+    SCHEMA,
+    SUMMARY_TOKENS,
+    Compacted,
+    asked,
+    costs,
+    summed_up,
+    written,
+)
 from app.entities.compaction_ent import CompactionEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
+from app.entities.model import Structured
 from app.main import app
 from app.routers.gems.service import GemsServiceV1Class, get_gems_service_v1
 from app.routers.link.service import LinkServiceV1Class
@@ -41,10 +51,34 @@ from tests.test_voice_conversation import _completed, _delta
 from tests.time_lines import TIME_LINE, set_clock
 
 _START = datetime(2026, 11, 27, 9, 0, tzinfo=UTC)
-_SUMMARY = "What the user wants: to save. Decisions: none."
+# What the model is made to write: one point under the first heading.
+_POINT = "To save."
+# What the user said in `_a_new_sitting`.
+_SAID = ["message 1", "message 2", "message 3"]
 
 
-def _summary(text: str = _SUMMARY, *, used: bool = False) -> list[Any]:
+def _fields(point: str) -> dict[str, list[str]]:
+    return {
+        "user_wants": [point],
+        "preferences": [],
+        "decisions": [],
+        "done": [],
+        "open": [],
+        "exact_details": [],
+        "unverified": [],
+    }
+
+
+def _summed(point: str = _POINT, said: list[str] = _SAID) -> str:
+    """The summary stored from `point`, of a conversation with no identifiers in it."""
+    return written(_fields(point), [], said)
+
+
+_SUMMARY = _summed()
+
+
+def _summary(point: str = _POINT, *, used: bool = False, text: str | None = None) -> list[Any]:
+    """The summary request's stream: the JSON of `point`, or `text` as it is."""
     done = _completed()
     if used:
         done.response.usage = SimpleNamespace(
@@ -53,7 +87,7 @@ def _summary(text: str = _SUMMARY, *, used: bool = False) -> list[Any]:
             output_tokens=120,
             output_tokens_details=SimpleNamespace(reasoning_tokens=0),
         )
-    return [_delta(text), done]
+    return [_delta(json.dumps(_fields(point)) if text is None else text), done]
 
 
 async def _compactions(setup: Any) -> CompactionEntityClass:
@@ -123,15 +157,21 @@ async def test_a_compaction_sums_up_everything_before_its_own_request(
     compacted = await setup.compactions.compact(str(setup.gem.id))
 
     assert compacted == Compacted(_SUMMARY, await _asked_at(setup))
-    # The summary request was sent what the next reply would be, then the ask, with
-    # tool use off.
+    # The summary request was sent what the next reply would be, then a plain message
+    # that asks for it, as one call: our instructions, tool use off, JSON to a schema.
     summary_request = setup.llm.requests[-1]
     assert summary_request["input"][:-1] == setup.llm.requests[-2]["input"] + [
         {"role": "assistant", "content": "Three."}
     ]
-    assert summary_request["input"][-1] == {"role": "developer", "content": ASK}
+    assert summary_request["input"][-1] == {
+        "role": "user",
+        "content": "Summarise the conversation above.",
+    }
+    assert summary_request["instructions"] == INSTRUCTIONS
+    assert summary_request["instructions"] != setup.llm.requests[-2]["instructions"]
     assert summary_request["tool_choice"] == "none"
     assert summary_request["tools"] == setup.llm.requests[-2]["tools"]
+    assert summary_request["text"]["format"]["schema"] == SCHEMA
     # The next reply is sent the summary, then only what came after it: the line that
     # gives the time (the one before is summed up), and the message.
     setup.move(_START + timedelta(minutes=33))
@@ -204,7 +244,7 @@ async def test_a_compaction_is_written_down_in_a_turn_of_its_own_with_its_cost(
         "thinking": 0,
     }
     assert done["cost_usd"] is not None and done["cost_usd"] > 0
-    assert done["text"] == _SUMMARY
+    assert done["text"] == json.dumps(_fields(_POINT))
     assert (compacted["turn"], compacted["by"]) == (opened["turn"], "user")
     assert compacted["summary"] == _SUMMARY
     assert (closed["turn"], closed["outcome"]) == (opened["turn"], "finished")
@@ -234,7 +274,8 @@ async def test_the_summary_request_has_room_to_write_more_than_a_reply(
     await setup.compactions.compact(str(setup.gem.id))
 
     [options] = asked
-    assert (options["use_tools"], options["max_tokens"]) == (False, SUMMARY_TOKENS)
+    assert options["structured"] == Structured("summary", SCHEMA, SUMMARY_TOKENS)
+    assert (options["instructions"], options["think"]) == (INSTRUCTIONS, False)
     await _close(setup.socket, setup.linked)
 
 
@@ -255,7 +296,7 @@ async def test_what_the_summary_request_was_sent_is_read_back_exactly(
 
     assert read["exact"]
     assert read["items"] == setup.llm.requests[-1]["input"]
-    assert read["items"][-1] == {"role": "developer", "content": ASK}
+    assert read["items"][-1] == asked()
     await _close(setup.socket, setup.linked)
 
 
@@ -276,8 +317,8 @@ async def test_identifiers_of_what_is_summed_up_are_copied_after_the_summary(
 
     compacted = await setup.compactions.compact(str(setup.gem.id))
 
-    assert compacted.summary.startswith(_SUMMARY + "\n\n")
-    assert compacted.summary.splitlines()[-2:] == [
+    copied = compacted.summary.split("\n\n")[-2]
+    assert copied.splitlines()[-2:] == [
         "- INV-77812",
         "- https://pay.example.com/r/AB12CD",
     ]
@@ -349,8 +390,10 @@ async def test_a_second_compaction_sums_up_the_first_and_moves_the_line_on(
     assert second.through > first.through
     # The second summary request was sent the first summary, to sum up with the rest.
     summary_request = setup.llm.requests[-2]
-    assert summary_request["input"][0] == summed_up("First.")
-    assert setup.llm.requests[-1]["input"][0] == summed_up("Second.")
+    assert summary_request["input"][0] == summed_up(first.summary)
+    assert setup.llm.requests[-1]["input"][0] == summed_up(second.summary)
+    # It quotes only what the user said since the first.
+    assert second.summary.endswith('quoted exactly:\n"message 4"')
     assert {"role": "user", "content": "message 4"} not in setup.llm.requests[-1]["input"]
     assert setup.llm.requests[-1]["input"][-1] == {"role": "user", "content": "message 5"}
     await _close(setup.socket, setup.linked)
@@ -417,6 +460,52 @@ async def test_a_summary_that_fails_changes_nothing(monkeypatch: pytest.MonkeyPa
     setup.socket.send(setup.gem.id, "message 4")
     await setup.socket.until("chat.done", 4)
     assert "summed up" not in json.dumps(setup.llm.requests[-1]["input"])
+    await _close(setup.socket, setup.linked)
+
+
+_REFUSED = SimpleNamespace(type="response.refusal.delta", delta="I won't write that summary.")
+
+
+@pytest.mark.parametrize(
+    ("stream", "why"),
+    [
+        (_summary(text="I won't write that summary."), "no JSON"),
+        (_summary(text=json.dumps({"user_wants": ["To save."]})), "other fields"),
+        (_summary(text=json.dumps({key: [] for key in _fields(_POINT)})), "empty summary"),
+        ([_REFUSED, _completed()], "declined"),
+    ],
+)
+async def test_a_summary_that_does_not_fit_the_schema_or_is_refused_fails_and_stores_nothing(
+    monkeypatch: pytest.MonkeyPatch, stream: list[Any], why: str
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    setup.llm.then(stream)
+
+    async with _routes(setup) as client:
+        answer = await client.post(f"/v1/gems/{setup.gem.id}/compact")
+
+    assert answer.status_code == 502
+    assert answer.json()["code"] == "upstream_failed"
+    assert why in answer.json()["message"]
+    log = await _log(setup)
+    assert _of(log, "context.compacted") == []
+    assert _of(log, "turn.closed")[-1]["outcome"] == "failed"
+    await _close(setup.socket, setup.linked)
+
+
+async def test_only_the_user_s_own_words_are_quoted_not_an_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    setup.llm.then(_said("Commits are in."), _summary())
+    await _came_in(setup, "push", "a secret commit")
+    await setup.socket.until("chat.done", 4)
+
+    compacted = await setup.compactions.compact(str(setup.gem.id))
+
+    quoted = compacted.summary.split("\n\n")[-1]
+    assert quoted == 'The user\'s own words, quoted exactly:\n"message 1"\n"message 2"\n"message 3"'
+    assert "secret" not in compacted.summary
     await _close(setup.socket, setup.linked)
 
 
@@ -637,7 +726,7 @@ async def test_the_size_starts_from_what_the_latest_request_was_billed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     move = set_clock(monkeypatch, _START)
-    setup = await _chat(_summary("One reply.", used=True))
+    setup = await _chat(_summary(text="One reply.", used=True))
     compactions = await _compactions(setup)
     gem_id = str(setup.gem.id)
     socket, linked = await _open(setup.service())
@@ -683,7 +772,7 @@ async def test_after_a_compaction_no_cache_is_offered_until_the_next_request(
     )
     setup.llm.then([failed], _summary(), _said("Four."))
 
-    # A summary that failed changed nothing: its request read the cache, and kept it.
+    # A summary that failed changed nothing: the cache is still offered.
     with pytest.raises(UpstreamError):
         await setup.compactions.compact(gem_id)
     failing = await setup.compactions.context(gem_id)

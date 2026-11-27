@@ -10,14 +10,17 @@ from app.entities import prices
 from app.entities.cold_start import EXPIRED, KEEP_UNDER, Numbered
 from app.entities.compaction import (
     HEADINGS,
+    INSTRUCTIONS,
+    SCHEMA,
     Compacted,
     anything_new,
     asked,
     costs,
-    exact,
+    read,
     size,
     summed_up,
     view,
+    written,
 )
 from app.entities.model import Item, ToolSpec, to_input, to_messages
 
@@ -265,34 +268,100 @@ def test_a_deferred_tool_called_after_the_summary_with_no_search_is_sent_on_anth
     assert "tool_reference" not in json.dumps(messages)
 
 
-def test_the_ask_is_a_line_of_ours_for_a_summary_of_the_whole_conversation() -> None:
-    text = asked()["content"]
+def test_the_ask_is_a_plain_message_and_the_job_is_in_our_own_instructions() -> None:
+    # A plain user message: no note, nothing of ours around it.
+    assert asked() == {"role": "user", "content": "Summarise the conversation above."}
+    messages = cast("list[dict[str, Any]]", to_messages([asked()]))
+    assert messages == [{"role": "user", "content": [{"type": "text", "text": asked()["content"]}]}]
+    assert "the latest exchange included" in INSTRUCTIONS
+    assert "carried on from the summary alone" in INSTRUCTIONS
+    for words in ("exactly", '"open"', '"unverified"'):
+        assert words in INSTRUCTIONS
 
-    assert asked()["role"] == "developer"
-    # Nothing follows the summary word for word: it holds the latest exchange too.
-    assert "the latest exchange included" in text
-    assert "word for word" not in text
-    assert "older part" not in text
-    # Its headings, in order.
-    places = [text.index(f"- {heading}\n") for heading in HEADINGS[:-1]]
-    assert places == sorted(places)
-    assert text.index(f"- {HEADINGS[-1]}\n") > places[-1]
+
+def test_the_schema_has_one_list_for_each_heading_and_nothing_else() -> None:
+    properties = cast("dict[str, Any]", SCHEMA["properties"])
+
+    assert SCHEMA["additionalProperties"] is False
+    assert SCHEMA["required"] == list(properties)
+    assert len(properties) == len(HEADINGS) == 7
+    assert all(field["type"] == "array" for field in properties.values())
+
+
+# ---- what the model wrote
+
+_FIELDS = {
+    "user_wants": ["Book a table for four."],
+    "preferences": ["Vegetarian."],
+    "decisions": [],
+    "done": ["Found two places."],
+    "open": ["The user is to pick one."],
+    "exact_details": ["Friday 4 December, 8 pm"],
+    "unverified": [],
+}
+
+
+def test_what_the_model_wrote_is_read_into_its_fields() -> None:
+    written_out = json.dumps({**_FIELDS, "done": ["  Found two places. ", " "]})
+
+    assert read(written_out) == _FIELDS
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I won't write that summary.",
+        "[]",
+        json.dumps({**_FIELDS, "extra": []}),
+        json.dumps({key: value for key, value in _FIELDS.items() if key != "open"}),
+        json.dumps({**_FIELDS, "done": "Found two places."}),
+        json.dumps({**_FIELDS, "done": [1]}),
+        json.dumps({key: [] for key in _FIELDS}),
+    ],
+)
+def test_what_does_not_fit_the_schema_or_says_nothing_is_not_read(text: str) -> None:
+    with pytest.raises(ValueError):
+        read(text)
+
+
+def test_the_summary_is_our_line_then_each_heading_with_none_where_it_is_empty() -> None:
+    summary = written(_FIELDS, [{"role": "user", "content": "hello there"}], [])
+
+    assert summary == (
+        "It is for reference: do not redo what it lists as done.\n\n"
+        "What the user wants:\n- Book a table for four.\n\n"
+        "Preferences:\n- Vegetarian.\n\n"
+        "Decisions:\nNone\n\n"
+        "Done:\n- Found two places.\n\n"
+        "Open:\n- The user is to pick one.\n\n"
+        "Exact details (names, numbers, dates):\n- Friday 4 December, 8 pm\n\n"
+        "Unverified:\nNone"
+    )
+
+
+def test_the_line_it_is_sent_in_starts_as_the_app_knows_it() -> None:
+    line = summed_up(written(_FIELDS, [], []))["content"]
+
+    assert line.splitlines()[:3] == [
+        "The conversation before this point, summed up:",
+        "",
+        "It is for reference: do not redo what it lists as done.",
+    ]
 
 
 # ---- what is copied exactly
 
 
-def test_identifiers_of_the_part_replaced_are_copied_after_the_summary_once_each() -> None:
+def test_identifiers_of_the_part_replaced_are_copied_after_the_headings_once_each() -> None:
     replaced: list[Item] = [
         {"role": "user", "content": "Pay $1,250.50 to INV-2041X, see https://example.com/a?b=1."},
         {"role": "assistant", "content": "Paid INV-2041X. Mail sent to a.b@example.org."},
     ]
 
-    written = exact("  The summary.  ", replaced)
+    copied = written(_FIELDS, replaced, []).split("\n\n")[-1]
 
-    summary, copied = written.split("\n\n")
-    assert summary == "The summary."
-    assert copied.splitlines()[1:] == [
+    assert copied.splitlines() == [
+        "Copied exactly from the earlier conversation:",
         "- $1,250.50",
         "- https://example.com/a?b=1",
         "- INV-2041X",
@@ -300,14 +369,51 @@ def test_identifiers_of_the_part_replaced_are_copied_after_the_summary_once_each
     ]
 
 
-def test_with_nothing_to_copy_the_summary_stands_alone() -> None:
-    assert exact("The summary.\n", [{"role": "user", "content": "hello there"}]) == "The summary."
-
-
 def test_only_the_latest_identifiers_are_copied() -> None:
     replaced: list[Item] = [{"role": "user", "content": " ".join(f"id{n:04d}x" for n in range(80))}]
 
-    copied = exact("S.", replaced).splitlines()[3:]
+    copied = written(_FIELDS, replaced, []).split("\n\n")[-1].splitlines()[1:]
 
     assert len(copied) == 50
     assert copied[-1] == "- id0079x"
+
+
+# ---- the user's own words
+
+
+def _quoted(said: list[str]) -> list[str]:
+    """The section of the user's words, as lines, or none."""
+    last = written(_FIELDS, [], said).split("\n\n")[-1].splitlines()
+    return last[1:] if last[0] == "The user's own words, quoted exactly:" else []
+
+
+def test_the_user_s_words_are_quoted_exactly_and_in_order_when_they_fit() -> None:
+    said = ["Book a table.", "  For four,\nveg only  ", "Friday."]
+
+    assert _quoted(said) == ['"Book a table."', '"  For four,', 'veg only  "', '"Friday."']
+
+
+def test_the_first_message_then_the_newest_that_fit_with_the_gap_marked() -> None:
+    said = ["first " + "a" * 494, *(f"{n} " + "b" * 498 for n in range(1, 6))]
+
+    quoted = _quoted(said)
+
+    # The first (500), then the newest three (1,500), within 2,000.
+    assert quoted == [f'"{said[0]}"', "[2 messages left out here]", *(f'"{t}"' for t in said[3:])]
+
+
+def test_a_message_is_never_cut_one_that_does_not_fit_is_left_out_whole() -> None:
+    long_first = ["x" * 2_001, "the latest"]
+
+    assert _quoted(long_first) == ["[1 message left out here]", '"the latest"']
+    # The newest that fit are the latest ones in a row: one too long ends them.
+    assert _quoted(["first", "older", "y" * 1_999, "newest"]) == [
+        '"first"',
+        "[2 messages left out here]",
+        '"newest"',
+    ]
+
+
+def test_with_nothing_the_user_said_there_is_no_section() -> None:
+    assert _quoted([]) == []
+    assert _quoted(["z" * 2_001]) == []

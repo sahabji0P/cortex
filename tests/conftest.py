@@ -3,8 +3,8 @@
 The gem's log holds nothing of what a request was sent. It is read back as every entry
 the gem remembered before the request, since the gem was last reset, as the latest cold
 start and the latest compaction before it have them sent (see `gem_log.py`,
-`cold_start.py` and `compaction.py`), and for a compaction's own request, the line that
-asks for the summary after them. That is only true while a conversation hands each
+`cold_start.py` and `compaction.py`), and for a compaction's own request, the message
+that asks for the summary after them. That is only true while a conversation hands each
 thing to the log before the request that carries it, so every request made in every
 test is checked against what its gem remembers at that moment, sent so.
 """
@@ -90,7 +90,7 @@ def every_request_is_sent_what_its_gem_remembers(monkeypatch: pytest.MonkeyPatch
     def requesting(self: Recording, turn: int | None, items: Sequence[Item], think: bool) -> Any:
         remembered = remembered_now(self)
         if remembered is not None and list(items[-1:]) == [asked()]:
-            # A compaction's own request: the line that asks for the summary comes last.
+            # A compaction's own request: the message that asks for the summary comes last.
             remembered = [*remembered, asked()]
         if remembered is not None and list(items) != remembered:
             differed.append((list(items), remembered))

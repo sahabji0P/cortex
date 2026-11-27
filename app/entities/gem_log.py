@@ -48,8 +48,8 @@ unless it says otherwise:
                      the last reset, and nothing else, as the latest `cache.cold` and
                      `context.compacted` before it have them sent (the second puts its
                      summary, a line of ours, in place of what came before its line). A
-                     compaction's request is sent one more line of ours after them:
-                     what asks for the summary. `count` is how many items that is.
+                     compaction's request is sent one more message after them: the one
+                     that asks for the summary. `count` is how many items that is.
 - `request.done`     how the request ended: `done`, `failed`, or `cut` while the model
                      was still producing. Everything the model produced, in full: its
                      text and its tool calls. When the first of it came, the tokens

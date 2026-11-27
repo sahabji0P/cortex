@@ -43,6 +43,7 @@ from app.adapters.anthropic_adp import (
 from app.adapters.openai_adp import (
     FunctionToolParam,
     OpenAIAdapterClass,
+    OpenAIThinking,
     ResponseInputItemParam,
     ToolParam,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "ModelName",
     "Provider",
     "RoundDone",
+    "Structured",
     "TextDelta",
     "ToolSpec",
     "Usage",
@@ -72,6 +74,7 @@ __all__ = [
     "own_instructions",
     "to_input",
     "to_messages",
+    "tools_declared",
 ]
 
 # The models a conversation can be held with. These names are what a client sends.
@@ -173,6 +176,29 @@ def found(output: str) -> list[str] | None:
     return [name for name in cast("list[object]", names) if isinstance(name, str)]
 
 
+def tools_declared(provider: Provider, items: Sequence[Item], tools: Collection[str]) -> bool:
+    """Whether a `Structured` call over `items` is told of its tools (`tools`, their names).
+
+    Anthropic takes a history of tool calls and results with no tools declared, but not
+    a search's result that loads one of them: the tool it names must be declared. So it
+    is told of them only then. OpenAI is always told of them.
+    """
+    if provider == "OpenAI":
+        return True
+    searches = {
+        item["call_id"]
+        for item in items
+        if "type" in item and item["type"] == "function_call" and item["name"] == SEARCH_TOOL
+    }
+    return any(
+        "type" in item
+        and item["type"] == "function_call_output"
+        and item["call_id"] in searches
+        and any(name in tools for name in found(item["output"]) or [])
+        for item in items
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TextDelta:
     """The next piece of the reply's text."""
@@ -223,6 +249,23 @@ class RoundDone:
 type ModelEvent = TextDelta | CallStarted | RoundDone
 
 
+@dataclass(frozen=True, slots=True)
+class Structured:
+    """What makes a round one plain call that writes JSON, instead of a reply.
+
+    The model may not call a tool. It is told of the tools only where the history needs
+    them (`tools_declared`). Nothing is marked for a cache: such a call is not part of a
+    conversation that goes on from it. What it writes is held to `schema`, a strict JSON
+    schema (every property required, no others allowed), on each provider by its own
+    structured output.
+    """
+
+    name: str  # what the format is called, where a provider needs a name
+    schema: dict[str, object]
+    # The most it may write, thinking included, where a provider needs a ceiling.
+    max_tokens: int
+
+
 class Model(Protocol):
     # Lines this model needs in its instructions, for the caller to put there. The caller
     # decides where, so that what changes from day to day can still come last.
@@ -234,17 +277,13 @@ class Model(Protocol):
         *,
         instructions: str,
         think: bool,
-        use_tools: bool = True,
-        max_tokens: int | None = None,
+        structured: Structured | None = None,
     ) -> AsyncGenerator[ModelEvent]:
         """Run one model call over the history and yield what it produces.
 
         `think` asks for a little thinking before the reply. The model may call any of
-        its tools, unless `use_tools` is False: then it is still told of them, so the
-        request starts as every other does and a prompt cache holds, but it may only
-        write. `max_tokens` is the most it may write, thinking included, where a
-        provider needs a ceiling; None for a reply's. A call that fails, is refused or
-        stops early raises.
+        its tools, unless the call is `structured`: then it only writes JSON. A call
+        that fails, is refused or stops early raises.
         """
         ...
 
@@ -315,23 +354,44 @@ class _OpenAIModel:
         *,
         instructions: str,
         think: bool,
-        use_tools: bool = True,
-        max_tokens: int | None = None,
+        structured: Structured | None = None,
     ) -> AsyncGenerator[ModelEvent]:
-        # No ceiling is sent to this provider, so `max_tokens` is not needed.
+        # No ceiling is sent to this provider. A structured call is still told of every
+        # tool (`tools_declared`): whether a history of calls is taken without them is
+        # not known here.
         quiet, thinking = _OPENAI_EFFORT[self._name]
-        stream = await self._llm.stream_response(
-            model=self._name,
-            # Switching this costs one prompt-cache miss: the provider keeps a cache per
-            # setting, so the first request after the switch is read in full. Going back
-            # finds the earlier cache again.
-            reasoning={"effort": thinking if think else quiet},
-            input=to_input(items, self._deferred),
-            instructions=instructions,
-            tools=self._tools,
-            tool_choice="auto" if use_tools else "none",
-            store=False,
-        )
+        # Switching the effort costs one prompt-cache miss: the provider keeps a cache per
+        # setting, so the first request after the switch is read in full. Going back
+        # finds the earlier cache again.
+        effort: OpenAIThinking = {"effort": thinking if think else quiet}
+        if structured is None:
+            stream = await self._llm.stream_response(
+                model=self._name,
+                reasoning=effort,
+                input=to_input(items, self._deferred),
+                instructions=instructions,
+                tools=self._tools,
+                tool_choice="auto",
+                store=False,
+            )
+        else:
+            stream = await self._llm.stream_response(
+                model=self._name,
+                reasoning=effort,
+                input=to_input(items, self._deferred),
+                instructions=instructions,
+                tools=self._tools,
+                tool_choice="none",
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": structured.name,
+                        "schema": structured.schema,
+                        "strict": True,
+                    }
+                },
+                store=False,
+            )
         output = None
         usage: Usage | None = None
         # Leaving this block closes the connection, which is what stops the model when
@@ -348,6 +408,9 @@ class _OpenAIModel:
                 elif event.type == "response.completed":
                     output = event.response.output
                     usage = _openai_usage(event.response)
+                elif event.type == "response.refusal.delta" and structured is not None:
+                    # Structured output says a refusal apart from what it writes.
+                    raise RuntimeError("the model declined to answer")
                 elif event.type == "response.failed":
                     error = event.response.error
                     raise RuntimeError(error.message if error else "the model call failed")
@@ -503,8 +566,7 @@ class _AnthropicModel:
         *,
         instructions: str,
         think: bool,
-        use_tools: bool = True,
-        max_tokens: int | None = None,
+        structured: Structured | None = None,
     ) -> AsyncGenerator[ModelEvent]:
         # `think` is not acted on. Each change of the thinking setting makes this
         # provider read the whole conversation again once, and the gain it was measured
@@ -515,25 +577,41 @@ class _AnthropicModel:
         # down to what the user heard, and thinking sent back after such a change is
         # refused.
         messages = to_messages(items, self._names)
-        _mark_far_back(messages)
-        request = self._llm.stream_message(
-            model=self._name,
-            messages=messages,
-            system=instructions,
-            max_tokens=_MAX_REPLY_TOKENS if max_tokens is None else max_tokens,
-            thinking=settings.thinking,
-            output_config=settings.output_config,
-            tools=self._tools,
-            # Measured on Haiku 5.5 and Sonnet 5.5: a request with tool use off still
-            # reads the whole cache a request with it on wrote.
-            tool_choice={"type": "auto"} if use_tools else {"type": "none"},
-            # Nothing is cached unless asked for. This caches up to the end of the
-            # request, so the next one, which starts with all of this one, is read from
-            # the cache. Short conversations are below the size the provider caches.
-            # The mark goes on the request's last block, never on a tool: one on a
-            # deferred tool is refused.
-            cache_control={"type": "ephemeral"},
-        )
+        if structured is not None:
+            # The model's own setting (Opus 5.5's effort) stays, with the format beside it.
+            config: OutputConfigParam = (
+                {} if isinstance(settings.output_config, Omit) else {**settings.output_config}
+            )
+            config["format"] = {"type": "json_schema", "schema": structured.schema}
+            request = self._llm.stream_message(
+                model=self._name,
+                messages=messages,
+                system=instructions,
+                max_tokens=structured.max_tokens,
+                thinking=settings.thinking,
+                output_config=config,
+                # An empty list sends no tools at all, and no tool choice with them.
+                tools=self._tools if tools_declared("Anthropic", items, self._names) else [],
+                tool_choice={"type": "none"},
+            )
+        else:
+            _mark_far_back(messages)
+            request = self._llm.stream_message(
+                model=self._name,
+                messages=messages,
+                system=instructions,
+                max_tokens=_MAX_REPLY_TOKENS,
+                thinking=settings.thinking,
+                output_config=settings.output_config,
+                tools=self._tools,
+                tool_choice={"type": "auto"},
+                # Nothing is cached unless asked for. This caches up to the end of the
+                # request, so the next one, which starts with all of this one, is read
+                # from the cache. Short conversations are below the size the provider
+                # caches. The mark goes on the request's last block, never on a tool: one
+                # on a deferred tool is refused.
+                cache_control={"type": "ephemeral"},
+            )
         # Leaving this block closes the connection, which is what stops the model when
         # the task reading it is cancelled.
         async with request as stream:

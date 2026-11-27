@@ -8,12 +8,15 @@ A compaction takes the gem as a reply does, so there is one writer at a time. It
 the conversation as it is stored, and is refused if the gem remembers nothing new since
 the compaction in force or its last reset. Then it builds the gem's next request exactly
 as a reply in writing would (see `ChatEntityClass.next_request`), which may start the
-conversation cold, and sends it with the line that asks for the summary after it, with
-tool use off. The request is written down like any other, in a turn of its own
-(`turn.opened` with `by: "compaction"`), so its tokens and cost are in the log, and its
-`request.sent` is the compaction's line (`through`). Once the summary is written, the
-compaction is stored (`context.compacted`), at once: if it cannot be, the compaction
-fails and nothing changes. It never speaks, and never wakes the gem.
+conversation cold, and sends what that request would be sent, with a plain message that
+asks for the summary after it, as one call of its own: our instructions in place of the
+gem's, no tool use, no cache marks, and JSON held to a schema (see `compaction.py`).
+What does not fit the schema fails it, as a refusal does. The request is written down
+like any other, in a turn of its own (`turn.opened` with `by: "compaction"`), so its
+tokens and cost are in the log, and its `request.sent` is the compaction's line
+(`through`). Once the summary is written, the compaction is stored
+(`context.compacted`), at once: if it cannot be, the compaction fails and nothing
+changes. It never speaks, and never wakes the gem.
 
 A compaction (`compact`) is only ever made when the user asks. It is allowed whenever
 the gem is between turns, warm or cold, and refused while a call holds it. A reply being
@@ -44,14 +47,17 @@ from app.entities.chat_ent import ChatEntityClass
 from app.entities.cold_start import Numbered, cold
 from app.entities.compaction import (
     COMPACT_OVER,
+    INSTRUCTIONS,
+    SCHEMA,
     SUMMARY_TOKENS,
     Compacted,
     anything_new,
     asked,
     costs,
-    exact,
+    read,
     size,
     view,
+    written,
 )
 from app.entities.conversation_ent import (
     ConversationEntityClass,
@@ -64,7 +70,15 @@ from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import TurnRecord
 from app.entities.instructions import instruction_layers, joined
-from app.entities.model import MODELS, ModelName, RoundDone, TextDelta, Usage, own_instructions
+from app.entities.model import (
+    MODELS,
+    ModelName,
+    RoundDone,
+    Structured,
+    TextDelta,
+    Usage,
+    own_instructions,
+)
 
 __all__ = ["CompactionEntityClass", "Context", "ContextListener"]
 
@@ -79,8 +93,8 @@ class Context:
     `tokens` is the estimated size of its next request. `cache_until` is when its cache
     expires, and `compact_from` when the app is to offer a compaction: `cache_until`,
     if the conversation is over `COMPACT_OVER`. Both are None while nothing was sent,
-    and after a compaction until the next request: no request reads what a compaction's
-    own cached. `keep_cost_usd` is what the next request would cost with the
+    and after a compaction until the next request: the cache the gem had is never read
+    again. `keep_cost_usd` is what the next request would cost with the
     conversation kept as it is and the cache gone, and `compact_cost_usd` what a
     compaction is estimated to cost, the request after it included (see `costs`). Each
     is None when a price is not known.
@@ -188,8 +202,8 @@ class CompactionEntityClass:
             tokens = size(joined(layers), items, tools.specs)
         cache_until = await self._conversations.cache_until(found, cache)
         if reason == "compaction":
-            # The last request was a compaction's own: what it cached starts with what
-            # is now summed up, and no request sends that again.
+            # The last request was a compaction's own, which caches nothing: no request
+            # after it is sent what came before its line.
             cache_until = None
         warm = cache_until is not None and datetime.now(UTC) < cache_until
         keep, compact = costs(name, tokens, warm=warm)
@@ -240,8 +254,7 @@ class CompactionEntityClass:
         made = await self._chat.next_request(ready, key, stored, mode=stored.mode)
         turn = made.record.turn("compaction")
         items = [*made.sent, asked()]
-        think = self._conversations.gem(key).late.pending
-        request = turn.sent(items, think)
+        request = turn.sent(items, False)
         # Everything remembered before the request is in it, and summed up.
         line = request.seq
         if line is None:
@@ -252,10 +265,9 @@ class CompactionEntityClass:
         try:
             async for event in made.model.round(
                 items,
-                instructions=joined(made.layers),
-                think=think,
-                use_tools=False,
-                max_tokens=SUMMARY_TOKENS,
+                instructions=INSTRUCTIONS,
+                think=False,
+                structured=Structured("summary", SCHEMA, SUMMARY_TOKENS),
             ):
                 if isinstance(event, TextDelta):
                     request.first()
@@ -269,11 +281,13 @@ class CompactionEntityClass:
                 raise UpstreamError(f"the summary could not be written: {exc}") from exc
             raise
         request.done(text, [], usage)
-        if not text.strip():
-            exc = RuntimeError("the model wrote no summary")
+        try:
+            fields = read(text)
+        except ValueError as exc:
             _failed(turn, exc)
-            raise UpstreamError(f"the summary could not be written: {exc}")
-        summary = exact(text, made.sent)
+            raise UpstreamError(f"the summary could not be written: {exc}") from exc
+        said = await self._said(gem_id, stored.compacted, line)
+        summary = written(fields, made.sent, said)
         # On its own, so that a write under way is finished even if this is stopped.
         writing = asyncio.ensure_future(
             self._conversations.log.record_compacted(
@@ -291,6 +305,19 @@ class CompactionEntityClass:
             raise
         turn.closed(finished=True, kept=None)
         return Compacted(summary, line)
+
+    async def _said(self, gem_id: ObjectId, compacted: Compacted | None, line: int) -> list[str]:
+        """What the user said in the part a summary replaces, in order.
+
+        Their messages (`user.said`) still sent whole before `line`, the summary
+        request's: not an event, which is a user message too, and no line of ours.
+        """
+        since = 0 if compacted is None else compacted.through
+        return [
+            entry.data.item["content"]
+            for entry in await self._store.load(gem_id, before=line)
+            if entry.kind == "user.said" and entry.seq >= since and "role" in entry.data.item
+        ]
 
     def _landed(self, key: str, turn: TurnRecord, writing: asyncio.Future[int]) -> None:
         """A compaction stopped while it was stored is done once it is, or failed."""
