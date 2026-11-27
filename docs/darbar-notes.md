@@ -97,8 +97,9 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - The first request after a compaction starts cold, with the reason `compaction`.
 - The app's prompt shows what keeping the conversation and compacting it would cost, from the price table.
 - A compaction's size starts from what the latest request was billed. Counted from the text alone it came to about half of what Anthropic billed.
-- To try: the line that asks for the summary is sent as a note. On Haiku 5.5 one short conversation had it refused 9 of 9 times; as a plain user message 4 of 4 wrote the summary. Which to send it as is open.
-- To watch: on OpenAI, not measured whether a summary request with tool use off reads the cache, nor whether a call of a deferred tool with no search in the history is accepted (on Haiku 5.5 it is).
+- The summary is one plain structured call: our own instructions, a plain user ask, JSON per heading; code adds the identifiers and the user's own words. Asked as a note it was refused 9 of 9 on Haiku 5.5; this way 4 of 4 on Haiku and 1 of 1 on Sonnet wrote it. Decided 2026-11-27.
+- To watch: on OpenAI, not measured: a structured summary request, what it takes without tools declared, and whether a call of a deferred tool with no search in the history is accepted (on Haiku 5.5 it is).
+- To fix: a failed compaction's request still sets when the gem's cache is taken to expire, though it reads no cache.
 
 ### Watches (decided 2026-11-26)
 
