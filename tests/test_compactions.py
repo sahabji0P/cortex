@@ -297,6 +297,10 @@ async def test_what_the_summary_request_was_sent_is_read_back_exactly(
     assert read["exact"]
     assert read["items"] == setup.llm.requests[-1]["input"]
     assert read["items"][-1] == asked()
+    # Our instructions, not the gem's. On OpenAI it is told of the tools in force.
+    assert read["instructions"] == [{"name": "compaction", "text": INSTRUCTIONS}]
+    reply = [e for e in _of(await _log(setup), "request.sent") if e["seq"] < sent["seq"]][-1]
+    assert read["tools"] == (await service.get_log_sent(str(setup.gem.id), reply["seq"]))["tools"]
     await _close(setup.socket, setup.linked)
 
 

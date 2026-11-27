@@ -42,20 +42,20 @@ import json
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError
 from app.entities.cold_start import CACHE_LIFETIME, Cache, Numbered, cold
-from app.entities.compaction import Compacted, asked, view
+from app.entities.compaction import INSTRUCTIONS, Compacted, asked, view
 from app.entities.conversation_store import EVENT_RECEIVED, ConversationStoreClass, Remembered
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import LogEntityClass, Recording
 from app.entities.history import Added, Mode, stubs
 from app.entities.late_results import LateResult, LateResults, delivers, late_stub
 from app.entities.loop import ToolCall
-from app.entities.model import Item
+from app.entities.model import Item, tools_declared
 from app.entities.pending_events import PendingEvent, PendingEvents, pending
 
 __all__ = [
@@ -445,11 +445,12 @@ class ConversationEntityClass:
         Its items are what the gem remembered by then: every remembered entry before
         the request's own since the gem was last reset, in order, as the latest cold
         start and the latest compaction before it had them sent (see `cold_start.py` and
-        `compaction.py`). A compaction's own request was sent one more line of ours,
-        the one that asks for the summary. With them come the model, instructions and
-        tools in force. `exact` is False if the items do not come to the count the
-        request wrote down: an entry before it was lost. Raises `NotFoundError` if `seq`
-        is not a request of this gem.
+        `compaction.py`). With them come the model, instructions and tools in force. A
+        compaction's own request was sent one more message, the one that asks for the
+        summary, and our instructions in place of the gem's, and the tools only where
+        the history needed them (see `model.tools_declared`). `exact` is False if the
+        items do not come to the count the request wrote down: an entry before it was
+        lost. Raises `NotFoundError` if `seq` is not a request of this gem.
         """
         if not await self._gems.exists(gem_id):
             raise NotFoundError("Gem")
@@ -462,15 +463,21 @@ class ConversationEntityClass:
         cache = await self._store.cache(found, before=seq)
         compacted = await self._store.compacted(found, before=seq)
         items = view(numbered(remembered), cache.before, compacted)
+        settings = await self._settings(found, upto=seq)
         if request.turn is not None:
             opened = await self._store.opened(found, request.turn)
             if opened is not None and opened.data.get("by") == "compaction":
                 items.append(asked())
+                settings["instructions"] = [{"name": "compaction", "text": INSTRUCTIONS}]
+                model, tools = settings["model"], settings["tools"]
+                names = {str(tool["name"]) for tool in cast("list[dict[str, Any]]", tools or [])}
+                if model is not None and not tools_declared(model["provider"], items, names):
+                    settings["tools"] = []
         return {
             "request": request.data.get("request"),
             "items": items,
             "exact": len(items) == request.data.get("count"),
-            **await self._settings(found, upto=seq),
+            **settings,
         }
 
     async def cache_until(self, gem_id: ObjectId, cache: Cache) -> datetime | None:
