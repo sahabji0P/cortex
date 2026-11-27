@@ -115,6 +115,8 @@ class GemsServiceV1Class:
             tokens=context.tokens,
             cache_until=context.cache_until,
             compact_from=context.compact_from,
+            keep_cost_usd=context.keep_cost_usd,
+            compact_cost_usd=context.compact_cost_usd,
         )
 
     async def get_log(

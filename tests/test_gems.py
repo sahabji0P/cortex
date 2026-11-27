@@ -545,7 +545,8 @@ def test_the_routes_are_the_ones_a_client_expects() -> None:
         ("POST", "/v1/gems/{gem_id}/reset", 204),
         # Compacts it: what it remembers is sent as a summary.
         ("POST", "/v1/gems/{gem_id}/compact", None),
-        # Its size, when its cache expires, and when to offer a compaction.
+        # Its size, when its cache expires, when to offer a compaction, and what keeping
+        # it and compacting it would cost.
         ("GET", "/v1/gems/{gem_id}/context", None),
         ("GET", "/v1/gems/{gem_id}/log", None),
         ("GET", "/v1/gems/{gem_id}/log/{seq}", None),

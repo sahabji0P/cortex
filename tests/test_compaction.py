@@ -3,13 +3,17 @@
 import json
 from typing import Any, cast
 
+import pytest
+
 from app.adapters.openai_adp import OpenAIAdapterClass
+from app.entities import prices
 from app.entities.cold_start import EXPIRED, KEEP_UNDER, Numbered
 from app.entities.compaction import (
     HEADINGS,
     Compacted,
     anything_new,
     asked,
+    costs,
     exact,
     size,
     summed_up,
@@ -73,6 +77,46 @@ def test_the_size_counts_the_tools_told_in_full_as_json_and_not_the_deferred() -
     )
 
     assert size("i" * 8, [], [told, deferred]) == (8 + len(schema)) // 4
+
+
+# ---- what keeping and compacting would cost
+
+
+def test_keeping_costs_writing_the_whole_conversation_to_the_cache() -> None:
+    keep, _ = costs("Opus 5.5", 50_000, warm=True)
+
+    # Opus 5.5 writes a cache at $5 a million tokens.
+    assert keep == pytest.approx(50_000 * 5 / 1e6)
+    assert costs("Opus 5.5", 50_000, warm=False)[0] == keep
+
+
+def test_compacting_costs_the_summary_request_and_the_smaller_request_after_it() -> None:
+    _, warm = costs("Opus 5.5", 50_000, warm=True)
+    _, cold = costs("Opus 5.5", 50_000, warm=False)
+
+    # A cache read at $0.20, or written at $5; about 2,000 written out at $20; then about
+    # 2,000 written to the cache by the next request.
+    assert warm == pytest.approx((50_000 * 0.20 + 2_000 * 20 + 2_000 * 5) / 1e6)
+    assert cold == pytest.approx((50_000 * 5 + 2_000 * 20 + 2_000 * 5) / 1e6)
+
+
+def test_a_long_conversation_is_priced_as_its_provider_prices_a_long_request() -> None:
+    # Haiku 5.5 charges a request of more than 100,000 tokens at higher prices.
+    keep, _ = costs("Haiku 5.5", 150_000, warm=False)
+
+    assert keep == pytest.approx(150_000 * 0.625 / 1e6)
+
+
+def test_a_cost_whose_price_is_not_known_is_none_never_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delitem(prices._PRICES, "Opus 5.5")
+    assert costs("Opus 5.5", 50_000, warm=True) == (None, None)
+    # No price for writing a cache: keeping costs a write, and so does the request after
+    # a compaction, however warm the cache.
+    no_write = prices._price("test", ("2", "0.10", None, "10"))
+    monkeypatch.setitem(prices._PRICES, "Sonnet 5.5", no_write)
+    assert costs("Sonnet 5.5", 50_000, warm=True) == (None, None)
 
 
 # ---- what there is to compact

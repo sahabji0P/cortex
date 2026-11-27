@@ -18,8 +18,8 @@ import pytest
 from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError, UpstreamError
-from app.entities import compaction_ent
-from app.entities.compaction import ASK, SUMMARY_TOKENS, Compacted, summed_up
+from app.entities import compaction_ent, prices
+from app.entities.compaction import ASK, SUMMARY_TOKENS, Compacted, costs, summed_up
 from app.entities.compaction_ent import CompactionEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.main import app
@@ -600,7 +600,7 @@ async def test_a_gem_over_the_size_is_never_compacted_unless_the_user_asks(
 async def test_the_context_says_its_size_when_the_cache_expires_and_when_to_compact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    set_clock(monkeypatch, _START)
+    move = set_clock(monkeypatch, _START)
     setup = await _chat(_said("One."))
     compactions = await _compactions(setup)
     gem_id = str(setup.gem.id)
@@ -612,6 +612,8 @@ async def test_the_context_says_its_size_when_the_cache_expires_and_when_to_comp
     after = await compactions.context(gem_id)
     monkeypatch.setattr(compaction_ent, "COMPACT_OVER", 10)
     over = await compactions.context(gem_id)
+    move(_START + timedelta(minutes=31))
+    gone = await compactions.context(gem_id)
 
     # Nothing was sent yet: no cache, and nothing to offer.
     assert (before.cache_until, before.compact_from) == (None, None)
@@ -620,6 +622,12 @@ async def test_the_context_says_its_size_when_the_cache_expires_and_when_to_comp
     assert after.cache_until == _START + timedelta(minutes=30)
     assert after.compact_from is None  # under the size
     assert over.compact_from == over.cache_until == _START + timedelta(minutes=30)
+    # What each choice costs, at the gem's model's prices: the summary request reads a
+    # warm cache, and writes a cold one.
+    assert (after.keep_cost_usd, after.compact_cost_usd) == costs("6 Luna", after.tokens, warm=True)
+    assert (gone.keep_cost_usd, gone.compact_cost_usd) == costs("6 Luna", gone.tokens, warm=False)
+    assert after.compact_cost_usd is not None and gone.compact_cost_usd is not None
+    assert gone.compact_cost_usd > after.compact_cost_usd > 0
     with pytest.raises(NotFoundError):
         await compactions.context(str(ObjectId()))
     await _close(socket, linked)
@@ -687,8 +695,10 @@ async def test_after_a_compaction_no_cache_is_offered_until_the_next_request(
 
     assert failing.cache_until is not None
     assert failing.compact_from == failing.cache_until
-    # What the compaction's own request cached is read by no request after it.
+    # What the compaction's own request cached is read by no request after it: a second
+    # compaction would write it all again.
     assert (compacted.cache_until, compacted.compact_from) == (None, None)
+    assert compacted.compact_cost_usd == costs("6 Luna", compacted.tokens, warm=False)[1]
     assert after.cache_until is not None
     assert after.compact_from == after.cache_until
     await _close(setup.socket, setup.linked)
@@ -819,10 +829,23 @@ async def test_the_context_route_says_where_the_context_stands(
 
     body = answer.json()
     assert answer.status_code == 200
-    assert set(body) == {"tokens", "cache_until", "compact_from"}
+    assert set(body) == {
+        "tokens",
+        "cache_until",
+        "compact_from",
+        "keep_cost_usd",
+        "compact_cost_usd",
+    }
     assert body["tokens"] > 10
     assert datetime.fromisoformat(body["cache_until"]) == _START + timedelta(minutes=61)
     assert body["compact_from"] == body["cache_until"]
+    assert body["keep_cost_usd"] > 0
+    assert body["compact_cost_usd"] > 0
+    # With no price known for the gem's model, neither cost is known: null, never zero.
+    monkeypatch.delitem(prices._PRICES, "6 Luna")
+    async with _routes(setup) as client:
+        unpriced = (await client.get(f"/v1/gems/{setup.gem.id}/context")).json()
+    assert (unpriced["keep_cost_usd"], unpriced["compact_cost_usd"]) == (None, None)
     await _close(setup.socket, setup.linked)
 
 

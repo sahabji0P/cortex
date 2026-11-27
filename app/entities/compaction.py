@@ -26,6 +26,13 @@ request would be sent (the instructions, the items' text and the tools it is tol
 full, as JSON), divided by four. No tokenizer is used. Where the gem's latest request
 says more, the estimate starts from what it was billed (see `compaction_ent.py`).
 
+What keeping a conversation and compacting it would cost is estimated from its size and
+the prices (`costs`, see `prices.py`). Keeping it: its next request writes all of it to
+the cache, as it does once the cache is gone. Compacting it: the summary request reads
+all of it from the cache if the cache is warm, or writes it if not, and writes a summary
+of about `SUMMARY_ESTIMATE` tokens; then the next request writes the much smaller
+conversation to the cache, about `AFTER_ESTIMATE` tokens.
+
 The summary request is the gem's own model, sent the same instructions, tools and items
 as its next request would be, so a warm cache is read, then one line of ours that asks
 for the summary (`ASK`), with tool use off and room to write it (`SUMMARY_TOKENS`). After
@@ -39,16 +46,20 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from app.entities.cold_start import Numbered, as_sent
-from app.entities.model import Item, Message, ToolSpec
+from app.entities.model import Item, Message, ModelName, ToolSpec, Usage
+from app.entities.prices import cost
 
 __all__ = [
+    "AFTER_ESTIMATE",
     "ASK",
     "COMPACT_OVER",
     "HEADINGS",
+    "SUMMARY_ESTIMATE",
     "SUMMARY_TOKENS",
     "Compacted",
     "anything_new",
     "asked",
+    "costs",
     "exact",
     "size",
     "summed_up",
@@ -62,6 +73,11 @@ COMPACT_OVER = 100_000
 # ceiling (Anthropic's). A reply's is far lower (see `model.py`): a summary that ran out
 # of it would fail. Every model a gem can use allows more.
 SUMMARY_TOKENS = 32_000
+
+# About how many tokens a summary is, and the request after a compaction: for what a
+# compaction is estimated to cost.
+SUMMARY_ESTIMATE = 2_000
+AFTER_ESTIMATE = 2_000
 
 # The headings the summary is written under, in order.
 HEADINGS: tuple[str, ...] = (
@@ -166,6 +182,26 @@ def size(instructions: str, items: Sequence[Item], tools: Sequence[ToolSpec] = (
         if not t.deferred
     )
     return (len(instructions) + sum(len(_text(item)) for item in items) + told) // 4
+
+
+def costs(model: ModelName, tokens: int, *, warm: bool) -> tuple[float | None, float | None]:
+    """What keeping a conversation of `tokens` and compacting it would cost, in US dollars.
+
+    `warm` is whether its cache is. Each is None where a price it needs is not known.
+    """
+    keep = cost(model, Usage(input=0, cache_read=0, cache_write=tokens, output=0))
+    summary = cost(
+        model,
+        Usage(
+            input=0,
+            cache_read=tokens if warm else 0,
+            cache_write=0 if warm else tokens,
+            output=SUMMARY_ESTIMATE,
+        ),
+    )
+    after = cost(model, Usage(input=0, cache_read=0, cache_write=AFTER_ESTIMATE, output=0))
+    compact = None if summary is None or after is None else summary + after
+    return (None if keep is None else float(keep), None if compact is None else float(compact))
 
 
 def exact(summary: str, replaced: Sequence[Item]) -> str:

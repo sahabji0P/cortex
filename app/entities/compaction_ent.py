@@ -48,6 +48,7 @@ from app.entities.compaction import (
     Compacted,
     anything_new,
     asked,
+    costs,
     exact,
     size,
     view,
@@ -77,14 +78,19 @@ class Context:
 
     `tokens` is the estimated size of its next request. `cache_until` is when its cache
     expires, and `compact_from` when the app is to offer a compaction: `cache_until`,
-    if the conversation is over `COMPACT_OVER`. Both are
-    None while nothing was sent, and after a compaction until the next request: no
-    request reads what a compaction's own cached.
+    if the conversation is over `COMPACT_OVER`. Both are None while nothing was sent,
+    and after a compaction until the next request: no request reads what a compaction's
+    own cached. `keep_cost_usd` is what the next request would cost with the
+    conversation kept as it is and the cache gone, and `compact_cost_usd` what a
+    compaction is estimated to cost, the request after it included (see `costs`). Each
+    is None when a price is not known.
     """
 
     tokens: int
     cache_until: datetime | None
     compact_from: datetime | None
+    keep_cost_usd: float | None
+    compact_cost_usd: float | None
 
 
 class _Compacting:
@@ -185,10 +191,14 @@ class CompactionEntityClass:
             # The last request was a compaction's own: what it cached starts with what
             # is now summed up, and no request sends that again.
             cache_until = None
+        warm = cache_until is not None and datetime.now(UTC) < cache_until
+        keep, compact = costs(name, tokens, warm=warm)
         return Context(
             tokens=tokens,
             cache_until=cache_until,
             compact_from=cache_until if tokens > COMPACT_OVER else None,
+            keep_cost_usd=keep,
+            compact_cost_usd=compact,
         )
 
     async def _measured(self, gem_id: ObjectId, entries: Sequence[Numbered]) -> int | None:
