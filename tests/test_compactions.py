@@ -145,6 +145,43 @@ async def test_a_compaction_sums_up_everything_before_its_own_request(
     await _close(setup.socket, setup.linked)
 
 
+async def test_the_first_request_after_a_compaction_starts_cold_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    setup.llm.then(_summary(), _said("Four."), _said("Five."))
+    compacted = await setup.compactions.compact(str(setup.gem.id))
+    colds = len(_of(await _log(setup), "cache.cold"))
+
+    # Straight after it, with the cache warm.
+    setup.socket.send(setup.gem.id, "message 4")
+    await setup.socket.until("chat.done", 4)
+    setup.socket.send(setup.gem.id, "message 5")
+    await setup.socket.until("chat.done", 5)
+
+    log = await _log(setup)
+    [cold] = _of(log, "cache.cold")[colds:]
+    assert (cold["reason"], cold["before"]) == ("compaction", compacted.through)
+    [stored] = _of(log, "context.compacted")
+    assert stored["seq"] < cold["seq"] < _of(log, "request.sent")[-2]["seq"]
+    await _close(setup.socket, setup.linked)
+
+
+async def test_a_change_of_settings_after_a_compaction_is_the_reason_it_starts_cold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    setup.llm.then(_summary(), _said("Four."))
+    await setup.compactions.compact(str(setup.gem.id))
+    await setup.gems.update(str(setup.gem.id), {"instructions": "You are terse."})
+
+    setup.socket.send(setup.gem.id, "message 4")
+    await setup.socket.until("chat.done", 4)
+
+    assert _of(await _log(setup), "cache.cold")[-1]["reason"] == "settings"
+    await _close(setup.socket, setup.linked)
+
+
 async def test_a_compaction_is_written_down_in_a_turn_of_its_own_with_its_cost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -261,9 +298,11 @@ async def test_a_cold_gem_is_compacted_whole_and_starts_cold_first(
     opened = _of(log, "turn.opened")[-1]
     colds = _of(log, "cache.cold")
     assert compacted.through == await _asked_at(setup)
-    # The compaction's request is the gem's next: it started cold, first.
+    # The compaction's request is the gem's next: it started cold, first, for the
+    # reason it did.
     assert len(colds) == 2
     assert colds[-1]["seq"] < opened["seq"]
+    assert colds[-1]["reason"] == "quiet"
     [sent] = [e for e in _of(log, "request.sent") if e["turn"] == opened["turn"]]
     service = GemsServiceV1Class(setup.gems, setup.conversations)
     assert (await service.get_log_sent(str(setup.gem.id), sent["seq"]))["exact"]

@@ -163,7 +163,7 @@ class CompactionEntityClass:
         await self._conversations.log.written(found)
         name: ModelName = gem.model or settings.voice_model
         cache = await self._store.cache(found)
-        quiet = cold(cache, _provider(name), changed=False, now=datetime.now(UTC))
+        reason = cold(cache, _provider(name), changed=False, now=datetime.now(UTC))
         entries = numbered(await self._store.load(found))
         # A cold start not yet written is not taken off what was billed: the size is then
         # over, never under, while the app offers a compaction.
@@ -171,7 +171,7 @@ class CompactionEntityClass:
         if tokens is None:
             items = view(
                 entries,
-                cache.sent if quiet is not None else cache.before,
+                cache.sent if reason is not None else cache.before,
                 await self._store.compacted(found),
             )
             darbar = (await self._darbar.read()).text
@@ -181,8 +181,7 @@ class CompactionEntityClass:
             self._conversations.let_go(key)
             tokens = size(joined(layers), items, tools.specs)
         cache_until = await self._conversations.cache_until(found, cache)
-        compacted = await self._store.last(found, COMPACTED)
-        if compacted is not None and cache.sent is not None and compacted.seq > cache.sent:
+        if reason == "compaction":
             # The last request was a compaction's own: what it cached starts with what
             # is now summed up, and no request sends that again.
             cache_until = None

@@ -858,6 +858,8 @@ async def test_a_compaction_is_written_at_once_in_its_turn_and_read_back_in_forc
     )
     # The latest is in force, and before it the one before.
     assert await store.compacted(gem_id) == Compacted("Two.", 9)
+    assert (await store.cache(gem_id)).compacted == second
+    assert (await store.cache(gem_id, before=second)).compacted == first
     assert await store.compacted(gem_id, before=second) == Compacted("One.", 7)
     assert await store.compacted(gem_id, before=first) is None
     # A reset clears it.

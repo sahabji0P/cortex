@@ -249,8 +249,8 @@ class ConversationStoreClass:
     async def cache(self, gem_id: ObjectId, *, before: int | None = None) -> Cache:
         """Where the gem's cache stands, since it was last reset (see `cold_start.py`).
 
-        The last request sent and the line of the latest cold start. With `before`, as
-        it stood just before that entry.
+        The last request sent, the line of the latest cold start, and the latest
+        compaction. With `before`, as it stood just before that entry.
         """
         seq = await self._since(gem_id, before)
         latest = [
@@ -260,13 +260,14 @@ class ConversationStoreClass:
                 sort=[("seq", -1)],
                 limit=1,
             )
-            for kind in ("request.sent", COLD)
+            for kind in ("request.sent", COLD, COMPACTED)
         ]
-        sent, started_cold = (found[0] if found else None for found in latest)
+        sent, started_cold, compacted = (found[0] if found else None for found in latest)
         return Cache(
             sent=None if sent is None else sent.seq,
             sent_at=None if sent is None else sent.at,
             before=None if started_cold is None else int(started_cold.data["before"]),
+            compacted=None if compacted is None else compacted.seq,
         )
 
     async def compacted(self, gem_id: ObjectId, *, before: int | None = None) -> Compacted | None:

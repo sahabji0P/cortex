@@ -39,8 +39,8 @@ unless it says otherwise:
                      change found later (the way to the provider) is written just
                      before the request it applies to, in that request's turn.
 - `cache.cold`       the conversation starts cold (see `cold_start.py`): `reason` is
-                     `quiet` or `settings`, and `before` the number of the last request
-                     sent. From here on, long tool results before `before` are sent
+                     `settings`, `compaction` or `quiet`, and `before` the number of the
+                     last request sent. From here on, long tool results before `before` are sent
                      expired. Written after `settings.changed`, in no turn. Like what
                      the gem remembers, it must be stored: what is sent depends on it.
 - `request.sent`     a request went to the model. It was sent everything the gem

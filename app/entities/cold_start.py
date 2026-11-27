@@ -8,13 +8,17 @@ at full price anyway. That moment is a cold start, and from it on, old tool resu
 sent expired instead of whole.
 
 It is a cold start (`cold`) when a gem has had a request since it was last reset, and
-either
+one of these holds, the first that does giving the reason:
 
-- `quiet`: the last one was sent longer ago than its provider keeps a cache
-  (`CACHE_LIFETIME`), or
 - `settings`: the model (or the way to its provider), the instructions or the tools
   changed. Any of them changes the start of the request, so nothing after it is read
   from the cache.
+- `compaction`: the conversation was compacted since the last request (a
+  `context.compacted` after its `request.sent`). The last request was the compaction's
+  own, and what it cached starts with what is now summed up, so no request reads it (see
+  `compaction.py`).
+- `quiet`: the last one was sent longer ago than its provider keeps a cache
+  (`CACHE_LIFETIME`).
 
 It is checked once for each reply in writing, and once when a call starts, never during
 a call. A cold start is written down in the gem's log (`cache.cold`), with `before`: the
@@ -70,7 +74,7 @@ EXPIRED = (
 KEEP_UNDER = 1500
 
 # Why a conversation starts cold.
-type Reason = Literal["quiet", "settings"]
+type Reason = Literal["quiet", "settings", "compaction"]
 
 
 class Numbered(NamedTuple):
@@ -95,6 +99,9 @@ class Cache(NamedTuple):
     # The line drawn by the latest cold start: results before it are sent expired. None
     # if there was none.
     before: int | None = None
+    # The number of the latest compaction's own entry (`context.compacted`). None if
+    # there was none.
+    compacted: int | None = None
 
 
 def cold(cache: Cache, provider: Provider, *, changed: bool, now: datetime) -> Reason | None:
@@ -102,7 +109,7 @@ def cold(cache: Cache, provider: Provider, *, changed: bool, now: datetime) -> R
 
     `provider` is the one the conversation's model belongs to, and `changed` whether the
     model, the instructions or the tools differ from what was last written down. When
-    both hold, the reason is `settings`.
+    more than one reason holds, `settings` comes first, then `compaction`, then `quiet`.
     """
     if cache.sent is None or cache.sent_at is None:
         return None  # nothing was sent, so nothing could be cached
@@ -110,6 +117,8 @@ def cold(cache: Cache, provider: Provider, *, changed: bool, now: datetime) -> R
         return None  # nothing was sent since the latest cold start: the line cannot move
     if changed:
         return "settings"
+    if cache.compacted is not None and cache.compacted > cache.sent:
+        return "compaction"
     if now - cache.sent_at > CACHE_LIFETIME[provider]:
         return "quiet"
     return None
