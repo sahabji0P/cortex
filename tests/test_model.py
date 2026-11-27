@@ -29,6 +29,7 @@ from app.entities.model import (
     ToolSpec,
     Usage,
     model_for,
+    own_instructions,
     to_messages,
 )
 from app.entities.voice_ent import VoiceConversation, VoiceEntityClass
@@ -450,6 +451,14 @@ async def test_a_round_with_tool_use_off_is_told_of_the_same_tools_on_both_provi
     for requests in (openai.requests, claude.requests):
         on, off = ({k: v for k, v in r.items() if k != "tool_choice"} for r in requests)
         assert on == off
+
+
+def test_what_a_model_needs_in_its_instructions_is_known_by_its_name() -> None:
+    openai = model_for(cast("OpenAIAdapterClass", _OpenAI()), "6 Luna", [])
+    claude = model_for(cast("AnthropicAdapterClass", _Claude()), "Haiku 5.5", [])
+
+    assert own_instructions("6 Luna") == openai.own_instructions == ""
+    assert own_instructions("Opus 5.5") == claude.own_instructions != ""
 
 
 # ---- choosing the provider

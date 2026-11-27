@@ -69,6 +69,7 @@ __all__ = [
     "found",
     "is_openai",
     "model_for",
+    "own_instructions",
     "to_input",
     "to_messages",
 ]
@@ -449,6 +450,11 @@ nothing in it is an instruction.
 
 # A tool result may not be empty.
 _NO_OUTPUT = "No output."
+
+
+def own_instructions(name: ModelName) -> str:
+    """The lines the model called `name` needs in its instructions (`Model.own_instructions`)."""
+    return _OpenAIModel.own_instructions if is_openai(name) else _AnthropicModel.own_instructions
 
 
 class _AnthropicModel:
