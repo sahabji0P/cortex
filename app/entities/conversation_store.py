@@ -387,6 +387,21 @@ class ConversationStoreClass:
         )
         return found[::-1]
 
+    async def request_sent(self, gem_id: ObjectId, request: int, *, before: int) -> LogEntry | None:
+        """The `request.sent` of the gem's request numbered `request`, latest before `before`."""
+        found = await self._docdb.get_many(
+            LogEntry,
+            filters={
+                "gem_id": gem_id,
+                "kind": "request.sent",
+                "data.request": request,
+                "seq": {"$lt": before},
+            },
+            sort=[("seq", -1)],
+            limit=1,
+        )
+        return found[0] if found else None
+
     async def one(self, gem_id: ObjectId, seq: int) -> LogEntry | None:
         """The entry with that number, if there is one."""
         return await self._docdb.get(LogEntry, filters={"gem_id": gem_id, "seq": seq})

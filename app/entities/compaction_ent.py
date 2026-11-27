@@ -32,13 +32,16 @@ compaction is left for when they come back.
 
 Whoever listens is told the gem's key each time what its next request would be sent has
 changed: after a reply, a call, a reset or a compaction (`listen`). The state the app
-shows is `context`.
+shows is `context`. Its size starts from what the gem's latest request was billed, all
+of its input, cached or not, and adds an estimate of what was remembered since
+(`_measured`). Where that request says nothing of the next one, the whole of the next
+request is estimated (`size`).
 """
 
 import asyncio
 import functools
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -48,7 +51,7 @@ from bson import ObjectId
 from app.config import settings
 from app.core.errors import ConflictError, NotFoundError, UpstreamError
 from app.entities.chat_ent import ChatEntityClass
-from app.entities.cold_start import cold
+from app.entities.cold_start import Numbered, cold
 from app.entities.compaction import (
     BEFORE_EXPIRY,
     COMPACT_OVER,
@@ -69,7 +72,7 @@ from app.entities.conversation_ent import (
     gem_key,
     numbered,
 )
-from app.entities.conversation_store import COMPACTED, ConversationStoreClass
+from app.entities.conversation_store import COLD, COMPACTED, RESET, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
 from app.entities.gem_log import TurnRecord
@@ -187,15 +190,23 @@ class CompactionEntityClass:
         await self._conversations.log.written(found)
         name: ModelName = gem.model or settings.voice_model
         cache = await self._store.cache(found)
-        before = cache.before
-        if cold(cache, _provider(name), changed=False, now=datetime.now(UTC)) is not None:
-            before = cache.sent
-        items = view(
-            numbered(await self._store.load(found)), before, await self._store.compacted(found)
-        )
-        darbar = (await self._darbar.read()).text
-        layers = instruction_layers(darbar=darbar, gem=gem, model_needs=own_instructions(name))
-        tokens = size(joined(layers), items)
+        quiet = cold(cache, _provider(name), changed=False, now=datetime.now(UTC))
+        entries = numbered(await self._store.load(found))
+        # A cold start not yet written is not taken off what was billed: the size is then
+        # over, never under, while the app offers a compaction.
+        tokens = await self._measured(found, entries)
+        if tokens is None:
+            items = view(
+                entries,
+                cache.sent if quiet is not None else cache.before,
+                await self._store.compacted(found),
+            )
+            darbar = (await self._darbar.read()).text
+            layers = instruction_layers(darbar=darbar, gem=gem, model_needs=own_instructions(name))
+            key = gem_key(gem_id)
+            tools = await self._chat.toolbox(gem, key, [entry.item for entry in entries])
+            self._conversations.let_go(key)
+            tokens = size(joined(layers), items, tools.specs)
         cache_until = await self._conversations.cache_until(found, cache)
         compacted = await self._store.last(found, COMPACTED)
         if compacted is not None and cache.sent is not None and compacted.seq > cache.sent:
@@ -209,6 +220,33 @@ class CompactionEntityClass:
             compact_from=cache_until if offered else None,
             compaction=gem.compaction,
         )
+
+    async def _measured(self, gem_id: ObjectId, entries: Sequence[Numbered]) -> int | None:
+        """The size of the gem's next request, from what its latest request was billed.
+
+        All of that request's input, read from a cache or not, and the estimated size of
+        what was remembered since it was sent (`entries` are what the gem remembers).
+        None if it says nothing of the next one: it was a compaction's own, it reported
+        no tokens, or the gem was reset, compacted, started cold or had its model,
+        instructions or tools changed since.
+        """
+        done = await self._store.last(gem_id, "request.done")
+        if done is None or done.data.get("usage") is None or done.data.get("request") is None:
+            return None
+        for kind in (RESET, COMPACTED, COLD, "settings.changed"):
+            later = await self._store.last(gem_id, kind)
+            if later is not None and later.seq > done.seq:
+                return None
+        if done.turn is not None:
+            opened = await self._store.opened(gem_id, done.turn)
+            if opened is not None and opened.data.get("by") == "compaction":
+                return None
+        sent = await self._store.request_sent(gem_id, done.data["request"], before=done.seq)
+        if sent is None:
+            return None
+        usage = done.data["usage"]
+        since = [entry.item for entry in entries if entry.seq is not None and entry.seq > sent.seq]
+        return usage["input"] + usage["cache_read"] + usage["cache_write"] + size("", since)
 
     async def _compact(
         self, key: str, holding: _Compacting, by: Literal["user", "auto"]

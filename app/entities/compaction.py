@@ -33,7 +33,8 @@ start) and `through`, there is nothing to compact.
 
 The size of a conversation is an estimate (`size`): the characters of what its next
 request would be sent (the instructions, the items' text and the tools it is told of in
-full, as JSON), divided by four. No tokenizer is used.
+full, as JSON), divided by four. No tokenizer is used. Where the gem's latest request
+says more, the estimate starts from what it was billed (see `compaction_ent.py`).
 
 The summary request is the gem's own model, sent the same instructions, tools and items
 as its next request would be, so a warm cache is read, then one line of ours that asks

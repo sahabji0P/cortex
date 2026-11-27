@@ -692,6 +692,44 @@ async def test_the_context_says_its_size_when_the_cache_expires_and_when_to_comp
     await _close(socket, linked)
 
 
+async def test_the_size_starts_from_what_the_latest_request_was_billed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    move = set_clock(monkeypatch, _START)
+    setup = await _chat(_summary("One reply.", used=True))
+    compactions = await _compactions(setup)
+    gem_id = str(setup.gem.id)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "message 1")
+    await socket.until("chat.done")
+
+    billed = await compactions.context(gem_id)
+    move(_START + timedelta(minutes=31))
+    quiet = await compactions.context(gem_id)
+
+    # All of its input, cached or not, then what was remembered since it was sent: the
+    # reply.
+    assert billed.tokens == 3000 + len("One reply.") // 4
+    # Once the cache is gone it still holds: the size is never under while it is offered.
+    assert quiet.tokens == billed.tokens
+    assert (quiet.cache_until, quiet.compact_from) == (_START + timedelta(minutes=30), None)
+    await _close(socket, linked)
+
+
+async def test_the_size_is_estimated_from_the_text_after_a_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    gem_id = str(setup.gem.id)
+    setup.llm.then(_summary(used=True))
+
+    await setup.compactions.compact(gem_id)
+
+    # The compaction's own request was billed for the conversation it summed up.
+    assert (await setup.compactions.context(gem_id)).tokens < 3000
+    await _close(setup.socket, setup.linked)
+
+
 @pytest.mark.usefixtures("_small")
 async def test_after_a_compaction_no_cache_is_offered_until_the_next_request(
     monkeypatch: pytest.MonkeyPatch,
