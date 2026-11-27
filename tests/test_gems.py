@@ -145,6 +145,7 @@ async def test_a_new_gem_has_the_defaults() -> None:
     assert gem.model is None
     assert gem.speaks_first is False
     assert gem.tools == ["web_search"]
+    assert gem.compaction == "before_expiry"
     assert gem.created_at == gem.updated_at
 
 
@@ -382,6 +383,26 @@ def test_a_version_2_config_has_the_default_instructions_after_its_own(
 
     assert gem.version == GEM_CONFIG_VERSION
     assert gem.instructions == instructions
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_an_older_config_is_compacted_before_its_cache_expires(version: int) -> None:
+    gem = GemConfig.model_validate(_stored(version=version))
+
+    assert gem.version == GEM_CONFIG_VERSION
+    assert gem.compaction == "before_expiry"
+
+
+async def test_when_a_gem_is_compacted_is_made_changed_and_checked() -> None:
+    gems, docdb = _gems()
+
+    made = await gems.create(name="Gem Two", compaction="on_return")
+    changed = await gems.update(str(made.id), {"compaction": "never"})
+
+    assert made.compaction == "on_return"
+    assert changed.compaction == docdb.documents[made.id]["compaction"] == "never"
+    with pytest.raises(ValidationError):
+        await gems.update(str(made.id), {"compaction": "sometimes"})
 
 
 async def test_an_older_gem_with_long_instructions_still_loads_and_can_be_changed() -> None:
