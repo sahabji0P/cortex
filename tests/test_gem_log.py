@@ -818,6 +818,20 @@ async def test_the_cache_is_read_since_the_last_reset() -> None:
 # ---- compaction
 
 
+async def test_a_request_knows_the_number_of_its_request_sent() -> None:
+    docdb, _, conversations = await _conversations()
+    gem_id = ObjectId()
+    await conversations.log.open(gem_id)
+
+    request = conversations.recording(gem_id, "chat").turn("user").sent([], False)
+
+    await conversations.log.written()
+    [sent] = [d for d in _log(docdb) if d["kind"] == "request.sent"]
+    assert request.seq == sent["seq"]
+    # With no log, nothing is written down, and it has no number.
+    assert Recording().turn("user").sent([], False).seq is None
+
+
 async def test_a_compaction_is_written_at_once_in_its_turn_and_read_back_in_force() -> None:
     docdb, store, conversations = await _conversations()
     gem_id = ObjectId()

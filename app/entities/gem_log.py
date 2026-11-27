@@ -258,22 +258,28 @@ class LogEntityClass:
         """What one conversation with the gem, in `mode`, writes down. The log must be open."""
         return Recording(self, gem_id, mode)
 
-    def note(self, gem_id: ObjectId, kind: str, turn: int | None, data: dict[str, Any]) -> None:
-        """Write down one thing that happened. It never raises, and never waits.
+    def note(
+        self, gem_id: ObjectId, kind: str, turn: int | None, data: dict[str, Any]
+    ) -> int | None:
+        """Write down one thing that happened, and return its number. It never raises, and
+        never waits.
 
-        Nothing is written of a gem whose log is not open: one that was deleted.
+        Nothing is written of a gem whose log is not open (one that was deleted): its
+        number is then None.
         """
         try:
             if gem_id not in self._gems:
-                return
+                return None
             (seq,) = self.take(gem_id)
             self._add(
                 LogEntry(
                     gem_id=gem_id, kind=kind, seq=seq, at=datetime.now(UTC), turn=turn, data=data
                 )
             )
+            return seq
         except Exception:
             logger.warning("a %s of gem %s could not be written down", kind, gem_id, exc_info=True)
+            return None
 
     def remember(self, gem_id: ObjectId, added: Added, mode: Mode) -> None:
         """One item has joined the gem's history, in `mode`: it is remembered from here on.
@@ -603,9 +609,11 @@ class Recording:
         self.note("turn.opened", number, {"by": by, "mode": self.mode})
         return record
 
-    def note(self, kind: str, turn: int | None, data: dict[str, Any]) -> None:
+    def note(self, kind: str, turn: int | None, data: dict[str, Any]) -> int | None:
+        """Write down one thing that happened, and return its number, if it has one."""
         if self._log is not None and self._gem_id is not None:
-            self._log.note(self._gem_id, kind, turn, data)
+            return self._log.note(self._gem_id, kind, turn, data)
+        return None
 
     def request(self, turn: int | None, items: Sequence[Item], think: bool) -> "RequestRecord":
         """A request is about to be sent: write down what changed, and that it is sent.
@@ -617,17 +625,19 @@ class Recording:
         It is sent `items`, which are what the gem remembers by now: every one of them
         is in the log already, before this entry.
         """
-        number = None
+        number = seq = None
         self._changes(turn)
         with contextlib.suppress(Exception):
             if self._log is not None and self._gem_id is not None:
                 number = self._log.request_number(self._gem_id)
-                self.note(
+                seq = self.note(
                     "request.sent",
                     turn,
                     {"request": number, "attempt": 1, "think": think, "count": len(items)},
                 )
-        return RequestRecord(self, turn, number, self._model)
+        record = RequestRecord(self, turn, number, self._model)
+        record.seq = seq
+        return record
 
 
 class TurnRecord:
@@ -725,6 +735,8 @@ class RequestRecord:
         self._recording = recording
         self._turn = turn
         self.number = number
+        # The number of its `request.sent` in the gem's log, once that is written down.
+        self.seq: int | None = None
         self._model: ModelName | None = model
         self._first: str | None = None
         self._ended = False
