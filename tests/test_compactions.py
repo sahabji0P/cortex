@@ -25,6 +25,7 @@ from app.entities.compaction_ent import CompactionEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.main import app
 from app.routers.gems.service import GemsServiceV1Class, get_gems_service_v1
+from app.routers.link.service import LinkServiceV1Class
 from tests.test_chat import _chat, _close, _eventually_asked, _open, _said
 from tests.test_one_conversation import _hang_up, _said_and_heard, _spoken, _world
 from tests.test_voice_conversation import _completed, _delta
@@ -733,4 +734,34 @@ async def test_the_context_route_says_where_the_context_stands(
     assert datetime.fromisoformat(body["cache_until"]) == _START + timedelta(minutes=61)
     assert body["compact_from"] == body["cache_until"]
     assert body["compaction"] == "before_expiry"
+    await _close(setup.socket, setup.linked)
+
+
+# ---- the link
+
+
+async def test_every_socket_is_told_when_a_gems_context_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    watching, linked = await _open(
+        LinkServiceV1Class(setup.chat, setup.service().call, compactions=setup.compactions)
+    )
+    setup.llm.then(_said("Four."), _summary())
+    changed = {"type": "context.changed", "gem": str(setup.gem.id)}
+
+    # After a reply, from another socket.
+    setup.socket.send(setup.gem.id, "message 4")
+    await setup.socket.until("chat.done", 4)
+    await watching.until("context.changed")
+    # After a compaction, and after a reset.
+    await setup.compactions.compact(str(setup.gem.id))
+    await watching.until("context.changed", 2)
+    await setup.conversations.reset(str(setup.gem.id))
+    await watching.until("context.changed", 3)
+
+    assert [f for f in watching.frames if f["type"] == "context.changed"] == [changed] * 3
+    # Nothing else of the gem's reply reached the socket that did not write to it.
+    assert watching.chat() == []
+    await _close(watching, linked)
     await _close(setup.socket, setup.linked)

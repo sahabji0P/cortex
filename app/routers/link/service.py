@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 from app.entities import EntitiesRegistry
 from app.entities.call_ent import CallEntityClass, CallFault, CallRefused, OpenCall
 from app.entities.chat_ent import ChatEntityClass, ChatTurn
+from app.entities.compaction_ent import CompactionEntityClass
 from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.conversation_ent import gem_key
 from app.entities.gem_log import LogEntityClass
@@ -50,6 +51,7 @@ class LinkServiceV1Class:
         connections: ConnectionEntityClass | None = None,
         log: LogEntityClass | None = None,
         watches: WatchEntityClass | None = None,
+        compactions: CompactionEntityClass | None = None,
     ) -> None:
         # Tests hand in their own. The app uses the ones the registry made at startup.
         self.chat = EntitiesRegistry.Chat if chat is None else chat
@@ -62,6 +64,10 @@ class LinkServiceV1Class:
         self.log = EntitiesRegistry.Log if chat is None and log is None else log
         # The same for the gems' watches: with none, no socket is told of one.
         self.watches = EntitiesRegistry.Watches if chat is None and watches is None else watches
+        # The same for the gems' contexts: with none, no socket is told one changed.
+        self.compactions = (
+            EntitiesRegistry.Compaction if chat is None and compactions is None else compactions
+        )
 
     async def link(self, websocket: WebSocket) -> None:
         """Serve one standing socket until the client drops it.
@@ -77,8 +83,9 @@ class LinkServiceV1Class:
         and while its audio is fed in.
 
         Every socket is told when a connection's sign-in changes (`connection.changed`),
-        and when a gem's watch is added, removed or changes as the app shows it
-        (`watch.changed`).
+        when a gem's watch is added, removed or changes as the app shows it
+        (`watch.changed`), and when what a gem would be sent next changes
+        (`context.changed`).
         """
         await websocket.accept()
         # Replies and a call write to the socket at once, one frame at a time, so the
@@ -128,6 +135,9 @@ class LinkServiceV1Class:
         async def watch_changed(gem: str, watch: str) -> None:
             await send(LinkModels.V1.Output.WatchChanged(gem=gem, watch=watch))
 
+        async def context_changed(gem: str) -> None:
+            await send(LinkModels.V1.Output.ContextChanged(gem=gem))
+
         # The gems whose logs this socket watches, by `gem_key`. None is every gem.
         watched: set[str | None] = set()
 
@@ -145,6 +155,8 @@ class LinkServiceV1Class:
                 self.log.listen(log_entry)
             if self.watches is not None:
                 self.watches.listen(watch_changed)
+            if self.compactions is not None:
+                self.compactions.listen(context_changed)
             while True:
                 message = await websocket.receive()
                 if gone or message["type"] == "websocket.disconnect":
@@ -223,6 +235,8 @@ class LinkServiceV1Class:
                 self.log.ignore(log_entry)
             if self.watches is not None:
                 self.watches.ignore(watch_changed)
+            if self.compactions is not None:
+                self.compactions.ignore(context_changed)
             for turn in turns:
                 turn.cut()
             # A reply nobody asked for, about a late search result, is in no list of
