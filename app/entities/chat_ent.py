@@ -374,13 +374,15 @@ class ChatEntityClass:
         *,
         mode: Mode = "chat",
         record: Recording | None = None,
+        check_cold: bool = True,
     ) -> NextRequest:
         """What the gem's next request in writing is made with, from `history`.
 
         Its tools, model and instructions are read as they are now, and written down in
         the gem's log if they changed (`mode` is what the log says of it), and the
-        conversation is checked for a cold start. A cold start is stored before this
-        returns: raises if it cannot be. It is written down with `record`, if given.
+        conversation is checked for a cold start, unless `check_cold` is False. A cold
+        start is stored before this returns: raises if it cannot be. It is written down
+        with `record`, if given.
         """
         gem = ready.gem
         tools = await self.toolbox(gem, key, history.items)
@@ -402,7 +404,7 @@ class ChatEntityClass:
         # the cache is gone (a cold start), old long tool results are sent expired (see
         # `cold_start.py`). Once the conversation is compacted, what came before the
         # compaction's line is sent as its summary (see `compaction.py`).
-        sent = self._conversations.sent(record, history, changed=changed)
+        sent = self._conversations.sent(record, history, changed=changed, check_cold=check_cold)
         if record.started_cold:
             # Stored before the first request that is sent by it.
             await self._conversations.stored(gem.id)

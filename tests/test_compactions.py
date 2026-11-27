@@ -19,6 +19,7 @@ from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError, UpstreamError
 from app.entities import compaction_ent, prices
+from app.entities.cold_start import EXPIRED
 from app.entities.compaction import (
     INSTRUCTIONS,
     SCHEMA,
@@ -42,6 +43,7 @@ from tests.test_chat import (
     _open,
     _said,
 )
+from tests.test_cold_starts import _PAGE, _LongSearch, _looks, _results
 from tests.test_gem_events import _came_in
 from tests.test_link_call import _close as _close_link
 from tests.test_link_call import _open as _open_link
@@ -409,29 +411,55 @@ async def test_identifiers_of_what_is_summed_up_are_copied_after_the_summary(
     await _close(socket, linked)
 
 
-async def test_a_cold_gem_is_compacted_whole_and_starts_cold_first(
+async def test_a_cold_gem_is_compacted_with_no_cold_start_and_the_next_reply_starts_cold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    setup = await _a_new_sitting(monkeypatch)
-    setup.move(_START + timedelta(minutes=31 + 31))
-    setup.llm.then(_summary())
+    move = set_clock(monkeypatch, _START)
+    setup = await _chat(
+        _looks("first", "call_a"),
+        _said("Found it."),
+        _looks("second", "call_b"),
+        _said("Found it again."),
+        search=_LongSearch(),
+    )
+    setup.compactions = await _compactions(setup)
+    socket, linked = await _open(setup.service())
+    socket.send(setup.gem.id, "look it up")
+    await socket.until("chat.done")
+    # Quiet: the reply starts cold, and the first search's result is expired from then on.
+    move(_START + timedelta(minutes=31))
     setup.llm.starts_cold()
+    socket.send(setup.gem.id, "and again")
+    await socket.until("chat.done", 2)
+    # Quiet again, long after the second search.
+    move(_START + timedelta(minutes=31 + 31))
+    setup.llm.then(_summary(), _said("Three."))
 
     compacted = await setup.compactions.compact(str(setup.gem.id))
 
     log = await _log(setup)
-    started = _of(log, "compaction.started")[-1]
-    colds = _of(log, "cache.cold")
-    assert compacted.through == await _asked_at(setup)
-    # The compaction's request is the gem's next: it started cold, once the compaction
-    # began and before its request, for the reason it did, in no turn.
-    assert len(colds) == 2
-    assert started["seq"] < colds[-1]["seq"] < compacted.through
-    assert (colds[-1]["reason"], colds[-1]["turn"]) == ("quiet", None)
-    [sent] = [e for e in _compaction(log) if e["kind"] == "request.sent"]
+    inside = _compaction(log)
+    # The summary request reads no cache: no cold start inside the compaction.
+    assert len(_of(log, "cache.cold")) == 1
+    assert [e for e in log if inside[0]["seq"] < e["seq"] < inside[-1]["seq"]] == inside[1:-1]
+    # It is sent with the line already in force: the second result whole, though the
+    # cache is long gone, and the first expired, as the earlier cold start left it.
+    summary_request = setup.llm.requests[-1]
+    [first, second] = _results(summary_request)
+    assert first == EXPIRED
+    assert _PAGE in second
     service = GemsServiceV1Class(setup.gems, setup.conversations)
-    assert (await service.get_log_sent(str(setup.gem.id), sent["seq"]))["exact"]
-    await _close(setup.socket, setup.linked)
+    assert (await service.get_log_sent(str(setup.gem.id), compacted.through))["exact"]
+
+    # The next reply starts cold for the compaction, in no turn.
+    move(_START + timedelta(minutes=31 + 31 + 1))
+    socket.send(setup.gem.id, "message 3")
+    await socket.until("chat.done", 3)
+    log = await _log(setup)
+    cold = _of(log, "cache.cold")[-1]
+    assert (cold["reason"], cold["before"], cold["turn"]) == ("compaction", compacted.through, None)
+    assert inside[-1]["seq"] < cold["seq"] < _of(log, "turn.opened")[-1]["seq"]
+    await _close(socket, linked)
 
 
 async def test_a_cold_gem_whose_summary_failed_is_compacted_the_same_when_asked_again(
@@ -444,15 +472,34 @@ async def test_a_cold_gem_whose_summary_failed_is_compacted_the_same_when_asked_
         response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
     )
     setup.llm.then([failed], _summary())
-    setup.llm.starts_cold()
 
     with pytest.raises(UpstreamError):
         await setup.compactions.compact(str(setup.gem.id))
-    # The cold start it wrote stays, and the second is sent the same as the first.
+    # Neither writes a cold start, and the second is sent the same as the first.
     compacted = await setup.compactions.compact(str(setup.gem.id))
 
     assert compacted.through == await _asked_at(setup)
+    assert len(_of(await _log(setup), "cache.cold")) == 1
     assert setup.llm.requests[-1]["input"] == setup.llm.requests[-2]["input"]
+    await _close(setup.socket, setup.linked)
+
+
+async def test_a_change_of_settings_is_written_in_a_compaction_and_the_next_reply_starts_cold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    await setup.gems.update(str(setup.gem.id), {"instructions": "You are terse."})
+    setup.llm.then(_summary(), _said("Four."))
+
+    await setup.compactions.compact(str(setup.gem.id))
+
+    log = await _log(setup)
+    inside = _compaction(log)
+    kinds = [e["kind"] for e in log if inside[0]["seq"] < e["seq"] < inside[-1]["seq"]]
+    assert kinds == ["settings.changed", "request.sent", "request.done", "context.compacted"]
+    setup.socket.send(setup.gem.id, "message 4")
+    await setup.socket.until("chat.done", 4)
+    assert _of(await _log(setup), "cache.cold")[-1]["reason"] == "compaction"
     await _close(setup.socket, setup.linked)
 
 

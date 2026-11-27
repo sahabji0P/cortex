@@ -22,11 +22,12 @@ one of these holds, the first that does giving the reason:
   cache and writes none, so a compaction that failed leaves the cache as old as it was.
 
 It is checked once for each reply in writing, and once when a call starts, never during
-a call. A cold start is written down in the gem's log (`cache.cold`), with `before`: the
-number of the last request sent. Tool results numbered before it are expired from then
-on, until the next cold start draws the line further on (`as_sent`). Anything stored
-after that request is sent whole: the model has never been sent it, so no cache could
-have held it.
+a call, and never for a compaction's own request, which reads no cache: the first
+request after a compaction starts cold for it. A cold start is written down in the
+gem's log (`cache.cold`), with `before`: the number of the last request sent. Tool
+results numbered before it are expired from then on, until the next cold start draws
+the line further on (`as_sent`). Anything stored after that request is sent whole: the
+model has never been sent it, so no cache could have held it.
 
 The last request is read from the log's `request.sent` entries, which are written like
 everything else that happened: one lost to a failed write makes the next reply see an

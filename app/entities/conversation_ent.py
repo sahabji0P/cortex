@@ -386,7 +386,9 @@ class ConversationEntityClass:
         numbered = [Numbered(None, one.item, one.mark, one.delivers) for one in added]
         return Stored([*stored.entries, *numbered], mode, last_time, stored.cache, stored.compacted)
 
-    def sent(self, record: Recording, stored: Stored, *, changed: bool) -> list[Item]:
+    def sent(
+        self, record: Recording, stored: Stored, *, changed: bool, check_cold: bool = True
+    ) -> list[Item]:
         """The conversation as the model is to be sent it, once it is checked for a cold start.
 
         Asked once for each reply in writing and once when a call starts, right after
@@ -394,10 +396,12 @@ class ConversationEntityClass:
         (`cache.cold`), and must be stored like what the gem remembers. Long results
         before its line are sent expired, as they are after the latest cold start before
         it (see `cold_start.py`). With a compaction in force, what came before its line
-        is sent as its summary (see `compaction.py`).
+        is sent as its summary (see `compaction.py`). Without `check_cold` (a
+        compaction's request, which reads no cache), nothing is checked: it is sent with
+        the latest cold start's line.
         """
         before = stored.cache.before
-        if record.provider is not None and stored.cache.sent is not None:
+        if check_cold and record.provider is not None and stored.cache.sent is not None:
             reason = cold(stored.cache, record.provider, changed=changed, now=datetime.now(UTC))
             if reason is not None:
                 before = stored.cache.sent

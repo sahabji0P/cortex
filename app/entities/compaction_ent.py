@@ -6,11 +6,12 @@ who makes one, and when.
 
 A compaction takes the gem as a reply does, so there is one writer at a time. It reads
 the conversation as it is stored, and is refused if the gem remembers nothing new since
-the compaction in force or its last reset. Then it builds the gem's next request exactly
-as a reply in writing would (see `ChatEntityClass.next_request`), which may start the
-conversation cold, and sends what that request would be sent, with a plain message that
-asks for the summary after it, as one call of its own: our instructions in place of the
-gem's, no tool use, no cache marks, and JSON held to a schema (see `compaction.py`).
+the compaction in force or its last reset. Then it builds the gem's next request as a
+reply in writing would (see `ChatEntityClass.next_request`), but for the cold start: it
+reads no cache, so none is checked for, and it is sent with the expiry already in force.
+It sends that, with a plain message that asks for the summary after it, as one call of
+its own: our instructions in place of the gem's, no tool use, no cache marks, and JSON
+held to a schema (see `compaction.py`). The first request after it starts cold for it.
 What does not fit the schema fails it, as a refusal does. A compaction is no turn, and
 takes no turn number: it is written down from `compaction.started`, before its request
 is made, to `compaction.ended`, whatever happened. Its request is written down like any
@@ -252,7 +253,8 @@ class CompactionEntityClass:
             raise ConflictError("nothing to compact")
         # Read before the request: the gem is held, so nothing the user says comes between.
         said = await self._said(gem_id, stored.compacted)
-        # Begun before its request is made: a cold start it brings is written after this.
+        # Begun before its request is made: a change of settings it brings is written after
+        # this.
         record = self._conversations.recording(gem_id, stored.mode)
         compaction = record.compaction()
         if compaction.seq is None:
@@ -291,7 +293,10 @@ class CompactionEntityClass:
         compaction: CompactionRecord,
     ) -> tuple[str, int]:
         """Have the model write the summary. Return it, and the compaction's line."""
-        made = await self._chat.next_request(ready, key, stored, mode=stored.mode, record=record)
+        # It reads no cache, so it brings no cold start: the next request starts cold for it.
+        made = await self._chat.next_request(
+            ready, key, stored, mode=stored.mode, record=record, check_cold=False
+        )
         items = [*made.sent, asked()]
         request = compaction.sent(items)
         # Everything remembered before the request is in it, and summed up.
