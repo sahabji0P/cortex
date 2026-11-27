@@ -426,6 +426,32 @@ async def test_each_openai_model_is_called_by_name_and_thinks_only_as_much_as_it
     ]
 
 
+async def test_a_round_with_tool_use_off_is_told_of_the_same_tools_on_both_providers() -> None:
+    openai, claude = _OpenAI(), _Claude([_text("Hi."), _final()], [_text("Hi."), _final()])
+    for model in (
+        model_for(cast("OpenAIAdapterClass", openai), "6 Luna", [_SEARCH]),
+        model_for(cast("AnthropicAdapterClass", claude), "Haiku 5.5", [_SEARCH]),
+    ):
+        for use_tools in (True, False):
+            async for _ in model.round(
+                [{"role": "user", "content": "hi"}],
+                instructions="",
+                think=False,
+                use_tools=use_tools,
+            ):
+                pass
+
+    assert [request["tool_choice"] for request in openai.requests] == ["auto", "none"]
+    assert [request["tool_choice"] for request in claude.requests] == [
+        {"type": "auto"},
+        {"type": "none"},
+    ]
+    # Everything else is the same, so the request starts as every other does.
+    for requests in (openai.requests, claude.requests):
+        on, off = ({k: v for k, v in r.items() if k != "tool_choice"} for r in requests)
+        assert on == off
+
+
 # ---- choosing the provider
 
 
