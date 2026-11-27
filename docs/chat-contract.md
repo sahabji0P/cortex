@@ -901,6 +901,11 @@ if its server asks for a sign-in, the connection is added (201) with `tools: []`
   another machine. The user is shown a page that says to go back to Cortex. When the
   sign-in is done, every socket gets `connection.changed` with the connection's `id`,
   and the app reads it again: it is `"signed_in"` and has its tools.
+- **A server that asks only when a tool is called** (Gmail's) is added with its tools and
+  `sign_in: null`. The first call it refuses with 401 makes it `"sign_in_needed"`, and
+  every socket gets `connection.changed`: a connection's `sign_in` can go from null to a
+  state, not only when it is added. The gem's call is answered "This tool needs the user
+  to sign in to {name}.", and the tools the server lets anyone use keep working.
 - **When a pass runs out.** The backend renews it by itself when it can (`renews`).
   When the server refuses a pass that cannot be renewed, the connection becomes
   `"sign_in_needed"` and every socket gets `connection.changed`. A pass past its
@@ -910,7 +915,7 @@ if its server asks for a sign-in, the connection is added (201) with `tools: []`
   pass is renewed, so `expires_at` is no reason for a badge. Its tools are still offered; a call of one is answered, for the gem,
   with "This tool needs the user to sign in to {name} again."
 - **Failures.** `sign-in` on a connection with its own `Authorization` header, or whose
-  server lets us in without one, is a 422. A server whose sign-in cannot be found or
+  server lets us in without one and has refused no call, is a 422. A server whose sign-in cannot be found or
   used (it does not let a client register itself, say) is a 502, and so is adding one
   that answers 401 and publishes no sign-in.
 - A new `url` drops the sign-in, and the connection needs one again if the new server
