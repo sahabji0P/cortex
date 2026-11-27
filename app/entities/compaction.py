@@ -1,35 +1,25 @@
 """
-Compaction: what a gem's conversation is sent once its older part is summed up.
+Compaction: what a gem's conversation is sent once it is summed up.
 
-A gem has one conversation, and it only grows. Past a size (`COMPACT_OVER`), the older
-part can be replaced, in what the model is sent, by a summary the gem's own model
-writes. The log is never changed: a compaction is an entry of its own
-(`context.compacted`), with the summary and `through`, the number of the first entry that
-is still sent whole. The latest one since the gem was last reset is in force.
+A gem has one conversation, and it only grows. When the user asks, everything the gem
+remembers so far can be replaced, in what the model is sent, by a summary the gem's own
+model writes. The log is never changed: a compaction is an entry of its own
+(`context.compacted`), with the summary and `through`: the number of the compaction's own
+request (its `request.sent`). Everything the gem remembered before that request was sent
+in it, and is summed up. The latest compaction since the gem was last reset is in force.
 
 What is sent, with a compaction in force (`view`): the summary, as one line of ours,
-then every search made before `through` (`tool_search`, its call and its result: what it
-loaded stays loaded, so a deferred tool it loaded can still be called), then every
-remembered entry numbered `through` or after, with the latest cold start's expiry still
-applied (see `cold_start.py`). Like the expiry, it is worked out from what is
-stored and the lines in force alone, so every request of a sitting starts with the same
-bytes as the one before it.
+then every remembered entry numbered `through` or after, with the latest cold start's
+expiry still applied (see `cold_start.py`). That is what came after the compaction (the
+next line that gives the time, the user's next message, and on), and anything stored
+while the summary was written (a late result, an event), which the summary does not
+hold. Like the expiry, it is worked out from what is stored and the lines in force
+alone, so every request after a compaction starts with the same bytes as the one before
+it. Nothing from before `through` is kept whole, not even a search: the tools stay
+declared as they were, and a deferred tool is loaded again by the next search.
 
-Where `through` falls (`through`):
-
-- at the start of the latest sitting, which begins after the latest cold start since the
-  gem was last reset, or at the conversation's start;
-- moved on, if what it keeps whole is over `KEEP_WHOLE` estimated tokens, until it is
-  not, keeping the newest; never past the latest place it can fall;
-- never before the compaction in force: what that one summed up stays summed up;
-- only ever at the start of a turn: before what the user said or an event the gem was
-  told (a `user.said` or `event.received`), and before the lines of ours that go with
-  it, just before it (the line that gives the time, the one that says a call started).
-  Every tool call before it is answered before it, so a call is never parted from its
-  result.
-
-If nothing remembered lies between the compaction in force (or the conversation's
-start) and `through`, there is nothing to compact.
+If nothing is remembered since the compaction in force, or since the gem was last reset,
+there is nothing to compact (`anything_new`).
 
 The size of a conversation is an estimate (`size`): the characters of what its next
 request would be sent (the instructions, the items' text and the tools it is told of in
@@ -40,7 +30,7 @@ The summary request is the gem's own model, sent the same instructions, tools an
 as its next request would be, so a warm cache is read, then one line of ours that asks
 for the summary (`ASK`), with tool use off and room to write it (`SUMMARY_TOKENS`). After
 what the model writes, the code adds a section of its own: identifiers copied exactly
-from the part being replaced (`exact`).
+from what it replaces (`exact`).
 """
 
 import json
@@ -49,29 +39,24 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from app.entities.cold_start import Numbered, as_sent
-from app.entities.model import SEARCH_TOOL, Item, Message, ToolSpec
+from app.entities.model import Item, Message, ToolSpec
 
 __all__ = [
     "ASK",
     "COMPACT_OVER",
     "HEADINGS",
-    "KEEP_WHOLE",
     "SUMMARY_TOKENS",
     "Compacted",
+    "anything_new",
     "asked",
     "exact",
-    "replaced",
     "size",
     "summed_up",
-    "through",
     "view",
 ]
 
 # Past this many estimated tokens, a gem's conversation is to be compacted.
 COMPACT_OVER = 100_000
-
-# At most about this many estimated tokens of the latest sitting are kept whole.
-KEEP_WHOLE = 20_000
 
 # The most the summary request may write, thinking included, where a provider needs a
 # ceiling (Anthropic's). A reply's is far lower (see `model.py`): a summary that ran out
@@ -142,59 +127,21 @@ def view(
 ) -> list[Item]:
     """The items as the model is sent them: summed up before `through`, expired before `before`.
 
-    The searches before `through` stay, after the summary. An entry with no number came
-    after every request so far, so it is always sent.
+    An entry with no number came after every request so far, so it is always sent.
     """
     if compacted is None:
         return as_sent(entries, before)
-    searches = _searches(entries, compacted.through)
-    kept = [
-        entry
-        for entry in entries
-        if entry.seq is None or entry.seq >= compacted.through or _call_id(entry) in searches
-    ]
+    kept = [entry for entry in entries if entry.seq is None or entry.seq >= compacted.through]
     return [summed_up(compacted.summary), *as_sent(kept, before)]
 
 
-def replaced(
-    entries: Sequence[Numbered], before: int | None, compacted: Compacted | None, line: int
-) -> list[Item]:
-    """What a compaction drawn at `line` stands for, as the model was sent it.
+def anything_new(entries: Sequence[Numbered], compacted: Compacted | None) -> bool:
+    """Whether the gem remembers anything the compaction in force does not sum up.
 
-    The summary in force, then every entry from its line up to `line`, but the searches:
-    they are still sent after the new summary.
+    `entries` are what it remembers since it was last reset.
     """
     floor = 0 if compacted is None else compacted.through
-    searches = _searches(entries, line)
-    sent = as_sent(entries, before)
-    return [
-        *([] if compacted is None else [summed_up(compacted.summary)]),
-        *(
-            item
-            for entry, item in zip(entries, sent, strict=True)
-            if entry.seq is not None
-            and floor <= entry.seq < line
-            and _call_id(entry) not in searches
-        ),
-    ]
-
-
-def _searches(entries: Sequence[Numbered], line: int) -> set[str]:
-    """The call ids of the searches made before `line`."""
-    return {
-        entry.item["call_id"]
-        for entry in entries
-        if entry.seq is not None
-        and entry.seq < line
-        and "type" in entry.item
-        and entry.item["type"] == "function_call"
-        and entry.item["name"] == SEARCH_TOOL
-    }
-
-
-def _call_id(entry: Numbered) -> str | None:
-    """The call an entry is or answers, if it is a call or a call's result."""
-    return entry.item["call_id"] if "type" in entry.item else None
+    return any(entry.seq is None or entry.seq >= floor for entry in entries)
 
 
 def _text(item: Item) -> str:
@@ -220,57 +167,12 @@ def size(instructions: str, items: Sequence[Item], tools: Sequence[ToolSpec] = (
     return (len(instructions) + sum(len(_text(item)) for item in items) + told) // 4
 
 
-def through(
-    entries: Sequence[Numbered],
-    *,
-    cold: int | None,
-    before: int | None,
-    compacted: Compacted | None,
-) -> int | None:
-    """Where a compaction now would draw its line, or None if there is nothing to compact.
-
-    `entries` are what the gem remembers since it was last reset, `cold` the number of
-    the latest cold start's own entry since then, `before` the line of the expiry that
-    applies now, and `compacted` the compaction in force.
-    """
-    floor = 0 if compacted is None else compacted.through
-    start = max(floor, 0 if cold is None else cold + 1)
-    sent = as_sent(entries, before)
-    places: list[int] = []
-    unanswered: set[str] = set()
-    # Where the lines of ours just before this entry begin, if it follows any.
-    lines: int | None = None
-    for index, entry in enumerate(entries):
-        item = entry.item
-        if "role" in item and item["role"] == "developer":
-            lines = index if lines is None else lines
-            continue
-        place = index if lines is None else lines
-        lines = None
-        if "role" in item:
-            seq = entries[place].seq
-            if item["role"] == "user" and not unanswered and seq is not None and seq >= start:
-                places.append(place)
-        elif item["type"] == "function_call":
-            unanswered.add(item["call_id"])
-        else:
-            unanswered.discard(item["call_id"])
-    if not places:
-        return None
-    # The earliest place whose whole part is small enough; the latest if none is.
-    chosen = next((index for index in places if size("", sent[index:]) <= KEEP_WHOLE), places[-1])
-    line = entries[chosen].seq
-    assert line is not None
-    if not any(entry.seq is not None and floor <= entry.seq < line for entry in entries):
-        return None
-    return line
-
-
 def exact(summary: str, replaced: Sequence[Item]) -> str:
-    """The summary, with the identifiers in the part it replaces copied after it.
+    """The summary, with the identifiers in what it replaces copied after it.
 
-    Found by pattern in `replaced` (the items it stands for, as they were sent, the
-    summary before it among them), each once, the latest `_EXACT_MAX` of them.
+    Found by pattern in `replaced` (the items it stands for, as the summary request was
+    sent them, the summary in force among them), each once, the latest `_EXACT_MAX` of
+    them.
     """
     found: dict[str, None] = {}
     for item in replaced:

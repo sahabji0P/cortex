@@ -1,18 +1,19 @@
 """
-Compaction entity: summing up the older part of a gem's conversation, when the user asks.
+Compaction entity: summing up a gem's whole conversation, when the user asks.
 
-What a compaction is, where its line falls and what is sent with one in force is in
-`compaction.py`. Here is who makes one, and when.
+What a compaction is and what is sent with one in force is in `compaction.py`. Here is
+who makes one, and when.
 
 A compaction takes the gem as a reply does, so there is one writer at a time. It reads
-the conversation as it is stored and draws its line first, before anything is written
-down. Then it builds the gem's next request exactly as a reply in writing would (see
-`ChatEntityClass.next_request`), which may start the conversation cold, and sends it with
-the line that asks for the summary after it, with tool use off. The request is written
-down like any other, in a turn of its own (`turn.opened` with `by: "compaction"`), so its
-tokens and cost are in the log. Once the summary is written, the compaction is stored
-(`context.compacted`), at once: if it cannot be, the compaction fails and nothing
-changes. It never speaks, and never wakes the gem.
+the conversation as it is stored, and is refused if the gem remembers nothing new since
+the compaction in force or its last reset. Then it builds the gem's next request exactly
+as a reply in writing would (see `ChatEntityClass.next_request`), which may start the
+conversation cold, and sends it with the line that asks for the summary after it, with
+tool use off. The request is written down like any other, in a turn of its own
+(`turn.opened` with `by: "compaction"`), so its tokens and cost are in the log, and its
+`request.sent` is the compaction's line (`through`). Once the summary is written, the
+compaction is stored (`context.compacted`), at once: if it cannot be, the compaction
+fails and nothing changes. It never speaks, and never wakes the gem.
 
 A compaction (`compact`) is only ever made when the user asks. It is allowed whenever
 the gem is between turns, warm or cold, and refused while a call holds it. A reply being
@@ -45,17 +46,15 @@ from app.entities.compaction import (
     COMPACT_OVER,
     SUMMARY_TOKENS,
     Compacted,
+    anything_new,
     asked,
     exact,
-    replaced,
     size,
-    through,
     view,
 )
 from app.entities.conversation_ent import (
     ConversationEntityClass,
     Settled,
-    Stored,
     gem_key,
     numbered,
 )
@@ -227,28 +226,19 @@ class CompactionEntityClass:
             raise UpstreamError(f"the summary could not be written: {ready}")
         gem_id = ready.gem.id
         stored = await self._conversations.load(gem_id)
-        # Drawn before anything is written down: a cold start written now would leave
-        # the latest sitting empty.
-        before = stored.cache.before
-        quiet = cold(stored.cache, _provider(ready.name), changed=False, now=datetime.now(UTC))
-        if quiet is not None:
-            before = stored.cache.sent
-        line = through(
-            stored.entries,
-            cold=await self._sitting(gem_id, stored),
-            before=before,
-            compacted=stored.compacted,
-        )
-        if line is None:
+        if not anything_new(stored.entries, stored.compacted):
             raise ConflictError("nothing to compact")
         made = await self._chat.next_request(ready, key, stored, mode=stored.mode)
-        if made.record.started_cold:
-            # The settings changed: it started cold, whatever the time.
-            before = stored.cache.sent
         turn = made.record.turn("compaction")
         items = [*made.sent, asked()]
         think = self._conversations.gem(key).late.pending
         request = turn.sent(items, think)
+        # Everything remembered before the request is in it, and summed up.
+        line = request.seq
+        if line is None:
+            exc = RuntimeError("the summary request could not be written down")
+            _failed(turn, exc)
+            raise exc
         text, usage = "", cast("Usage | None", None)
         try:
             async for event in made.model.round(
@@ -274,7 +264,7 @@ class CompactionEntityClass:
             exc = RuntimeError("the model wrote no summary")
             _failed(turn, exc)
             raise UpstreamError(f"the summary could not be written: {exc}")
-        summary = exact(text, replaced(stored.entries, before, stored.compacted, line))
+        summary = exact(text, made.sent)
         # On its own, so that a write under way is finished even if this is stopped.
         writing = asyncio.ensure_future(
             self._conversations.log.record_compacted(
@@ -301,19 +291,6 @@ class CompactionEntityClass:
             return
         turn.closed(finished=True, kept=None)
         self._conversations.settled(key, "compaction")
-
-    async def _sitting(self, gem_id: ObjectId, stored: Stored) -> int | None:
-        """The number of the cold start the latest sitting begins after, or None.
-
-        A cold start nothing remembered follows began no sitting: it was written by a
-        compaction or a reply that then failed. The sitting is the one before it.
-        """
-        cold_at = stored.cache.cold_at
-        while cold_at is not None and not any(
-            entry.seq is not None and entry.seq > cold_at for entry in stored.entries
-        ):
-            cold_at = (await self._store.cache(gem_id, before=cold_at)).cold_at
-        return cold_at
 
     def _release(self, key: str, holding: _Compacting, done: bool) -> None:
         """A compaction is over, done or not: let the gem go."""

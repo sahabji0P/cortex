@@ -267,7 +267,6 @@ class ConversationStoreClass:
             sent=None if sent is None else sent.seq,
             sent_at=None if sent is None else sent.at,
             before=None if started_cold is None else int(started_cold.data["before"]),
-            cold_at=None if started_cold is None else started_cold.seq,
         )
 
     async def compacted(self, gem_id: ObjectId, *, before: int | None = None) -> Compacted | None:

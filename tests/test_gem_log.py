@@ -806,7 +806,7 @@ async def test_the_cache_is_read_since_the_last_reset() -> None:
     await conversations.log.written()
 
     cache = await store.cache(gem_id)
-    assert (cache.sent, cache.before, cache.cold_at) == (3, 1, 2)
+    assert (cache.sent, cache.before) == (3, 1)
     assert cache.sent_at is not None
     # As it stood before the second request.
     assert (await store.cache(gem_id, before=3)).sent == 1

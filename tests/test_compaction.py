@@ -1,21 +1,11 @@
-"""Where a compaction draws its line, what is sent with one in force, and how big a request is."""
+"""What there is to compact, what is sent with a compaction in force, and how big a request is."""
 
 import json
 from typing import Any, cast
 
 from app.adapters.openai_adp import OpenAIAdapterClass
 from app.entities.cold_start import EXPIRED, KEEP_UNDER, Numbered
-from app.entities.compaction import (
-    KEEP_WHOLE,
-    Compacted,
-    asked,
-    exact,
-    replaced,
-    size,
-    summed_up,
-    through,
-    view,
-)
+from app.entities.compaction import Compacted, anything_new, asked, exact, size, summed_up, view
 from app.entities.model import Item, ToolSpec, to_input, to_messages
 
 _LONG = "x" * KEEP_UNDER
@@ -76,101 +66,25 @@ def test_the_size_counts_the_tools_told_in_full_as_json_and_not_the_deferred() -
     assert size("i" * 8, [], [told, deferred]) == (8 + len(schema)) // 4
 
 
-# ---- where the line falls
+# ---- what there is to compact
 
 
-def test_with_no_cold_start_the_line_is_at_the_start_and_there_is_nothing_before_it() -> None:
-    assert through(_turns(3), cold=None, before=None, compacted=None) is None
+def test_anything_the_gem_remembers_is_there_to_compact() -> None:
+    assert anything_new(_turns(1), None)
+    # Even a line of ours alone, or what was added since the last request.
+    assert anything_new([_note(0)], None)
+    assert anything_new([_user(None)], None)
+    assert not anything_new([], None)
 
 
-def test_the_line_is_at_the_start_of_the_latest_sitting() -> None:
-    # A cold start written as entry 5: the sitting begins with the turn after it.
-    entries = [*_turns(2), *_turns(2, first=6)]
+def test_only_what_came_after_the_compaction_in_force_is_there_to_compact() -> None:
+    compacted = Compacted("summary", through=4)
 
-    assert through(entries, cold=5, before=None, compacted=None) == 6
-
-
-def test_the_line_falls_only_before_what_the_user_said() -> None:
-    # The sitting begins with a reply: the first place is the user's.
-    entries = [*_turns(2), _gem(5), _user(6), _gem(7)]
-
-    assert through(entries, cold=4, before=None, compacted=None) == 6
-
-
-def test_the_lines_of_ours_just_before_what_the_user_said_go_with_it() -> None:
-    # A line that says a call started and one that gives the time, then what was said.
-    entries = [*_turns(2), _gem(5), _note(6), _note(7), _user(8), _gem(9)]
-
-    assert through(entries, cold=4, before=None, compacted=None) == 6
-    # A line of ours with a reply after it is no start of a turn.
-    entries = [*_turns(2), _note(5), _gem(6), _user(7), _gem(8)]
-    assert through(entries, cold=4, before=None, compacted=None) == 7
-
-
-def test_a_first_turn_with_only_its_lines_before_it_has_nothing_to_compact() -> None:
-    entries = [_note(0), *_turns(2, first=1)]
-
-    assert through(entries, cold=None, before=None, compacted=None) is None
-
-
-def test_the_line_never_parts_a_call_from_its_result() -> None:
-    # A user message stored between a call and its result is no place for the line.
-    entries = [*_turns(2), _call(4, "a"), _user(5), _result(6, "a"), _gem(7), _user(8), _gem(9)]
-
-    assert through(entries, cold=3, before=None, compacted=None) == 8
-
-
-def test_an_event_told_is_a_place_too() -> None:
-    event = Numbered(5, {"role": "user", "content": "<event>came</event>"}, delivers=2)
-    entries = [*_turns(2), _gem(4), event, _gem(6)]
-
-    assert through(entries, cold=4, before=None, compacted=None) == 5
-
-
-def test_a_long_sitting_is_kept_whole_only_for_its_newest_part() -> None:
-    # Each turn is about a thousand tokens: the newest twenty fit.
-    entries = _turns(40, text="w" * 4000)
-
-    line = through(entries, cold=None, before=None, compacted=None)
-
-    def kept(since: int) -> list[Item]:
-        return [entry.item for entry in entries if entry.seq is not None and entry.seq >= since]
-
-    assert line is not None
-    assert line % 2 == 0  # before what the user said
-    assert size("", kept(line)) <= KEEP_WHOLE < size("", kept(line - 2))
-
-
-def test_a_newest_turn_over_the_size_alone_is_still_kept_whole() -> None:
-    entries = [*_turns(3), _user(6, "w" * 4 * (KEEP_WHOLE + 10)), _gem(7)]
-
-    assert through(entries, cold=None, before=None, compacted=None) == 6
-
-
-def test_what_is_expired_counts_as_sent_expired() -> None:
-    # The results before the line of the expiry are sent short, so the sitting fits.
-    entries = [
-        e
-        for turn in range(30)
-        for e in (
-            _user(3 * turn),
-            _call(3 * turn + 1, f"c{turn}"),
-            _result(3 * turn + 2, f"c{turn}", "r" * 4000),
-        )
-    ]
-
-    assert through(entries, cold=None, before=1000, compacted=None) is None
-    assert through(entries, cold=None, before=None, compacted=None) is not None
-
-
-def test_the_line_never_goes_back_past_the_compaction_in_force() -> None:
-    entries = [*_turns(6)]
-    compacted = Compacted("summary", through=6)
-
-    # The sitting began earlier, but what was summed up stays summed up.
-    assert through(entries, cold=None, before=None, compacted=compacted) is None
-    entries = [*entries, *_turns(2, first=12, text="w" * 4 * KEEP_WHOLE)]
-    assert through(entries, cold=None, before=None, compacted=compacted) == 14
+    assert not anything_new(_turns(2), compacted)
+    assert anything_new([*_turns(2), _note(5)], compacted)
+    # Something stored while its summary was written is not in it.
+    assert anything_new([*_turns(2), _result(4, "late")], compacted)
+    assert anything_new([*_turns(2), _user(None)], compacted)
 
 
 # ---- what is sent
@@ -241,80 +155,61 @@ def _deferred_call(seq: int, call_id: str) -> Numbered:
 _DEFERRED = "server__lookup"
 
 
-def _loaded_then_called() -> list[Numbered]:
-    """A deferred tool loaded in the part summed up, and called in the part kept whole."""
+def _loaded_then_called_late() -> list[Numbered]:
+    """A deferred tool loaded and called before a compaction at 6, its late result after it."""
     return [
         _user(0),
         *_search(1, "s", _DEFERRED),
-        _call(3, "w"),
-        _result(4, "w", _LONG),
+        _deferred_call(3, "d"),
+        _result(4, "d", "still running"),
         _gem(5),
-        _note(6, "the time"),
-        _user(7),
-        _deferred_call(8, "d"),
-        _result(9, "d", "found it"),
-        _gem(10),
+        # The compaction's request is entry 6; the late result is stored after it.
+        _deferred_call(7, "late_d"),
+        _result(8, "late_d", "found it"),
+        _note(9, "the time"),
+        _user(10),
     ]
 
 
-def test_the_searches_before_the_line_are_sent_after_the_summary() -> None:
-    entries = [*_loaded_then_called(), _user(None, "added since")]
+def test_nothing_before_the_line_is_sent_not_even_a_search() -> None:
+    entries = _loaded_then_called_late()
 
-    sent = view(entries, 11, Compacted("Looked it up.", through=6))
+    sent = view(entries, None, Compacted("Looked it up.", through=6))
 
-    assert sent == [
-        summed_up("Looked it up."),
-        *(entry.item for entry in _search(1, "s", _DEFERRED)),
-        *(entry.item for entry in entries[6:]),
-    ]
-    # Every request after it starts the same.
-    assert view([*entries, _gem(None)], 11, Compacted("Looked it up.", through=6))[:-1] == sent
+    assert sent == [summed_up("Looked it up."), *(entry.item for entry in entries[6:])]
 
 
-def test_a_search_kept_after_the_summary_still_loads_the_tool_on_openai() -> None:
-    sent = view(_loaded_then_called(), None, Compacted("Looked it up.", through=6))
+def test_a_deferred_tool_called_after_the_summary_with_no_search_is_sent_on_openai() -> None:
+    sent = view(_loaded_then_called_late(), None, Compacted("Looked it up.", through=6))
     spec = OpenAIAdapterClass.Tools.function(
         name=_DEFERRED, description="Look up.", parameters={}, strict=False, defer_loading=True
     )
 
-    request = to_input(sent, {_DEFERRED: spec})
+    request = [cast("dict[str, Any]", item) for item in to_input(sent, {_DEFERRED: spec})]
 
-    types = [cast("dict[str, Any]", item).get("type") for item in request]
-    assert types[1:3] == ["tool_search_call", "tool_search_output"]
-    assert cast("dict[str, Any]", request[2])["tools"] == [spec]
-    # The call after the line names a tool the request defines.
-    called = [cast("dict[str, Any]", item) for item in request]
-    assert any(item.get("name") == _DEFERRED for item in called[3:])
-
-
-def test_a_search_kept_after_the_summary_still_loads_the_tool_on_anthropic() -> None:
-    sent = view(_loaded_then_called(), None, Compacted("Looked it up.", through=6))
-
-    messages = cast("list[dict[str, Any]]", to_messages(sent, {_DEFERRED, "web_search"}))
-
-    roles = [message["role"] for message in messages]
-    assert roles == ["user", "assistant", "user", "assistant", "user", "assistant"]
-    assert messages[0]["content"][0]["text"].startswith("<note>The conversation before")
-    assert messages[1]["content"][0]["name"] == "tool_search"
-    # The search's result opens the next user message, the kept part's lines after it.
-    loaded, *rest = messages[2]["content"]
-    assert loaded["type"] == "tool_result"
-    assert loaded["content"] == [{"type": "tool_reference", "tool_name": _DEFERRED}]
-    assert [block["type"] for block in rest] == ["text", "text"]
-    assert messages[3]["content"][0]["name"] == _DEFERRED
-
-
-def test_what_a_compaction_replaces_leaves_out_the_searches_it_keeps() -> None:
-    entries = _loaded_then_called()
-    earlier = Compacted("Earlier.", through=1)
-
-    assert replaced(entries, 6, earlier, 6) == [
-        summed_up("Earlier."),
-        _call(3, "w").item,
-        {"type": "function_call_output", "call_id": "w", "output": EXPIRED},
-        _gem(5).item,
+    # No search items: the call goes as it is, as it would in a first request.
+    assert [item.get("type") for item in request] == [
+        None,
+        "function_call",
+        "function_call_output",
+        None,
+        None,
     ]
-    assert replaced(entries, None, None, 6)[0] == _user(0).item
+    assert request[1]["name"] == _DEFERRED
+
+
+def test_a_deferred_tool_called_after_the_summary_with_no_search_is_sent_on_anthropic() -> None:
+    sent = view(_loaded_then_called_late(), None, Compacted("Looked it up.", through=6))
+
+    messages = cast("list[dict[str, Any]]", to_messages(sent, {_DEFERRED, "tool_search"}))
+
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+    assert messages[0]["content"][0]["text"].startswith("<note>The conversation before")
+    assert messages[1]["content"] == [
+        {"type": "tool_use", "id": "late_d", "name": _DEFERRED, "input": {}}
+    ]
+    # No reference to a loaded tool anywhere: nothing was searched for.
+    assert "tool_reference" not in json.dumps(messages)
 
 
 def test_the_ask_is_a_line_of_ours() -> None:

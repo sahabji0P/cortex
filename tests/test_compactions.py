@@ -1,8 +1,8 @@
 """Compacting a gem's conversation, when the user asks.
 
 The clock is set (`set_clock`), and the gems use an OpenAI model, whose cache is held to
-last 30 minutes. A conversation has something to compact once it has started cold: the
-latest sitting is kept whole, and what came before it is summed up.
+last 30 minutes. A compaction sums up everything the gem remembers before its own
+request.
 """
 
 import asyncio
@@ -32,6 +32,7 @@ from tests.test_chat import (
     _open,
     _said,
 )
+from tests.test_gem_events import _came_in
 from tests.test_link_call import _close as _close_link
 from tests.test_link_call import _open as _open_link
 from tests.test_link_call import _Setup as _CallSetup
@@ -103,17 +104,17 @@ def _of(log: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
     return [entry for entry in log if entry["kind"] == kind]
 
 
-async def _sitting_starts(setup: Any) -> int:
-    """The number of the first thing remembered after the latest cold start."""
+async def _asked_at(setup: Any) -> int:
+    """The number of the latest compaction's own `request.sent`: its line."""
     log = await _log(setup)
-    cold = _of(log, "cache.cold")[-1]["seq"]
-    return next(e["seq"] for e in log if e["seq"] > cold and e["kind"] == "note.written")
+    turn = [e for e in _of(log, "turn.opened") if e["by"] == "compaction"][-1]["turn"]
+    return next(e["seq"] for e in _of(log, "request.sent") if e["turn"] == turn)
 
 
 # ---- the user's compaction
 
 
-async def test_a_compaction_sums_up_what_came_before_the_latest_sitting(
+async def test_a_compaction_sums_up_everything_before_its_own_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     setup = await _a_new_sitting(monkeypatch)
@@ -121,7 +122,7 @@ async def test_a_compaction_sums_up_what_came_before_the_latest_sitting(
 
     compacted = await setup.compactions.compact(str(setup.gem.id))
 
-    assert compacted == Compacted(_SUMMARY, await _sitting_starts(setup))
+    assert compacted == Compacted(_SUMMARY, await _asked_at(setup))
     # The summary request was sent what the next reply would be, then the ask, with
     # tool use off.
     summary_request = setup.llm.requests[-1]
@@ -131,16 +132,14 @@ async def test_a_compaction_sums_up_what_came_before_the_latest_sitting(
     assert summary_request["input"][-1] == {"role": "developer", "content": ASK}
     assert summary_request["tool_choice"] == "none"
     assert summary_request["tools"] == setup.llm.requests[-2]["tools"]
-    # The next reply is sent the summary, then the latest sitting whole, from the line
-    # that gave the time with its first message.
+    # The next reply is sent the summary, then only what came after it: the line that
+    # gives the time (the one before is summed up), and the message.
     setup.move(_START + timedelta(minutes=33))
     setup.socket.send(setup.gem.id, "message 4")
     await setup.socket.until("chat.done", 4)
     assert setup.llm.requests[-1]["input"] == [
         summed_up(_SUMMARY),
         TIME_LINE,
-        {"role": "user", "content": "message 3"},
-        {"role": "assistant", "content": "Three."},
         {"role": "user", "content": "message 4"},
     ]
     await _close(setup.socket, setup.linked)
@@ -248,11 +247,10 @@ async def test_identifiers_of_what_is_summed_up_are_copied_after_the_summary(
     await _close(socket, linked)
 
 
-async def test_a_cold_gem_is_compacted_from_its_latest_sitting_and_starts_cold_first(
+async def test_a_cold_gem_is_compacted_whole_and_starts_cold_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     setup = await _a_new_sitting(monkeypatch)
-    through = await _sitting_starts(setup)
     setup.move(_START + timedelta(minutes=31 + 31))
     setup.llm.then(_summary())
     setup.llm.starts_cold()
@@ -262,7 +260,7 @@ async def test_a_cold_gem_is_compacted_from_its_latest_sitting_and_starts_cold_f
     log = await _log(setup)
     opened = _of(log, "turn.opened")[-1]
     colds = _of(log, "cache.cold")
-    assert compacted.through == through
+    assert compacted.through == await _asked_at(setup)
     # The compaction's request is the gem's next: it started cold, first.
     assert len(colds) == 2
     assert colds[-1]["seq"] < opened["seq"]
@@ -276,7 +274,6 @@ async def test_a_cold_gem_whose_summary_failed_is_compacted_the_same_when_asked_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     setup = await _a_new_sitting(monkeypatch)
-    through = await _sitting_starts(setup)
     setup.move(_START + timedelta(minutes=31 + 31))
     failed = SimpleNamespace(
         type="response.failed",
@@ -287,11 +284,11 @@ async def test_a_cold_gem_whose_summary_failed_is_compacted_the_same_when_asked_
 
     with pytest.raises(UpstreamError):
         await setup.compactions.compact(str(setup.gem.id))
-    # The cold start it wrote stays: nothing remembered follows it, so the sitting is
-    # still the one before it.
+    # The cold start it wrote stays, and the second is sent the same as the first.
     compacted = await setup.compactions.compact(str(setup.gem.id))
 
-    assert compacted.through == through
+    assert compacted.through == await _asked_at(setup)
+    assert setup.llm.requests[-1]["input"] == setup.llm.requests[-2]["input"]
     await _close(setup.socket, setup.linked)
 
 
@@ -315,8 +312,8 @@ async def test_a_second_compaction_sums_up_the_first_and_moves_the_line_on(
     summary_request = setup.llm.requests[-2]
     assert summary_request["input"][0] == summed_up("First.")
     assert setup.llm.requests[-1]["input"][0] == summed_up("Second.")
-    assert {"role": "user", "content": "message 3"} not in setup.llm.requests[-1]["input"]
-    assert {"role": "user", "content": "message 4"} in setup.llm.requests[-1]["input"]
+    assert {"role": "user", "content": "message 4"} not in setup.llm.requests[-1]["input"]
+    assert setup.llm.requests[-1]["input"][-1] == {"role": "user", "content": "message 5"}
     await _close(setup.socket, setup.linked)
 
 
@@ -329,22 +326,30 @@ async def test_a_gem_in_a_call_is_not_compacted(monkeypatch: pytest.MonkeyPatch)
     await _close(setup.socket, setup.linked)
 
 
-async def test_a_conversation_with_nothing_before_its_latest_sitting_is_not_compacted(
+async def test_a_gem_that_remembers_nothing_new_is_not_compacted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_clock(monkeypatch, _START)
-    setup = await _chat(_said("One."))
+    setup = await _chat(_said("One."), _summary(), _summary("Again."))
     compactions = await _compactions(setup)
+    gem_id = str(setup.gem.id)
+
+    # Nothing said yet.
+    with pytest.raises(ConflictError, match="nothing to compact"):
+        await compactions.compact(gem_id)
+    assert setup.llm.requests == []
+    # One message is something to compact; then nothing is, until something new comes.
     socket, linked = await _open(setup.service())
     socket.send(setup.gem.id, "message 1")
     await socket.until("chat.done")
-    asked = len(setup.llm.requests)
-
+    await compactions.compact(gem_id)
     with pytest.raises(ConflictError, match="nothing to compact"):
-        await compactions.compact(str(setup.gem.id))
-
-    assert len(setup.llm.requests) == asked
-    assert _of(await _log(setup), "turn.opened")[-1]["by"] == "user"
+        await compactions.compact(gem_id)
+    assert len(setup.llm.requests) == 2
+    # After a reset, nothing either.
+    await setup.conversations.reset(gem_id)
+    with pytest.raises(ConflictError, match="nothing to compact"):
+        await compactions.compact(gem_id)
     await _close(socket, linked)
 
 
@@ -452,6 +457,29 @@ async def test_a_message_sent_during_a_compaction_waits_for_it(
     await _close(setup.socket, setup.linked)
 
 
+async def test_an_event_that_comes_during_a_compaction_is_sent_whole_after_the_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    gate = asyncio.Event()
+    setup.llm.then([gate, *_summary()], _said("New commits are in."))
+    compacting = asyncio.create_task(setup.compactions.compact(str(setup.gem.id)))
+    await _eventually_asked(setup, 4)
+
+    await _came_in(setup, "push")
+    gate.set()
+    compacted = await compacting
+    await setup.socket.until("chat.done", 4)
+
+    # It is told after the summary, which does not hold it.
+    told = _of(await _log(setup), "event.received")
+    assert told[-1]["seq"] > compacted.through
+    sent = setup.llm.requests[-1]["input"]
+    assert sent[0] == summed_up(_SUMMARY)
+    assert "<event" in json.dumps(sent[1:])
+    await _close(setup.socket, setup.linked)
+
+
 async def test_a_call_started_during_a_compaction_waits_for_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -502,7 +530,7 @@ async def test_a_reply_being_written_is_not_cut_by_a_compaction(
     compacted = await compacting
 
     assert ("chat.done", "Four whole.") in setup.socket.chat()
-    assert compacted.through == await _sitting_starts(setup)
+    assert compacted.through == await _asked_at(setup)
     await _close(setup.socket, setup.linked)
 
 
@@ -693,8 +721,8 @@ async def test_the_compact_route_answers_with_the_summary_and_its_line(
         again = await client.post(f"/v1/gems/{setup.gem.id}/compact")
 
     assert answer.status_code == 200
-    assert answer.json() == {"summary": _SUMMARY, "through": await _sitting_starts(setup)}
-    # What came before is summed up now: nothing is left to compact.
+    assert answer.json() == {"summary": _SUMMARY, "through": await _asked_at(setup)}
+    # Everything is summed up now: nothing is left to compact.
     assert (again.status_code, again.json()) == (
         409,
         {"code": "conflict", "message": "nothing to compact"},

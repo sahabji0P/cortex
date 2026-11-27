@@ -96,7 +96,8 @@ class _Connected:
 
 
 async def test_the_requests_after_a_compaction_keep_every_byte() -> None:
-    # A deferred tool is loaded by a search in the part summed up, and called after it.
+    # A deferred tool is loaded by a search in the part summed up, and called after it,
+    # as a late result's stub would call it.
     setup = await _talked("One.")
     setup.chat._connections = _Connected()
     search = {"type": "function_call", "call_id": "s1", "name": SEARCH_TOOL, "arguments": "{}"}
@@ -121,12 +122,9 @@ async def test_the_requests_after_a_compaction_keep_every_byte() -> None:
     before, after = setup.llm.requests[-2:]
     assert json.dumps(after["input"]).startswith(json.dumps(before["input"])[:-1])
     assert (after["instructions"], after["tools"]) == (before["instructions"], before["tools"])
-    # The search is sent after the summary, so the tool it loaded is defined in the request.
-    assert [item.get("type") for item in after["input"][1:3]] == [
-        "tool_search_call",
-        "tool_search_output",
-    ]
-    assert [tool["name"] for tool in after["input"][2]["tools"]] == [_LOADED]
+    # Nothing before the line is sent, not even the search: the tools stay as they were.
+    assert "tool_search" not in json.dumps(after["input"])
+    assert called in after["input"]
     # On Anthropic, each request's messages start with all of the one before.
     sent = [
         (await _sent(setup, request["seq"]))["items"]
