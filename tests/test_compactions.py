@@ -8,10 +8,13 @@ compacts itself past is lowered, so a short conversation is over it.
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 from bson import ObjectId
 
@@ -20,7 +23,8 @@ from app.entities import compaction_ent
 from app.entities.compaction import ASK, Compacted, summed_up
 from app.entities.compaction_ent import CompactionEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
-from app.routers.gems.service import GemsServiceV1Class
+from app.main import app
+from app.routers.gems.service import GemsServiceV1Class, get_gems_service_v1
 from tests.test_chat import _chat, _close, _eventually_asked, _open, _said
 from tests.test_one_conversation import _hang_up, _said_and_heard, _spoken, _world
 from tests.test_voice_conversation import _completed, _delta
@@ -634,4 +638,99 @@ async def test_whoever_listens_is_told_after_a_reply_a_compaction_and_a_reset(
     setup.compactions.ignore(listener)
 
     assert told == [str(setup.gem.id)] * 3
+    await _close(setup.socket, setup.linked)
+
+
+# ---- the routes
+
+
+@asynccontextmanager
+async def _routes(setup: Any) -> AsyncIterator[httpx.AsyncClient]:
+    """A client of the app, whose gem routes reach `setup`'s gems."""
+    app.dependency_overrides[get_gems_service_v1] = lambda: GemsServiceV1Class(
+        setup.gems, setup.conversations, compactions=setup.compactions
+    )
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_the_compact_route_answers_with_the_summary_and_its_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    setup.llm.then(_summary())
+
+    async with _routes(setup) as client:
+        answer = await client.post(f"/v1/gems/{setup.gem.id}/compact")
+        again = await client.post(f"/v1/gems/{setup.gem.id}/compact")
+
+    assert answer.status_code == 200
+    assert answer.json() == {"summary": _SUMMARY, "through": await _sitting_starts(setup)}
+    # What came before is summed up now: nothing is left to compact.
+    assert (again.status_code, again.json()) == (
+        409,
+        {"code": "conflict", "message": "nothing to compact"},
+    )
+    await _close(setup.socket, setup.linked)
+
+
+async def test_the_compact_route_refuses_a_gem_in_a_call_and_one_that_is_not_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    setup.conversations.gem(str(setup.gem.id)).call = cast("Any", SimpleNamespace())
+
+    async with _routes(setup) as client:
+        in_call = await client.post(f"/v1/gems/{setup.gem.id}/compact")
+        missing = await client.post(f"/v1/gems/{ObjectId()}/compact")
+        no_context = await client.get(f"/v1/gems/{ObjectId()}/context")
+
+    assert (in_call.status_code, in_call.json()) == (
+        409,
+        {"code": "conflict", "message": "the gem is in a call"},
+    )
+    assert missing.status_code == no_context.status_code == 404
+    await _close(setup.socket, setup.linked)
+
+
+async def test_the_compact_route_says_why_a_summary_failed_and_stores_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    failed = SimpleNamespace(
+        type="response.failed",
+        response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
+    )
+    setup.llm.then([failed])
+
+    async with _routes(setup) as client:
+        answer = await client.post(f"/v1/gems/{setup.gem.id}/compact")
+
+    assert answer.status_code == 502
+    assert answer.json()["code"] == "upstream_failed"
+    assert "overloaded" in answer.json()["message"]
+    assert _of(await _log(setup), "context.compacted") == []
+    await _close(setup.socket, setup.linked)
+
+
+async def test_the_context_route_says_where_the_context_stands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    monkeypatch.setattr(compaction_ent, "COMPACT_OVER", 10)
+
+    async with _routes(setup) as client:
+        answer = await client.get(f"/v1/gems/{setup.gem.id}/context")
+
+    body = answer.json()
+    assert answer.status_code == 200
+    assert set(body) == {"tokens", "cache_until", "compact_from", "compaction"}
+    assert body["tokens"] > 10
+    assert datetime.fromisoformat(body["cache_until"]) == _START + timedelta(minutes=61)
+    assert body["compact_from"] == body["cache_until"]
+    assert body["compaction"] == "before_expiry"
     await _close(setup.socket, setup.linked)

@@ -95,6 +95,27 @@ class GemsModels:
 
                 messages: list["GemsModels.V1.Output.ChatMessage"]
 
+            class Compacted(BaseModel):
+                """A compaction: what came before `through` is sent as `summary` from now on."""
+
+                summary: str
+                # The number of the first log entry still sent whole.
+                through: int
+
+            class Context(BaseModel):
+                """Where a gem's context stands.
+
+                `tokens` is the estimated size of its next request. `cache_until` is when
+                its cache expires, and `compact_from` when to offer a compaction: null
+                while nothing was sent, and `compact_from` null too while the
+                conversation is under the size or `compaction` is `never`.
+                """
+
+                tokens: int
+                cache_until: datetime | None
+                compact_from: datetime | None
+                compaction: GemCompaction
+
             class Log(BaseModel):
                 """A page of a gem's log, oldest first.
 

@@ -549,6 +549,10 @@ def test_the_routes_are_the_ones_a_client_expects() -> None:
         ("GET", "/v1/gems/{gem_id}/chat", None),
         # Resets it: the gem starts again, knowing nothing from before.
         ("POST", "/v1/gems/{gem_id}/reset", 204),
+        # Compacts it: what came before its latest sitting is sent as a summary.
+        ("POST", "/v1/gems/{gem_id}/compact", None),
+        # Its size, when its cache expires, and when to offer a compaction.
+        ("GET", "/v1/gems/{gem_id}/context", None),
         ("GET", "/v1/gems/{gem_id}/log", None),
         ("GET", "/v1/gems/{gem_id}/log/{seq}", None),
         ("GET", "/v1/gems/{gem_id}/log/{seq}/sent", None),

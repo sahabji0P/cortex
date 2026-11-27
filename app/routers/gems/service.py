@@ -4,6 +4,7 @@ from typing import Annotated, Any
 from fastapi import Depends
 
 from app.entities import EntitiesRegistry
+from app.entities.compaction_ent import CompactionEntityClass
 from app.entities.connection_ent import ConnectionEntityClass
 from app.entities.conversation_ent import ConversationEntityClass, gem_key
 from app.entities.gem_ent import GemConfig, GemEntityClass
@@ -16,10 +17,12 @@ class GemsServiceV1Class:
         gems: GemEntityClass | None = None,
         conversations: ConversationEntityClass | None = None,
         connections: ConnectionEntityClass | None = None,
+        compactions: CompactionEntityClass | None = None,
     ) -> None:
         # Tests hand in their own. The app uses the ones the registry made at startup.
         self.gems = EntitiesRegistry.Gems if gems is None else gems
         self._conversations = conversations
+        self._compactions = compactions
         # Left out with gems handed in, a deleted gem is not taken out of any connection.
         self._connections = (
             EntitiesRegistry.Connections if gems is None and connections is None else connections
@@ -31,6 +34,12 @@ class GemsServiceV1Class:
         if self._conversations is None:
             return EntitiesRegistry.Conversations
         return self._conversations
+
+    @property
+    def compactions(self) -> CompactionEntityClass:
+        if self._compactions is None:
+            return EntitiesRegistry.Compaction
+        return self._compactions
 
     @staticmethod
     def _gem_out(gem: GemConfig) -> GemsModels.V1.Output.Gem:
@@ -97,6 +106,19 @@ class GemsServiceV1Class:
 
     async def reset_gem(self, gem_id: str) -> None:
         await self.conversations.reset(gem_id)
+
+    async def compact_gem(self, gem_id: str) -> GemsModels.V1.Output.Compacted:
+        compacted = await self.compactions.compact(gem_id)
+        return GemsModels.V1.Output.Compacted(summary=compacted.summary, through=compacted.through)
+
+    async def get_context(self, gem_id: str) -> GemsModels.V1.Output.Context:
+        context = await self.compactions.context(gem_id)
+        return GemsModels.V1.Output.Context(
+            tokens=context.tokens,
+            cache_until=context.cache_until,
+            compact_from=context.compact_from,
+            compaction=context.compaction,
+        )
 
     async def get_log(
         self, gem_id: str, *, before: int | None, limit: int
