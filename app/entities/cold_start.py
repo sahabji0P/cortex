@@ -15,8 +15,8 @@ one of these holds, the first that does giving the reason:
   from the cache.
 - `compaction`: the conversation was compacted since the last request (a
   `context.compacted` after its `request.sent`). The last request was the compaction's
-  own, and what it cached starts with what is now summed up, so no request reads it (see
-  `compaction.py`).
+  own, which caches nothing, and the cache the gem had starts with what is now summed
+  up, so no request reads it (see `compaction.py`).
 - `quiet`: the last one was sent longer ago than its provider keeps a cache
   (`CACHE_LIFETIME`).
 

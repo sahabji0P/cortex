@@ -83,7 +83,7 @@ def _summary(point: str = _POINT, *, used: bool = False, text: str | None = None
     if used:
         done.response.usage = SimpleNamespace(
             input_tokens=3000,
-            input_tokens_details=SimpleNamespace(cached_tokens=2800, cache_write_tokens=0),
+            input_tokens_details=SimpleNamespace(cached_tokens=0, cache_write_tokens=0),
             output_tokens=120,
             output_tokens_details=SimpleNamespace(reasoning_tokens=0),
         )
@@ -237,8 +237,8 @@ async def test_a_compaction_is_written_down_in_a_turn_of_its_own_with_its_cost(
     closed = _of(log, "turn.closed")[-1]
     assert (opened["by"], opened["mode"]) == ("compaction", "chat")
     assert done["usage"] == {
-        "input": 200,
-        "cache_read": 2800,
+        "input": 3000,
+        "cache_read": 0,
         "cache_write": 0,
         "output": 120,
         "thinking": 0,
@@ -787,8 +787,8 @@ async def test_after_a_compaction_no_cache_is_offered_until_the_next_request(
 
     assert failing.cache_until is not None
     assert failing.compact_from == failing.cache_until
-    # What the compaction's own request cached is read by no request after it: a second
-    # compaction would write it all again.
+    # The compaction's own request cached nothing, and no request after it reads the
+    # cache the gem had: nothing is offered until the next request.
     assert (compacted.cache_until, compacted.compact_from) == (None, None)
     assert compacted.compact_cost_usd == costs("6 Luna", compacted.tokens)[1]
     assert after.cache_until is not None

@@ -250,6 +250,8 @@ class CompactionEntityClass:
         stored = await self._conversations.load(gem_id)
         if not anything_new(stored.entries, stored.compacted):
             raise ConflictError("nothing to compact")
+        # Read before the request: the gem is held, so nothing the user says comes between.
+        said = await self._said(gem_id, stored.compacted)
         made = await self._chat.next_request(ready, key, stored, mode=stored.mode)
         turn = made.record.turn("compaction")
         items = [*made.sent, asked()]
@@ -285,7 +287,6 @@ class CompactionEntityClass:
         except ValueError as exc:
             _failed(turn, exc)
             raise UpstreamError(f"the summary could not be written: {exc}") from exc
-        said = await self._said(gem_id, stored.compacted, line)
         summary = written(fields, made.sent, said)
         # On its own, so that a write under way is finished even if this is stopped.
         writing = asyncio.ensure_future(
@@ -305,16 +306,16 @@ class CompactionEntityClass:
         turn.closed(finished=True, kept=None)
         return Compacted(summary, line)
 
-    async def _said(self, gem_id: ObjectId, compacted: Compacted | None, line: int) -> list[str]:
-        """What the user said in the part a summary replaces, in order.
+    async def _said(self, gem_id: ObjectId, compacted: Compacted | None) -> list[str]:
+        """What the user said in the part a summary is to replace, in order.
 
-        Their messages (`user.said`) still sent whole before `line`, the summary
-        request's: not an event, which is a user message too, and no line of ours.
+        Their messages (`user.said`) still sent whole: not an event, which is a user
+        message too, and no line of ours.
         """
         since = 0 if compacted is None else compacted.through
         return [
             entry.data.item["content"]
-            for entry in await self._store.load(gem_id, before=line)
+            for entry in await self._store.load(gem_id)
             if entry.kind == "user.said" and entry.seq >= since and "role" in entry.data.item
         ]
 

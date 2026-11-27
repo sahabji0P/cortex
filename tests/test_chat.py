@@ -311,8 +311,8 @@ class _LLM:
     starts with), which is the rule the history keeps: the one thing that may change is
     the user's open turn, the last item, which can gain a line. A test that expects the
     next request to start cold says so (`starts_cold`): results may then be expired. A
-    compaction's request, which ends with the line that asks for the summary, is no
-    start for the next: that line is not part of the conversation.
+    compaction's request, which ends with the message that asks for the summary, is no
+    start for the next: that message is not part of the conversation.
     """
 
     configured = True
