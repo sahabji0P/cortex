@@ -620,6 +620,11 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
 - **A summary is held to its shape, not its truth.** The schema keeps the headings, and
   a refusal fails the compaction, but nothing checks what the points say. A refusal
   written inside the fields would be stored.
+- **A change of settings is lost to a compaction that fails.** Its `settings.changed` is
+  written inside the compaction, which writes no cold start, so the next reply finds
+  the settings unchanged and starts cold only if the gem was quiet. So does a second
+  compaction that fails straight after one that was stored: its request comes after the
+  `context.compacted`, so the next reply is not cold for the compaction.
 - **One context with both speaking and writing in it has no recorded live run.** Whether
   a gem keeps to its call rules after a written stretch, and to its writing rules after
   a call, is to be tried out.
