@@ -408,16 +408,19 @@ Where the gem's context stands:
 ```json
 {
   "tokens": 104210,
-  "cache_until": "2026-11-27T09:05:00.000Z",
-  "compact_from": "2026-11-27T09:05:00.000Z",
+  "cache_until": "2026-11-27T09:05:00.123000Z",
+  "compact_from": "2026-11-27T09:05:00.123000Z",
   "compaction": "before_expiry"
 }
 ```
 
 - `tokens` is the estimated size of the gem's next request: the characters of its
   instructions and of what it would be sent (with the compaction in force, and the
-  expiry a cold start would apply now), divided by four.
-- `cache_until` is when the gem's cache expires: its last `request.sent` and how long its
+  expiry a cold start would apply now), divided by four. Its tools are not counted. It
+  can be well under what the provider counts: on a text dense with numbers it was
+  measured at about half.
+- `cache_until` is when the gem's cache expires, in UTC (ISO 8601, with fractions of a
+  second when there are any): its last `request.sent` and how long its
   provider keeps a cache (see [how long](models.md#caching)). Null while nothing was sent
   since the latest reset.
 - `compact_from` is when to start offering a compaction (the "Compact" pill):
