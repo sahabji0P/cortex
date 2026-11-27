@@ -453,6 +453,27 @@ async def test_a_round_with_tool_use_off_is_told_of_the_same_tools_on_both_provi
         assert on == off
 
 
+async def test_a_round_can_be_given_more_room_to_write_where_the_provider_needs_a_ceiling() -> None:
+    openai, claude = _OpenAI(), _Claude([_text("Hi."), _final()], [_text("Hi."), _final()])
+    for model in (
+        model_for(cast("OpenAIAdapterClass", openai), "6 Luna", [_SEARCH]),
+        model_for(cast("AnthropicAdapterClass", claude), "Haiku 5.5", [_SEARCH]),
+    ):
+        for max_tokens in (None, 32_000):
+            async for _ in model.round(
+                [{"role": "user", "content": "hi"}],
+                instructions="",
+                think=False,
+                max_tokens=max_tokens,
+            ):
+                pass
+
+    # A reply's ceiling, unless asked for more. OpenAI is sent none either way.
+    assert [request["max_tokens"] for request in claude.requests] == [8192, 32_000]
+    assert openai.requests[0] == openai.requests[1]
+    assert all("max_output_tokens" not in request for request in openai.requests)
+
+
 def test_what_a_model_needs_in_its_instructions_is_known_by_its_name() -> None:
     openai = model_for(cast("OpenAIAdapterClass", _OpenAI()), "6 Luna", [])
     claude = model_for(cast("AnthropicAdapterClass", _Claude()), "Haiku 5.5", [])

@@ -229,14 +229,22 @@ class Model(Protocol):
     own_instructions: str
 
     def round(
-        self, items: list[Item], *, instructions: str, think: bool, use_tools: bool = True
+        self,
+        items: list[Item],
+        *,
+        instructions: str,
+        think: bool,
+        use_tools: bool = True,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[ModelEvent]:
         """Run one model call over the history and yield what it produces.
 
         `think` asks for a little thinking before the reply. The model may call any of
         its tools, unless `use_tools` is False: then it is still told of them, so the
         request starts as every other does and a prompt cache holds, but it may only
-        write. A call that fails, is refused or stops early raises.
+        write. `max_tokens` is the most it may write, thinking included, where a
+        provider needs a ceiling; None for a reply's. A call that fails, is refused or
+        stops early raises.
         """
         ...
 
@@ -302,8 +310,15 @@ class _OpenAIModel:
                 self._tools.append(function)
 
     async def round(
-        self, items: list[Item], *, instructions: str, think: bool, use_tools: bool = True
+        self,
+        items: list[Item],
+        *,
+        instructions: str,
+        think: bool,
+        use_tools: bool = True,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[ModelEvent]:
+        # No ceiling is sent to this provider, so `max_tokens` is not needed.
         quiet, thinking = _OPENAI_EFFORT[self._name]
         stream = await self._llm.stream_response(
             model=self._name,
@@ -483,7 +498,13 @@ class _AnthropicModel:
         self._names = frozenset(tool.name for tool in tools)
 
     async def round(
-        self, items: list[Item], *, instructions: str, think: bool, use_tools: bool = True
+        self,
+        items: list[Item],
+        *,
+        instructions: str,
+        think: bool,
+        use_tools: bool = True,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[ModelEvent]:
         # `think` is not acted on. Each change of the thinking setting makes this
         # provider read the whole conversation again once, and the gain it was measured
@@ -499,7 +520,7 @@ class _AnthropicModel:
             model=self._name,
             messages=messages,
             system=instructions,
-            max_tokens=_MAX_REPLY_TOKENS,
+            max_tokens=_MAX_REPLY_TOKENS if max_tokens is None else max_tokens,
             thinking=settings.thinking,
             output_config=settings.output_config,
             tools=self._tools,
