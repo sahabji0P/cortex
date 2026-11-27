@@ -233,5 +233,6 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Connections: no run with a real model yet. Does each provider take every schema a server lists?
 - Many tools in a call: how much later is the first word?
 - A deferred tool's first use in a call costs one more model round. How long is that wait before the first word?
+- Does a gem search again for a deferred tool it has not loaded? Seen once: Haiku 5.5 loaded only `read_notes`, then said it could not add notes.
 - A connection's result is cut at 20,000 characters. Is that the right number?
 - Cold start: short results are kept. Keep that guard, or expire every result?
