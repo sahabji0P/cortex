@@ -21,6 +21,7 @@ a change here needs a matching change there:
 | `VoiceEvent` in `app/entities/voice_ent.py` | `src/protocol.rs` | A call's events, sent on the link with `call.` put before their type |
 | `/v1/gems` (`app/routers/gems`, `GemConfig` in `app/entities/gem_ent.py`) | `src/gem_routes.rs` | The gems and their configs |
 | `GET /v1/gems/{id}/chat`, `POST /v1/gems/{id}/reset` | `src/chat.rs` | A gem's conversation so far, a call's turns and the events it was told included, and resetting the gem so it starts again |
+| `POST /v1/gems/{id}/compact`, `GET /v1/gems/{id}/context` (`app/entities/compaction_ent.py`), and the frame `context.changed` on the link | Its "Compact" pill (the app's pull request follows this one) | Compacting a gem's conversation when the user asks, and where its context stands: its estimated size, when its cache expires, and when to offer a compaction |
 | `GET /v1/gems/{id}/log`, `GET /v1/gems/{id}/log/{seq}`, `GET /v1/gems/{id}/log/{seq}/sent`, and the frames `log.watch`, `log.unwatch` and `log.entry` on the link (the entries are written down in `app/entities/gem_log.py`) | `src/trajectory.rs`, `src/log_store.rs`, and Home's figures in `src/ui/stats.rs` | A gem's log: every turn, every request to the model with its tokens and cost, every tool call, every change of model, instructions or tools, and what the gem remembers, as entries of one shape in the order they happened |
 | `/v1/darbar` | `src/darbar.rs` | The Darbar text every gem is told first |
 | `/v1/connections` (`app/routers/connections`, `Connection` in `app/entities/connection_ent.py`), and the frame `connection.changed` on the link | `src/connections.rs`, `src/ui/connections_view.rs` | The tool servers gems can use, their tools, which gem may use which, whether a gem finds its tools by searching (`deferred`), the kinds of event each server serves (`events`), each server's own icons and website, and each one's sign-in: its state and when its pass runs out, a route that gives the address to open in the browser, and a frame when a sign-in changes |
@@ -40,7 +41,8 @@ What that means in practice:
   keeps its own copy of the app's playback schedule and judges interruptions by it, so
   if those rules change, `src/audio.rs` must too.
 - **A gem's config lives here.** The app shows and saves all of it: name, description,
-  picture, instructions, model, whether it speaks first, and its tools. Its voice and
+  picture, instructions, model, whether it speaks first, its tools, and when its
+  conversation is compacted (`compaction`). Its voice and
   speed are kept but no call uses them yet, so the app shows them as "coming soon".
   A gem made with blank instructions is given the default ones (how to talk in a call
   and how to write), and the app shows what comes back.
@@ -94,9 +96,11 @@ What that means in practice:
   entry there, written through `gem_log.py`, and never a store of its own. Adding a
   kind, or a field of one, is a change to the contract. Writing what happened never
   holds a reply up and never fails one. What the gem remembers must be stored: a reply
-  or a call that cannot store it fails. So must a `cache.cold`, which decides what the
-  model is sent. Nothing in the log but what the gem remembers
-  is ever sent to a model.
+  or a call that cannot store it fails. So must a `cache.cold` and a
+  `context.compacted`, which decide what the model is sent. Nothing in the log but what
+  the gem remembers is ever sent to a model, with one exception: the `summary` of the
+  compaction in force, text of ours that stands in for the remembered entries before
+  its `through`.
 - **Cost comes from the log.** No provider reports a cost, so the backend works it out
   from the tokens and its own price table (`app/entities/prices.py`), which is kept by
   hand. A cost is null when it is not known, never zero. The app's figures are sums of

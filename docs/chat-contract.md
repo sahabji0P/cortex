@@ -9,8 +9,10 @@ The names of the routes (`/v1/link`, `/v1/darbar`) are working names.
 ## Plain HTTP
 
 - Gems: `/v1/gems`, a gem's conversation, calls included, `GET /v1/gems/{gem_id}/chat`,
-  and [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset), which has it start again. A gem's
-  fields are in [Gems](gems.md#a-gems-config). Its config is version 3. A gem made with
+  [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset), which has it start again,
+  [`POST /v1/gems/{gem_id}/compact`](#post-v1gemsgem_idcompact), which sums up its older
+  part, and [`GET /v1/gems/{gem_id}/context`](#get-v1gemsgem_idcontext), where its context
+  stands. A gem's fields are in [Gems](gems.md#a-gems-config). Its config is version 4. A gem made with
   `instructions` blank or left out is given the default instructions, which come back in
   the answer; a change stores `instructions` as sent, so blank means none.
 - A gem's log, everything that happened with it: `GET /v1/gems/{gem_id}/log` (see
@@ -47,8 +49,9 @@ a `type`. Binary frames are a call's audio.
 
 | `type` | Fields | Meaning |
 | --- | --- | --- |
-| `link.ready` | `version` (7) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later. Version 4: a call's reply comes as words timed to its audio (`call.assistant.word`), and `call.assistant.delta` is gone. Version 5: `connection.changed`. Version 6: a gem's log can be watched (see [A gem's log](#a-gems-log)). Version 7: an event a gem watches for can wake it (`chat.event`), and `watch.changed` |
+| `link.ready` | `version` (8) | Sent once, as soon as the socket is open. Version 2 carries calls. Version 3: a search carries on after a cut, and its result is told later. Version 4: a call's reply comes as words timed to its audio (`call.assistant.word`), and `call.assistant.delta` is gone. Version 5: `connection.changed`. Version 6: a gem's log can be watched (see [A gem's log](#a-gems-log)). Version 7: an event a gem watches for can wake it (`chat.event`), and `watch.changed`. Version 8: `context.changed` |
 | `connection.changed` | `id` (a connection's id) | A connection's sign-in has changed: it needs a sign-in now, or one was just finished. Sent to every open socket. Read the connection again (`GET /v1/connections/{id}`) for its `sign_in` and its tools |
+| `context.changed` | `gem` (a gem's id) | What the gem would be sent next has changed: after a reply, a call, a compaction or a reset of it. Sent to every open socket. Read its context again (`GET /v1/gems/{gem}/context`, see [Compaction](#compaction)) |
 | `watch.changed` | `gem`, `watch` (their ids) | One of a gem's watches was added, removed, or changed as the app shows it (its state, delivery, refused posts or signing). Sent to every open socket. Read the gem's watches again (`GET /v1/gems/{gem}/watches`): a removed one is not there (see [Watches](#watches)) |
 | `chat.result` | `gem`, `text` | A search, or another tool call, the gem started in an earlier reply has come back, and a reply about it follows, unasked. `text` is what the search looked up, as its `chat.tool` said, or "" |
 | `chat.event` | `gem`, `text` | Something one of the gem's watches waits for has happened, and a reply about it follows, unasked (see [Events](#events)). `text` says what came in, in a short line: the watch, as the gem described it when it made it, and what it caught, as "new commits on the main branch: push". The wording is not settled |
@@ -376,6 +379,76 @@ and its log stay. No body. 204 when it is done.
   time again, as a new gem's first is.
 - What a tool did (a message sent, a file written) is not undone: only what the gem
   knows is reset.
+- The compaction in force ends with it (see [Compaction](#compaction)).
+
+## Compaction
+
+A gem's conversation only grows. Past a size, its older part is summed up: from then
+on, the model is sent a summary in its place, and everything after it whole. What is
+stored does not change, and the history shows everything. The summary is written by the
+gem's own model, from the same request the gem's next reply would be sent, so while its
+cache is warm the summary reads it. It is written down in the log
+([`context.compacted`](#a-compaction)).
+
+When, is the gem's `compaction` (see [Gems](gems.md#a-gems-config)):
+
+- `before_expiry`, the default: after a reply or a call, if the conversation is over
+  100,000 estimated tokens, the backend compacts it by itself 2 minutes before its cache
+  expires. A message, a call, an event or a background result that comes first stops
+  it; a message or a call cuts it while it runs, and nothing is stored of it. It never
+  runs during a call, never speaks, and sends no frame but `context.changed`. A restart
+  of the backend loses it: the app's offer is the fallback.
+- `on_return`: only when the user asks.
+- `never`: the app does not offer it. Asked all the same, it is done.
+
+### `GET /v1/gems/{gem_id}/context`
+
+Where the gem's context stands:
+
+```json
+{
+  "tokens": 104210,
+  "cache_until": "2026-11-27T09:05:00.000Z",
+  "compact_from": "2026-11-27T09:05:00.000Z",
+  "compaction": "before_expiry"
+}
+```
+
+- `tokens` is the estimated size of the gem's next request: the characters of its
+  instructions and of what it would be sent (with the compaction in force, and the
+  expiry a cold start would apply now), divided by four.
+- `cache_until` is when the gem's cache expires: its last `request.sent` and how long its
+  provider keeps a cache (see [how long](models.md#caching)). Null while nothing was sent
+  since the latest reset.
+- `compact_from` is when to start offering a compaction (the "Compact" pill):
+  `cache_until`, if `tokens` is over 100,000 and `compaction` is not `never`. Otherwise
+  null. Before it, a gem set to `before_expiry` compacts itself.
+- `compaction` is the gem's setting.
+- A gem that is not there is a 404.
+
+Read it again on `context.changed`.
+
+### `POST /v1/gems/{gem_id}/compact`
+
+Compacts the gem's conversation now, as the user asks. No body. Allowed whenever the
+gem is between turns, its cache warm or cold. 200 when it is done:
+
+```json
+{"summary": "…", "through": 412}
+```
+
+`summary` is what the model is sent from now on in place of everything before
+`through`, the `seq` of the first entry still sent whole.
+
+- A reply being written is not cut: the compaction starts once it is done. A message
+  sent while it runs waits, and is answered after it, from the summary.
+- While the gem is in a call it is refused: a 409, `{"code": "conflict", "message": "the
+  gem is in a call"}`.
+- With nothing before where its line would fall, it is refused: a 409,
+  `{"code": "conflict", "message": "nothing to compact"}`.
+- If the summary could not be written: a 502, `{"code": "upstream_failed", "message":
+  …}` with the reason. Nothing changes.
+- A gem that is not there is a 404.
 
 ## A gem's log
 
@@ -409,7 +482,10 @@ ended, not as running.
 
 Six kinds are what the gem remembers. The gem's conversation is these entries since the
 latest `gem.reset`, in the order of `seq`, and nothing else: every reply and every call
-starts from them, and no model is ever sent anything else from the log. Each has the same fields:
+starts from them, and no model is ever sent anything else from the log, with one
+exception. The `summary` of the compaction in force is text of ours that reaches the
+model without being a remembered entry: it stands in for the remembered entries before
+its `through` (see [A compaction](#a-compaction)). Each has the same fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -442,9 +518,10 @@ Every other kind is something that happened. No model is ever sent them.
 | `watch.added` | `watch`, `source`, `about` | The gem made a watch (see [Watches](#watches)). `watch` is its id, `source` is `mcp`, `webhook` or `timer`, and `about` what it is for, in the gem's words. No turn. Never its address or secret |
 | `watch.removed` | `watch`, `by` | A watch was removed: `by` is `gem` (with its `unwatch` tool) or `user` (in the app, or when the gem was reset). No turn. A deleted gem's watches go with its log, and write nothing |
 | `gem.reset` | none | The user reset the gem (see [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset)). No turn. The gem knows nothing from before it: its conversation is the remembered entries after the latest one |
-| `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) `background_result` (results of calls that went on in the background are to be told, with nothing new from the user) or `event` (events that came in are to be told, with nothing new from the user; when results and events are told together, `event`). `mode` is `call` or `chat` |
+| `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) `background_result` (results of calls that went on in the background are to be told, with nothing new from the user) or `event` (events that came in are to be told, with nothing new from the user; when results and events are told together, `event`). Or `compaction`: no reply, but the summary of a compaction, which nobody is shown (see [A compaction](#a-compaction)). `mode` is `call` or `chat` |
 | `cache.cold` | `reason`, `before` | The conversation starts cold: from here on, long tool results before `before` are sent expired (see [A cold start](#a-cold-start)). `reason` is `quiet` (the provider's cache is taken to have gone) or `settings` (the model, the instructions or the tools changed). `before` is the `seq` of the last `request.sent` before it. No turn. Written just after the `settings.changed` it follows, if any: in writing before the reply's `turn.opened`, in a call before the call's first line |
 | `event.came` | `watch_id`, `source`, `name`, `about`, `data`, `happened_at`, `event_id` | An event came in for one of the gem's watches (see [An event](#an-event)). No turn. `watch_id` is the watch that caught it. `source` is where it came from: `mcp`, `webhook` or `timer` (not who wrote it, as on what the gem remembers). `name` is what happened, as its source names it, or `watch.failing`, `watch.paused`, `watch.recovered` or `watch.ended` when it is the watch's own: its state changed, or the user removed it (see [Watches](#watches)). `about` is what the watch is for, in the gem's words. `data` is what happened, as text, cut to 20,000 characters (empty for a timer and for `watch.recovered`). `happened_at` is when it happened, by its source, or when it came in. `event_id` is the source's own id for it, or null: an event whose watch and `event_id` are already written down is not written again, so a source that delivers it again does not wake the gem twice. Like a `gem.reset`, it is never lost: it is stored before the event counts as come in |
+| `context.compacted` | `summary`, `through`, `by` | The conversation was compacted (see [A compaction](#a-compaction)). From here on, the remembered entries before `through` are sent as `summary`. `by` is `user` or `auto` (before the cache expired). In the turn of the request that wrote the summary. Like a `gem.reset`, it is never lost: the compaction counts only once it is stored |
 | `settings.changed` | any of `model`, `instructions`, `tools` | What the gem's requests are made with differs from what was last written down. Only the parts that changed are there, each in full (see below). Written before what it applies to: in writing, before the reply's `turn.opened`; in a call, just after `call.opened`, before the call's first line. Then it has no turn, and holds from there on. A change found later, at a request, has that request's turn (see below) |
 | `request.sent` | `request`, `attempt`, `think`, `count` | A request went to the model. `request` is its number for this gem. `attempt` is always 1 for now: a request the provider's library tries again by itself is not seen. `think` is whether the model was asked to think first. `count` is how many items it was sent (see below) |
 | `request.done` | `request`, `attempt`, `outcome`, `text`, `calls`, `first_token_at`, `usage`, `cost_usd`, `priced`, `error` | How that request ended (see below) |
@@ -455,14 +532,17 @@ Every other kind is something that happened. No model is ever sent them.
 
 **What a request was sent.** A request was sent every remembered entry before it in the
 log since the latest `gem.reset` before it, in order of `seq`, and nothing else:
-everything the gem remembers is added before the request that carries it. `count` is
-how many items that was. Each is sent as stored, except that a long tool result before
-the `before` of the latest `cache.cold` since that reset is sent expired (see
-[A cold start](#a-cold-start)). So to show what request N was sent, ask
-`GET /v1/gems/{gem_id}/log/{seq}/sent`, or take the remembered entries between that
-reset (or the start) and its `request.sent` and expire them so. If they do not come to
-`count`, an entry before it was lost. Besides its items, a request is sent the
-instructions and the tools of the latest `settings.changed` before it.
+everything the gem remembers is added before the request that carries it. Each is sent
+as stored, except that a long tool result before the `before` of the latest
+`cache.cold` since that reset is sent expired (see [A cold start](#a-cold-start)), and
+that with a `context.compacted` since that reset, the entries before the `through` of
+the latest one are not sent: its `summary` is, as one line of ours, first (see
+[A compaction](#a-compaction)). A compaction's own request is sent one more line of ours
+after them all: the one that asks for the summary. `count` is how many items that was,
+those lines included. So to show what request N was sent, ask
+`GET /v1/gems/{gem_id}/log/{seq}/sent`. If its items do not come to `count`, an entry
+before it was lost. Besides its items, a request is sent the instructions and the tools
+of the latest `settings.changed` before it.
 
 ### A cold start
 
@@ -537,6 +617,34 @@ it. The first reply or call of a gem writes all three. One is written even when 
 request follows: a call in which nothing is said leaves `call.opened`,
 `settings.changed`, the call's first lines (`note.written`) and `call.closed`.
 
+### A compaction
+
+A compaction (see [Compaction](#compaction)) sums up the older part of the conversation.
+It is a turn of its own: `turn.opened` with `by` `compaction`, the request that wrote
+the summary (`request.sent` and `request.done`, with its tokens and its cost), then
+`context.compacted`, then `turn.closed`. It may follow a `settings.changed` and a
+`cache.cold`, as a reply would. The request was sent what the gem's next reply would
+be, then a line of ours that asks for a summary under fixed headings, with tool use off.
+Its `request.done` `text` is what the model wrote; the `summary` is that, and after it a
+section of the backend's own: identifiers copied exactly from the part it replaces
+(addresses, ids, amounts), the latest 50 at most.
+
+From the latest `context.compacted` since the latest reset, every request is sent its
+`summary`, as one line of ours, then every remembered entry from its `through` on, with a
+cold start's expiry still applied. A request sent so starts with the same bytes as the
+one before it, until the next compaction or cold start.
+
+Where `through` falls: at the start of the latest sitting, which begins after the latest
+`cache.cold` since the reset (or at the start); moved on, to keep at most about 20,000
+estimated tokens whole, the newest; never before the `through` of the compaction in force.
+It always falls at the start of a turn: at a `user.said` or an `event.received`, or at
+the lines of ours (`note.written`) just before it, and never between a tool call and its
+result. With nothing remembered between the compaction in force (or the start) and
+there, there is nothing to compact.
+
+A failed request leaves its turn `failed` and no `context.compacted`. A compaction cut
+by a message or a call leaves its request and turn `cut`, and none either.
+
 ### The time
 
 The date and the time are not in the instructions, which stay the same from day to day
@@ -552,7 +660,8 @@ known.` A zone that cannot be read never refuses a frame. One is written:
 
 - in a call, as it opens, straight after the call's opening line, before a greeting;
 - in writing, before a message, when none has been written yet, the last is more than
-  ten minutes old, or the date has changed since in the user's zone. It is the last thing
+  ten minutes old, or the date has changed since in the user's zone. A line a
+  compaction summed up does not count: the last is the last one still sent whole. It is the last thing
   before the reply's `turn.opened`: after the `settings.changed` the reply writes, after
   the `chat-line` that follows a call, and after late results told with the message. A
   reply with no message (a late result told) gets none.
@@ -673,8 +782,9 @@ differ in what a failed write means:
   cannot be, the call ends in `call.failed` ("the conversation could not be stored") or
   the reply in `chat.error` ("the reply could not be stored: …"), and what could not be
   stored is dropped. It is never stored later.
-- **A `gem.reset` and an `event.came`** are written on their own, at once, and the reset
-  or the event counts only once it is stored. One that cannot be is never written.
+- **A `gem.reset`, a `context.compacted` and an `event.came`** are written on their own,
+  at once, and the reset, the compaction or the event counts only once it is stored. One
+  that cannot be is never written: a compaction then fails, and nothing changes.
 
 So a number can be missing from the log, and an entry sent on the socket may never be
 read over the route.
@@ -700,8 +810,10 @@ One entry, in full. A 404 if the gem or the entry is not there.
 Everything the request written down as entry `seq` (a `request.sent`) was sent, read
 from the log by the backend: the `item` of every remembered entry before it since the
 latest reset, in order, as sent (tool results before the line of the latest
-`cache.cold` before it are expired, see [A cold start](#a-cold-start)), and the settings
-in force.
+`cache.cold` before it are expired, see [A cold start](#a-cold-start); with a
+`context.compacted` before it, its summary first and nothing before its `through`, see
+[A compaction](#a-compaction); for a compaction's own request, the line that asks for
+the summary last), and the settings in force.
 
 ```json
 {
