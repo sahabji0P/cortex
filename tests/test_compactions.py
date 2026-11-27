@@ -26,7 +26,22 @@ from app.entities.darbar_ent import DarbarEntityClass
 from app.main import app
 from app.routers.gems.service import GemsServiceV1Class, get_gems_service_v1
 from app.routers.link.service import LinkServiceV1Class
-from tests.test_chat import _chat, _close, _eventually_asked, _open, _said
+from tests.test_chat import (
+    _WEATHER,
+    _chat,
+    _close,
+    _cut_while_searching,
+    _eventually_asked,
+    _looks,
+    _open,
+    _said,
+    _Searches,
+)
+from tests.test_gem_events import _came_in
+from tests.test_link_call import _close as _close_link
+from tests.test_link_call import _open as _open_link
+from tests.test_link_call import _Setup as _CallSetup
+from tests.test_link_call import _Voice
 from tests.test_one_conversation import _hang_up, _said_and_heard, _spoken, _world
 from tests.test_voice_conversation import _completed, _delta
 from tests.time_lines import TIME_LINE, set_clock
@@ -463,6 +478,38 @@ async def test_a_message_sent_during_a_compaction_waits_for_it(
     await _close(setup.socket, setup.linked)
 
 
+async def test_a_call_started_during_a_compaction_waits_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    voice = _Voice()
+    calling = _CallSetup(setup, voice)
+    socket, linked = await _open_link(calling)
+    gate = asyncio.Event()
+    setup.llm.then([gate, *_summary()])
+    compacting = asyncio.create_task(setup.compactions.compact(str(setup.gem.id)))
+    await _eventually_asked(setup, 4)
+
+    calling.start(socket)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    # It is not refused, and does not open on the conversation while it is compacted.
+    assert not [f for f in socket.frames if f["type"] in ("call.ready", "call.refused")]
+    assert voice.made == []
+    gate.set()
+    compacted = await compacting
+    await socket.until("call.ready")
+
+    # The compaction was not cut: it is stored, and its turn finished.
+    log = await _log(setup)
+    [stored] = _of(log, "context.compacted")
+    [closed] = [e for e in _of(log, "turn.closed") if e["turn"] == stored["turn"]]
+    assert (stored["through"], closed["outcome"]) == (compacted.through, "finished")
+    assert len(voice.made) == 1
+    await _close_link(socket, linked)
+    await _close(setup.socket, setup.linked)
+
+
 async def test_a_reply_being_written_is_not_cut_by_a_compaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -562,6 +609,49 @@ async def test_a_compaction_set_to_run_is_stopped_by_a_message(
     assert sleeper.stopped == 1
     assert len(sleeper.waits) == 2  # set again after the reply
     await _close(setup.socket, setup.linked)
+
+
+@pytest.mark.usefixtures("_small")
+async def test_a_compaction_set_to_run_is_stopped_by_an_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeper = _Sleeper()
+    setup = await _a_new_sitting(monkeypatch, sleep=sleeper)
+    setup.llm.then(_said("New commits are in."))
+
+    await _came_in(setup, "push")
+    await setup.socket.until("chat.done", 4)
+    await _quiet(setup.compactions)
+
+    assert sleeper.stopped == 1
+    assert len(sleeper.waits) == 2  # set again after the reply to the event
+    assert _of(await _log(setup), "context.compacted") == []
+    await _close(setup.socket, setup.linked)
+
+
+@pytest.mark.usefixtures("_small")
+async def test_a_compaction_set_to_run_is_stopped_by_a_late_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_clock(monkeypatch, _START)
+    searches = _Searches(_WEATHER)
+    sleeper = _Sleeper()
+    setup = await _chat(_looks(), _said("Noon."), _said("It is sunny in Pune."), search=searches)
+    compactions = await _compactions(setup, sleeper)
+    socket, linked = await _open(setup.service())
+    # The search outlives the reply it was called in: its result comes later.
+    await _cut_while_searching(setup, socket)
+    await _quiet(compactions)
+    assert (len(sleeper.waits), sleeper.stopped) == (1, 0)
+
+    searches.gates[_WEATHER].set()
+    await socket.until("chat.done", 2)
+    await _quiet(compactions)
+
+    assert ("chat.result", _WEATHER) in socket.chat()
+    assert sleeper.stopped == 1
+    assert len(sleeper.waits) == 2  # set again after the reply to the result
+    await _close(socket, linked)
 
 
 @pytest.mark.usefixtures("_small")
