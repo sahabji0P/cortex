@@ -253,6 +253,10 @@ A sign-in server's metadata has to name the server it was found for, as a plain 
 but a root address with and without its trailing slash is one server: Gmail's metadata
 names `https://accounts.google.com/`, which says it without.
 
+To try it, `scripts/sign_in_demo_server.py` runs such a server on this machine: a notes
+server whose `read_notes` anyone may use and whose `add_note` asks for a sign-in, with a
+sign-in server of its own that lets Cortex register itself.
+
 A sign-in server that takes only clients registered by hand (Google's has no
 `registration_endpoint`) is kept all the same, so the connection says it needs a
 sign-in. Beginning one is a 502 until Cortex can be given a client of the user's own.
