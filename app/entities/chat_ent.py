@@ -415,6 +415,7 @@ class ChatEntityClass:
             kept.writer = None
         # Results that came in while it was written are told now.
         self._tell_when_quiet(key)
+        self._conversations.settled(key, "reply")
         self._conversations.let_go(key)
 
     def joined(self, deliver: Deliver) -> None:

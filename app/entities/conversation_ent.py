@@ -18,11 +18,16 @@ memory, for each gem, is a `GemConversation`:
   in the call if one holds the gem, and in writing otherwise, and it wakes a gem that is
   quiet. They are written down in the log as they come, so what waits is read again from
   it when needed.
+- a compaction set to run before the gem's cache expires, until it runs (see
+  `compaction_ent.py`). Anything that takes the gem first stops it.
 
 The user can reset a gem (`reset`): it starts again, knowing nothing from before. A
 reset takes the gem as a reply does, so a message sent meanwhile is answered by the
 gem as it is after the reset. Events still waiting are dropped with the rest, and
 whoever asked is told of the reset (`when_reset`), as the gem's watches are.
+
+Whoever asks is told each time a gem is let go after a reply, a call, a reset or a
+compaction (`when_settled`): what the gem would be sent next has changed.
 
 Every reply in writing, and every call when it starts, checks first whether the
 conversation starts cold, and is sent it as the latest cold start has it sent (`sent`,
@@ -44,7 +49,7 @@ from typing import Any, Literal, Protocol
 from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError
-from app.entities.cold_start import Cache, Numbered, cold
+from app.entities.cold_start import CACHE_LIFETIME, Cache, Numbered, cold
 from app.entities.compaction import Compacted, asked, view
 from app.entities.conversation_store import EVENT_RECEIVED, ConversationStoreClass, Remembered
 from app.entities.gem_ent import GemEntityClass
@@ -60,10 +65,15 @@ __all__ = [
     "ConversationEntityClass",
     "GemConversation",
     "Message",
+    "Settled",
     "Stored",
     "Writer",
     "gem_key",
+    "numbered",
 ]
+
+# What a gem was let go after.
+type Settled = Literal["reply", "call", "reset", "compaction"]
 
 # The result a call lost to a restart is given, so its placeholder does not promise a
 # result for ever. THE OWNER HAS NOT RULED ON THIS WORDING.
@@ -148,15 +158,44 @@ class GemConversation:
         # the gem woken, in the same way as a late result.
         self.events = PendingEvents(self._came)
         self._written = written
-        # The reply being written to the gem, until it is stored: one at a time.
-        self.writer: Writer | None = None
-        # The call that holds the gem, from its opening until it is stored.
-        self.call: Caller | None = None
+        # A compaction set to run before the gem's cache expires, until it runs.
+        self.auto: asyncio.Task[None] | None = None
+        self._writer: Writer | None = None
+        self._call: Caller | None = None
+
+    @property
+    def writer(self) -> Writer | None:
+        """The reply being written to the gem, until it is stored: one at a time."""
+        return self._writer
+
+    @writer.setter
+    def writer(self, writer: Writer | None) -> None:
+        # Whatever takes the gem stops a compaction that was set to run.
+        if writer is not None:
+            self.stop_auto()
+        self._writer = writer
+
+    @property
+    def call(self) -> Caller | None:
+        """The call that holds the gem, from its opening until it is stored."""
+        return self._call
+
+    @call.setter
+    def call(self, call: Caller | None) -> None:
+        if call is not None:
+            self.stop_auto()
+        self._call = call
+
+    def stop_auto(self) -> None:
+        """Stop the compaction set to run before the cache expires, if one is."""
+        if self.auto is not None:
+            self.auto.cancel()
+            self.auto = None
 
     @property
     def idle(self) -> bool:
         """Whether nothing of it needs keeping."""
-        held = self.writer is not None or self.call is not None
+        held = self.writer is not None or self.call is not None or self.auto is not None
         return not held and not self.late.pending and not self.events.pending
 
     def _came(self) -> None:
@@ -188,6 +227,8 @@ class ConversationEntityClass:
         self._quiet: Callable[[str], None] = _nobody
         # Told the id of each gem that is reset, once the reset is stored.
         self._resets: list[Callable[[ObjectId], Awaitable[None]]] = []
+        # Told the key of each gem that is let go, and after what.
+        self._settled: list[Callable[[str, Settled], None]] = []
 
     def tell_results_with(self, quiet: Callable[[str], None]) -> None:
         """Who tells a gem's late results: `quiet` is given the gem's key when one comes in.
@@ -203,6 +244,22 @@ class ConversationEntityClass:
         The reset is over only once each is done, and fails if one raises.
         """
         self._resets.append(told)
+
+    def when_settled(self, told: Callable[[str, Settled], None]) -> None:
+        """Tell `told` each gem that is let go after a reply, a call, a reset or a compaction.
+
+        It is told the gem's key, at once: it must not raise, and must not wait.
+        """
+        self._settled.append(told)
+
+    def settled(self, key: str, after: Settled) -> None:
+        """The gem is let go after `after`: tell whoever asked."""
+        for told in self._settled:
+            told(key, after)
+
+    def wake(self, key: str) -> None:
+        """Tell the gem's late results and events that wait, if nothing holds it."""
+        self._quiet(key)
 
     def gem(self, key: str) -> GemConversation:
         """What is kept of a gem's conversation, made if there is none yet."""
@@ -234,6 +291,7 @@ class ConversationEntityClass:
             return
         kept.call = None
         self._quiet(key)
+        self.settled(key, "call")
         self.let_go(key)
 
     async def reset(self, gem_id: str) -> None:
@@ -272,6 +330,7 @@ class ConversationEntityClass:
                 kept.writer = None
                 # An event that came after the reset, while it held the gem, wakes it now.
                 self._quiet(key)
+            self.settled(key, "reset")
             self.let_go(key)
 
     async def messages(self, gem_id: str) -> list[Message]:
@@ -327,7 +386,7 @@ class ConversationEntityClass:
             None,
         )
         stored = Stored(
-            _numbered(found), mode, last_time, await self._store.cache(gem_id), compacted
+            numbered(found), mode, last_time, await self._store.cache(gem_id), compacted
         )
         lost = self._lost(str(gem_id), found, told)
         return await self.add(gem_id, stored, stubs(lost, "lost-call"), stored.mode)
@@ -433,7 +492,7 @@ class ConversationEntityClass:
         remembered = await self._store.load(found, before=seq)
         cache = await self._store.cache(found, before=seq)
         compacted = await self._store.compacted(found, before=seq)
-        items = view(_numbered(remembered), cache.before, compacted)
+        items = view(numbered(remembered), cache.before, compacted)
         if request.turn is not None:
             opened = await self._store.opened(found, request.turn)
             if opened is not None and opened.data.get("by") == "compaction":
@@ -444,6 +503,19 @@ class ConversationEntityClass:
             "exact": len(items) == request.data.get("count"),
             **await self._settings(found, upto=seq),
         }
+
+    async def cache_until(self, gem_id: ObjectId, cache: Cache) -> datetime | None:
+        """When the gem's cache expires: its last request's time and its provider's lifetime.
+
+        The provider is the one of the model in force when that request was sent. None
+        if no request was sent since the gem was last reset.
+        """
+        if cache.sent is None or cache.sent_at is None:
+            return None
+        model = (await self._settings(gem_id, upto=cache.sent))["model"]
+        if model is None or model.get("provider") not in CACHE_LIFETIME:
+            return None
+        return cache.sent_at + CACHE_LIFETIME[model["provider"]]
 
     async def _settings(self, gem_id: ObjectId, *, upto: int) -> dict[str, Any]:
         """The model, instructions and tools in force before entry `upto`, as last written."""
@@ -530,7 +602,7 @@ class ConversationEntityClass:
             kept.events.stale = False
 
 
-def _numbered(found: Sequence[Remembered]) -> list[Numbered]:
+def numbered(found: Sequence[Remembered]) -> list[Numbered]:
     """Stored entries, with what decides how each is sent."""
     return [Numbered(e.seq, e.data.item, e.data.mark, e.data.delivers) for e in found]
 
