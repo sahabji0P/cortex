@@ -2,8 +2,7 @@
 A gem's config: one object that says who a gem is, kept in the `Gems` collection.
 
 It is stored in the database but treated like a config file. It is the one home of a
-gem: what a call or a chat acts on (its name, instructions, model, tools, and when its
-conversation is compacted), and what the
+gem: what a call or a chat acts on (its name, instructions, model, tools), and what the
 app shows of it and wants spoken (its description, picture, voice and speed), which the
 backend only keeps. Anything new is added by raising `GEM_CONFIG_VERSION` and writing one
 step in `upgrade_gem_document` that brings older documents up to the new shape.
@@ -24,7 +23,6 @@ from pydantic_mongo import PydanticObjectId
 from app.adapters.docdb_adp import DocDBAdapterClass
 from app.core.errors import NotFoundError
 from app.core.times import UtcDatetime
-from app.entities.compaction import Setting
 from app.entities.conversation_store import ConversationStoreClass
 
 # The one place the model names are imported. Everything else uses `GemModelName`.
@@ -32,11 +30,9 @@ from app.entities.model import MODELS, ModelName
 from app.entities.tools import GEM_TOOL_NAMES
 
 __all__ = [
-    "DEFAULT_GEM_COMPACTION",
     "DEFAULT_GEM_INSTRUCTIONS",
     "DEFAULT_GEM_TOOLS",
     "GEM_CONFIG_VERSION",
-    "GemCompaction",
     "GemConfig",
     "GemDescription",
     "GemEntityClass",
@@ -53,7 +49,7 @@ __all__ = [
 ]
 
 # The version of the config's shape. Raise it when a field is added, renamed or changed.
-GEM_CONFIG_VERSION = 4
+GEM_CONFIG_VERSION = 3
 
 # The models a gem can be answered by: the same names a call accepts.
 type GemModelName = ModelName
@@ -61,11 +57,6 @@ _MODEL_NAMES = frozenset(info.name for info in MODELS)
 
 # The tools a new gem may use, when it is not told which.
 DEFAULT_GEM_TOOLS: tuple[str, ...] = ("web_search",)
-
-# When a gem's conversation is compacted (see `compaction.py`): by itself before its
-# cache expires, and when the user asks.
-type GemCompaction = Setting
-DEFAULT_GEM_COMPACTION: GemCompaction = "before_expiry"
 
 # The instructions a new gem is given when it is made without any: how to talk in a call
 # and how to write. They are the gem's own from then on, for the user to change or remove.
@@ -181,16 +172,10 @@ def _version_2_to_3(document: dict[str, Any]) -> dict[str, Any]:
     return {**document, "instructions": instructions}
 
 
-def _version_3_to_4(document: dict[str, Any]) -> dict[str, Any]:
-    """Version 4 added when the gem's conversation is compacted."""
-    return {"compaction": DEFAULT_GEM_COMPACTION, **document}
-
-
 # One step per version: the step under key N takes a document from version N to N + 1.
 _UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     1: _version_1_to_2,
     2: _version_2_to_3,
-    3: _version_3_to_4,
 }
 
 
@@ -241,10 +226,6 @@ class GemConfig(BaseModel):
     speaks_first: bool = False
     # The tools this gem may use, by name.
     tools: GemTools = Field(default_factory=lambda: list(DEFAULT_GEM_TOOLS))
-    # When its conversation is compacted: `before_expiry` (by itself, while its cache is
-    # still warm, and when the user asks), `on_return` (only when the user asks), or
-    # `never`.
-    compaction: GemCompaction = DEFAULT_GEM_COMPACTION
     # The voice its replies are spoken in, and how fast: 1.0 is normal speed. Kept here
     # so they have one home. A call does not use them yet.
     voice: GemVoice | None = None
@@ -278,7 +259,6 @@ _EDITABLE = frozenset(
         "model",
         "speaks_first",
         "tools",
-        "compaction",
         "voice",
         "speech_speed",
     }
@@ -316,7 +296,6 @@ class GemEntityClass:
         model: GemModelName | None = None,
         speaks_first: bool = False,
         tools: list[str] | None = None,
-        compaction: GemCompaction = DEFAULT_GEM_COMPACTION,
         voice: str | None = None,
         speech_speed: float = 1.0,
     ) -> GemConfig:
@@ -337,7 +316,6 @@ class GemEntityClass:
                 "tools": _TOOLS_TO_SAVE.validate_python(
                     list(DEFAULT_GEM_TOOLS) if tools is None else tools
                 ),
-                "compaction": compaction,
                 "voice": voice,
                 "speech_speed": speech_speed,
                 "created_at": now,

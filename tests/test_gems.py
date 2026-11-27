@@ -145,7 +145,6 @@ async def test_a_new_gem_has_the_defaults() -> None:
     assert gem.model is None
     assert gem.speaks_first is False
     assert gem.tools == ["web_search"]
-    assert gem.compaction == "before_expiry"
     assert gem.created_at == gem.updated_at
 
 
@@ -385,24 +384,19 @@ def test_a_version_2_config_has_the_default_instructions_after_its_own(
     assert gem.instructions == instructions
 
 
-@pytest.mark.parametrize("version", [1, 2, 3])
-def test_an_older_config_is_compacted_before_its_cache_expires(version: int) -> None:
-    gem = GemConfig.model_validate(_stored(version=version))
+async def test_a_gem_has_no_say_in_when_it_is_compacted() -> None:
+    # Only the user compacts a gem. A config or a patch that names a setting for it, as
+    # an app built for one may send, loads and changes the rest all the same.
+    service = GemsServiceV1Class(_gems()[0])
+    made = await service.create_gem(GemsModels.V1.Input.CreateGem(name="Gem Two"))
 
-    assert gem.version == GEM_CONFIG_VERSION
-    assert gem.compaction == "before_expiry"
+    patch = GemsModels.V1.Input.UpdateGem.model_validate({"compaction": "never", "name": "Two"})
+    changed = await service.update_gem(made.id, patch)
 
-
-async def test_when_a_gem_is_compacted_is_made_changed_and_checked() -> None:
-    gems, docdb = _gems()
-
-    made = await gems.create(name="Gem Two", compaction="on_return")
-    changed = await gems.update(str(made.id), {"compaction": "never"})
-
-    assert made.compaction == "on_return"
-    assert changed.compaction == docdb.documents[made.id]["compaction"] == "never"
-    with pytest.raises(ValidationError):
-        await gems.update(str(made.id), {"compaction": "sometimes"})
+    assert GEM_CONFIG_VERSION == 3
+    assert "compaction" not in changed.model_dump()
+    assert changed.name == "Two"
+    assert "compaction" not in GemConfig.model_validate(_stored(compaction="never")).model_dump()
 
 
 async def test_an_older_gem_with_long_instructions_still_loads_and_can_be_changed() -> None:
@@ -549,7 +543,7 @@ def test_the_routes_are_the_ones_a_client_expects() -> None:
         ("GET", "/v1/gems/{gem_id}/chat", None),
         # Resets it: the gem starts again, knowing nothing from before.
         ("POST", "/v1/gems/{gem_id}/reset", 204),
-        # Compacts it: what came before its latest sitting is sent as a summary.
+        # Compacts it: what it remembers is sent as a summary.
         ("POST", "/v1/gems/{gem_id}/compact", None),
         # Its size, when its cache expires, and when to offer a compaction.
         ("GET", "/v1/gems/{gem_id}/context", None),
@@ -573,7 +567,6 @@ async def test_the_service_hands_out_a_gem_with_its_id_as_text_and_its_version()
     assert ObjectId(made.id)
     assert made.version == GEM_CONFIG_VERSION
     assert made.tools == ["web_search"]
-    assert made.compaction == "before_expiry"
     # The app sends an empty text for a new gem; one sent with none is the same.
     assert made.instructions == DEFAULT_GEM_INSTRUCTIONS
     assert [gem.id for gem in await service.list_gems()] == [made.id]
@@ -585,11 +578,10 @@ async def test_the_service_changes_only_what_a_patch_sends() -> None:
         GemsModels.V1.Input.CreateGem(name="Gem Two", model="Opus 5.5", speaks_first=True)
     )
 
-    patch = GemsModels.V1.Input.UpdateGem.model_validate({"model": None, "compaction": "never"})
+    patch = GemsModels.V1.Input.UpdateGem.model_validate({"model": None})
     changed = await service.update_gem(made.id, patch)
 
     assert changed.model is None
-    assert changed.compaction == "never"
     assert changed.name == "Gem Two"
     assert changed.speaks_first is True
 
@@ -614,7 +606,6 @@ async def test_the_service_deletes_and_then_cannot_find_a_gem() -> None:
         {"name": "Gem Two", "tools": ["web_search", "web_search"]},
         {"name": "Gem Two", "tools": ["weather"]},
         {"name": "Gem Two", "instructions": "x" * 20_001},
-        {"name": "Gem Two", "compaction": "sometimes"},
     ],
 )
 def test_a_new_gem_that_breaks_a_rule_is_refused(body: dict[str, Any]) -> None:
@@ -622,7 +613,7 @@ def test_a_new_gem_that_breaks_a_rule_is_refused(body: dict[str, Any]) -> None:
         GemsModels.V1.Input.CreateGem.model_validate(body)
 
 
-@pytest.mark.parametrize("field", ["name", "instructions", "speaks_first", "tools", "compaction"])
+@pytest.mark.parametrize("field", ["name", "instructions", "speaks_first", "tools"])
 def test_a_patch_cannot_set_a_field_other_than_the_model_to_null(field: str) -> None:
     with pytest.raises(ValidationError, match="cannot be null"):
         GemsModels.V1.Input.UpdateGem.model_validate({field: None})

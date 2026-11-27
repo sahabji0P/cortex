@@ -53,7 +53,6 @@ class GemsServiceV1Class:
             model=gem.model,
             speaks_first=gem.speaks_first,
             tools=gem.tools,
-            compaction=gem.compaction,
             voice=gem.voice,
             speech_speed=gem.speech_speed,
             created_at=gem.created_at,
@@ -69,7 +68,6 @@ class GemsServiceV1Class:
             model=payload.model,
             speaks_first=payload.speaks_first,
             tools=payload.tools,
-            compaction=payload.compaction,
             voice=payload.voice,
             speech_speed=payload.speech_speed,
         )
@@ -117,7 +115,6 @@ class GemsServiceV1Class:
             tokens=context.tokens,
             cache_until=context.cache_until,
             compact_from=context.compact_from,
-            compaction=context.compaction,
         )
 
     async def get_log(

@@ -45,7 +45,6 @@ from app.entities.compaction import (
     COMPACT_OVER,
     SUMMARY_TOKENS,
     Compacted,
-    Setting,
     asked,
     exact,
     replaced,
@@ -79,7 +78,7 @@ class Context:
 
     `tokens` is the estimated size of its next request. `cache_until` is when its cache
     expires, and `compact_from` when the app is to offer a compaction: `cache_until`,
-    if the conversation is over `COMPACT_OVER` and its setting is not `never`. Both are
+    if the conversation is over `COMPACT_OVER`. Both are
     None while nothing was sent, and after a compaction until the next request: no
     request reads what a compaction's own cached.
     """
@@ -87,7 +86,6 @@ class Context:
     tokens: int
     cache_until: datetime | None
     compact_from: datetime | None
-    compaction: Setting
 
 
 class _Compacting:
@@ -189,12 +187,10 @@ class CompactionEntityClass:
             # The last request was a compaction's own: what it cached starts with what
             # is now summed up, and no request sends that again.
             cache_until = None
-        offered = tokens > COMPACT_OVER and gem.compaction != "never"
         return Context(
             tokens=tokens,
             cache_until=cache_until,
-            compact_from=cache_until if offered else None,
-            compaction=gem.compaction,
+            compact_from=cache_until if tokens > COMPACT_OVER else None,
         )
 
     async def _measured(self, gem_id: ObjectId, entries: Sequence[Numbered]) -> int | None:

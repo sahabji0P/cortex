@@ -46,21 +46,18 @@ from the part being replaced (`exact`).
 import json
 import re
 from collections.abc import Sequence
-from datetime import timedelta
-from typing import Literal, NamedTuple
+from typing import NamedTuple
 
 from app.entities.cold_start import Numbered, as_sent
 from app.entities.model import SEARCH_TOOL, Item, Message, ToolSpec
 
 __all__ = [
     "ASK",
-    "BEFORE_EXPIRY",
     "COMPACT_OVER",
     "HEADINGS",
     "KEEP_WHOLE",
     "SUMMARY_TOKENS",
     "Compacted",
-    "Setting",
     "asked",
     "exact",
     "replaced",
@@ -80,13 +77,6 @@ KEEP_WHOLE = 20_000
 # ceiling (Anthropic's). A reply's is far lower (see `model.py`): a summary that ran out
 # of it would fail. Every model a gem can use allows more.
 SUMMARY_TOKENS = 32_000
-
-# How long before its cache expires a gem whose setting is `before_expiry` is compacted.
-BEFORE_EXPIRY = timedelta(minutes=2)
-
-# When a gem is compacted: by itself, while its cache is still warm, and when the user
-# asks (`before_expiry`); only when the user asks (`on_return`); or never.
-type Setting = Literal["before_expiry", "on_return", "never"]
 
 # The headings the summary is written under, in order.
 HEADINGS: tuple[str, ...] = (

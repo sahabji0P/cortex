@@ -545,21 +545,14 @@ async def test_the_context_says_its_size_when_the_cache_expires_and_when_to_comp
     after = await compactions.context(gem_id)
     monkeypatch.setattr(compaction_ent, "COMPACT_OVER", 10)
     over = await compactions.context(gem_id)
-    await setup.gems.update(gem_id, {"compaction": "never"})
-    never = await compactions.context(gem_id)
 
     # Nothing was sent yet: no cache, and nothing to offer.
-    assert (before.cache_until, before.compact_from, before.compaction) == (
-        None,
-        None,
-        "before_expiry",
-    )
+    assert (before.cache_until, before.compact_from) == (None, None)
     assert before.tokens > 0
     assert after.tokens > before.tokens
     assert after.cache_until == _START + timedelta(minutes=30)
     assert after.compact_from is None  # under the size
     assert over.compact_from == over.cache_until == _START + timedelta(minutes=30)
-    assert (never.compact_from, never.compaction) == (None, "never")
     with pytest.raises(NotFoundError):
         await compactions.context(str(ObjectId()))
     await _close(socket, linked)
@@ -607,7 +600,7 @@ async def test_after_a_compaction_no_cache_is_offered_until_the_next_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(compaction_ent, "COMPACT_OVER", 10)
-    setup = await _a_new_sitting(monkeypatch, compaction="on_return")
+    setup = await _a_new_sitting(monkeypatch)
     gem_id = str(setup.gem.id)
     failed = SimpleNamespace(
         type="response.failed",
@@ -759,11 +752,10 @@ async def test_the_context_route_says_where_the_context_stands(
 
     body = answer.json()
     assert answer.status_code == 200
-    assert set(body) == {"tokens", "cache_until", "compact_from", "compaction"}
+    assert set(body) == {"tokens", "cache_until", "compact_from"}
     assert body["tokens"] > 10
     assert datetime.fromisoformat(body["cache_until"]) == _START + timedelta(minutes=61)
     assert body["compact_from"] == body["cache_until"]
-    assert body["compaction"] == "before_expiry"
     await _close(setup.socket, setup.linked)
 
 

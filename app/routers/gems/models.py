@@ -4,9 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.entities.gem_ent import (
-    DEFAULT_GEM_COMPACTION,
     DEFAULT_GEM_TOOLS,
-    GemCompaction,
     GemDescription,
     GemImage,
     GemInstructionsToSave,
@@ -30,8 +28,6 @@ class GemsModels:
                 model: GemModelName | None = None
                 speaks_first: bool = False
                 tools: GemToolsToSave = Field(default_factory=lambda: list(DEFAULT_GEM_TOOLS))
-                # When its conversation is compacted: `before_expiry`, `on_return` or `never`.
-                compaction: GemCompaction = DEFAULT_GEM_COMPACTION
                 voice: GemVoice | None = None
                 speech_speed: GemSpeechSpeed = 1.0
 
@@ -49,7 +45,6 @@ class GemsModels:
                 model: GemModelName | None = None
                 speaks_first: bool | None = None
                 tools: GemToolsToSave | None = None
-                compaction: GemCompaction | None = None
                 voice: GemVoice | None = None
                 speech_speed: GemSpeechSpeed | None = None
 
@@ -75,7 +70,6 @@ class GemsModels:
                 model: GemModelName | None
                 speaks_first: bool
                 tools: list[str]
-                compaction: GemCompaction
                 voice: str | None
                 speech_speed: float
                 created_at: datetime
@@ -108,13 +102,12 @@ class GemsModels:
                 `tokens` is the estimated size of its next request. `cache_until` is when
                 its cache expires, and `compact_from` when to offer a compaction: null
                 while nothing was sent, and `compact_from` null too while the
-                conversation is under the size or `compaction` is `never`.
+                conversation is under the size.
                 """
 
                 tokens: int
                 cache_until: datetime | None
                 compact_from: datetime | None
-                compaction: GemCompaction
 
             class Log(BaseModel):
                 """A page of a gem's log, oldest first.
