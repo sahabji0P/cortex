@@ -22,7 +22,9 @@ it, as with a reset.
 
 The gem's own (`before_expiry`, the gem's setting): after a reply or a call, if the gem's
 conversation is over `COMPACT_OVER`, a compaction is set to run `BEFORE_EXPIRY` before its
-cache expires, while the summary request still reads the cache. Anything that takes the
+cache expires, while the summary request still reads the cache. If its cache is gone
+when it runs (the model, the instructions or the tools changed meanwhile), it stops
+before the model is asked: only the cold start is stored. Anything that takes the
 gem first stops it: a message, a call, an event, a late result (see
 `GemConversation.writer`). Once it runs, a message or a call cuts it, as it cuts a reply:
 nothing is stored of it. It never runs during a call. A restart loses it, and the user's
@@ -226,6 +228,10 @@ class CompactionEntityClass:
             raise ConflictError("nothing to compact")
         made = await self._chat.next_request(ready, key, stored, mode=stored.mode)
         if made.record.started_cold:
+            if by == "auto":
+                # The settings changed while it waited: the summary would read no cache,
+                # and it is for a warm one that it runs. The cold start stays stored.
+                raise ConflictError("the cache is cold")
             # The settings changed: it started cold, whatever the time.
             before = stored.cache.sent
         turn = made.record.turn("compaction")

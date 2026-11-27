@@ -487,6 +487,33 @@ async def test_a_compaction_is_set_to_run_two_minutes_before_the_cache_expires_a
 
 
 @pytest.mark.usefixtures("_small")
+async def test_a_compaction_set_to_run_stops_before_asking_the_model_if_the_settings_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeper = _Sleeper()
+    setup = await _a_new_sitting(monkeypatch, sleep=sleeper)
+    await setup.gems.update(str(setup.gem.id), {"instructions": "You are terse."})
+
+    setup.move(_START + timedelta(minutes=31 + 28))
+    sleeper.go.set()
+    await _quiet(setup.compactions)
+
+    # Its summary would read no cache: the model is not asked, and nothing is compacted.
+    assert len(setup.llm.requests) == 3
+    log = await _log(setup)
+    assert _of(log, "cache.cold")[-1]["reason"] == "settings"
+    assert [e["by"] for e in _of(log, "turn.opened")].count("compaction") == 0
+    assert _of(log, "context.compacted") == []
+    assert setup.conversations.gem(str(setup.gem.id)).writer is None
+    # The next reply starts from the cold start already stored: it is not cold again.
+    setup.llm.then(_said("Four."))
+    setup.socket.send(setup.gem.id, "message 4")
+    await setup.socket.until("chat.done", 4)
+    assert len(_of(await _log(setup), "cache.cold")) == len(_of(log, "cache.cold"))
+    await _close(setup.socket, setup.linked)
+
+
+@pytest.mark.usefixtures("_small")
 async def test_a_compaction_set_to_run_is_stopped_by_a_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
