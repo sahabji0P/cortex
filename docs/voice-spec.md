@@ -440,7 +440,10 @@ model round before the reply. The tool list and the instructions do not change.
 
 A compaction (see [A compaction](chat-contract.md#a-compaction)) is not a reply, and is
 not told the Darbar text or the gem's own instructions. It is no turn either: its
-request is written down in the log with no turn, naming the compaction. Its instructions are these
+request is written down in the log with no turn, naming the compaction. It reads no
+cache, so it is not checked for a cold start: it is sent the conversation with the
+expiry of the latest `cache.cold`, and the first request after it starts cold for it.
+Its instructions are these
 (`INSTRUCTIONS` in [`compaction.py`](../app/entities/compaction.py)), in full:
 
 ```
@@ -617,9 +620,6 @@ measurements, not guarantees. All but scenario 17 and the deferred tools were ru
 - **A summary is held to its shape, not its truth.** The schema keeps the headings, and
   a refusal fails the compaction, but nothing checks what the points say. A refusal
   written inside the fields would be stored.
-- **A failed compaction's request still counts as the gem's last request.** It reads no
-  cache, but `cache_until`, and whether the next reply starts cold, are reckoned from it,
-  so after a failed compaction the cache can be taken to last longer than it does.
 - **One context with both speaking and writing in it has no recorded live run.** Whether
   a gem keeps to its call rules after a written stretch, and to its writing rules after
   a call, is to be tried out.

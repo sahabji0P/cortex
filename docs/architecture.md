@@ -205,8 +205,9 @@ writing.
    [the contract](chat-contract.md#a-cold-start)).
 4. **When the user asks, everything is sent summed up.** A compaction has the gem's own
    model write a summary of the whole conversation, in one plain call of its own: our
-   instructions, the items its next reply would be sent, a plain message that asks for
-   the summary, no tool use, no cache, and JSON held to a schema. The backend writes the
+   instructions, the items its next reply would be sent (with no check for a cold start:
+   it reads no cache), a plain message that asks for the summary, no tool use, no
+   cache, and JSON held to a schema. The backend writes the
    summary from that JSON, and adds the identifiers and the user's own words, copied
    exactly. From then on every request is sent that summary, as one line of ours, then
    only what was remembered after the compaction's request, whole. The first request

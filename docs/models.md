@@ -85,8 +85,10 @@ more than input (see [Cost](#cost)).
 - **A compaction reads no cache.** Its summary request is told our instructions, not
   the gem's, so it does not start as the gem's requests do. It is not marked for a cache
   on Anthropic, and is read in full: measured on Haiku 5.5 and Sonnet 5.5, it read and
-  wrote nothing. The request after a compaction starts with the summary, so it writes
-  the cache again: it is a cold start, with the reason `compaction`.
+  wrote nothing. So it is not checked for a cold start, and is not counted for when the
+  cache expires: a compaction that fails leaves the cache as old as it was. The request
+  after a compaction starts with the summary, so it writes the cache again: it is a cold
+  start, with the reason `compaction`.
 - **A summary request is one structured call.** Tool use is off (`tool_choice` none),
   and it writes JSON held to a schema: on Anthropic by `output_config.format`
   (`json_schema`), on OpenAI by `text.format` (`json_schema`, strict). A refusal raises
