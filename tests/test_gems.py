@@ -569,6 +569,7 @@ async def test_the_service_hands_out_a_gem_with_its_id_as_text_and_its_version()
     assert ObjectId(made.id)
     assert made.version == GEM_CONFIG_VERSION
     assert made.tools == ["web_search"]
+    assert made.compaction == "before_expiry"
     # The app sends an empty text for a new gem; one sent with none is the same.
     assert made.instructions == DEFAULT_GEM_INSTRUCTIONS
     assert [gem.id for gem in await service.list_gems()] == [made.id]
@@ -580,10 +581,11 @@ async def test_the_service_changes_only_what_a_patch_sends() -> None:
         GemsModels.V1.Input.CreateGem(name="Gem Two", model="Opus 5.5", speaks_first=True)
     )
 
-    patch = GemsModels.V1.Input.UpdateGem.model_validate({"model": None})
+    patch = GemsModels.V1.Input.UpdateGem.model_validate({"model": None, "compaction": "never"})
     changed = await service.update_gem(made.id, patch)
 
     assert changed.model is None
+    assert changed.compaction == "never"
     assert changed.name == "Gem Two"
     assert changed.speaks_first is True
 
@@ -608,6 +610,7 @@ async def test_the_service_deletes_and_then_cannot_find_a_gem() -> None:
         {"name": "Gem Two", "tools": ["web_search", "web_search"]},
         {"name": "Gem Two", "tools": ["weather"]},
         {"name": "Gem Two", "instructions": "x" * 20_001},
+        {"name": "Gem Two", "compaction": "sometimes"},
     ],
 )
 def test_a_new_gem_that_breaks_a_rule_is_refused(body: dict[str, Any]) -> None:
@@ -615,7 +618,7 @@ def test_a_new_gem_that_breaks_a_rule_is_refused(body: dict[str, Any]) -> None:
         GemsModels.V1.Input.CreateGem.model_validate(body)
 
 
-@pytest.mark.parametrize("field", ["name", "instructions", "speaks_first", "tools"])
+@pytest.mark.parametrize("field", ["name", "instructions", "speaks_first", "tools", "compaction"])
 def test_a_patch_cannot_set_a_field_other_than_the_model_to_null(field: str) -> None:
     with pytest.raises(ValidationError, match="cannot be null"):
         GemsModels.V1.Input.UpdateGem.model_validate({field: None})
