@@ -285,11 +285,20 @@ class ConversationStoreClass:
             return None
         return Compacted(str(found[0].data["summary"]), int(found[0].data["through"]))
 
-    async def opened(self, gem_id: ObjectId, turn: int) -> LogEntry | None:
-        """The entry that opened a turn, if it was written down."""
-        return await self._docdb.get(
-            LogEntry, filters={"gem_id": gem_id, "kind": "turn.opened", "turn": turn}
+    async def of_compaction(self, gem_id: ObjectId, request: LogEntry) -> bool:
+        """Whether a request's entry (`request.sent` or `request.done`) is a compaction's own.
+
+        It names its compaction (`compaction`). An older log has a compaction in a turn
+        of its own instead, opened `by` `compaction`.
+        """
+        if request.data.get("compaction") is not None:
+            return True
+        if request.turn is None:
+            return False
+        opened = await self._docdb.get(
+            LogEntry, filters={"gem_id": gem_id, "kind": "turn.opened", "turn": request.turn}
         )
+        return opened is not None and opened.data.get("by") == "compaction"
 
     async def pending_events(self, gem_id: ObjectId) -> list[LogEntry]:
         """The events that came in since the gem was last reset and wait to be told, in order.

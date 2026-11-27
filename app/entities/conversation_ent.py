@@ -464,15 +464,13 @@ class ConversationEntityClass:
         compacted = await self._store.compacted(found, before=seq)
         items = view(numbered(remembered), cache.before, compacted)
         settings = await self._settings(found, upto=seq)
-        if request.turn is not None:
-            opened = await self._store.opened(found, request.turn)
-            if opened is not None and opened.data.get("by") == "compaction":
-                items.append(asked())
-                settings["instructions"] = [{"name": "compaction", "text": INSTRUCTIONS}]
-                model, tools = settings["model"], settings["tools"]
-                names = {str(tool["name"]) for tool in cast("list[dict[str, Any]]", tools or [])}
-                if model is not None and not tools_declared(model["provider"], items, names):
-                    settings["tools"] = []
+        if await self._store.of_compaction(found, request):
+            items.append(asked())
+            settings["instructions"] = [{"name": "compaction", "text": INSTRUCTIONS}]
+            model, tools = settings["model"], settings["tools"]
+            names = {str(tool["name"]) for tool in cast("list[dict[str, Any]]", tools or [])}
+            if model is not None and not tools_declared(model["provider"], items, names):
+                settings["tools"] = []
         return {
             "request": request.data.get("request"),
             "items": items,

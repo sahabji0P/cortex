@@ -31,7 +31,7 @@ from app.entities.compaction import (
 )
 from app.entities.compaction_ent import CompactionEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
-from app.entities.model import Structured
+from app.entities.model import Structured, Usage
 from app.main import app
 from app.routers.gems.service import GemsServiceV1Class, get_gems_service_v1
 from app.routers.link.service import LinkServiceV1Class
@@ -301,6 +301,59 @@ async def test_what_the_summary_request_was_sent_is_read_back_exactly(
     assert read["instructions"] == [{"name": "compaction", "text": INSTRUCTIONS}]
     reply = [e for e in _of(await _log(setup), "request.sent") if e["seq"] < sent["seq"]][-1]
     assert read["tools"] == (await service.get_log_sent(str(setup.gem.id), reply["seq"]))["tools"]
+    await _close(setup.socket, setup.linked)
+
+
+async def _compacted_the_old_way(setup: Any) -> tuple[int, int]:
+    """A compaction as an older backend wrote it: in a turn of its own, opened `by`
+    `compaction`, with its `context.compacted` in that turn. Its request's number, and
+    its turn's."""
+    gem_id = ObjectId(str(setup.gem.id))
+    log = setup.conversations.log
+    stored = await setup.conversations.load(gem_id)
+    record = setup.conversations.recording(gem_id, "chat")
+    turn = log.turn_number(gem_id)
+    record.note("turn.opened", turn, {"by": "compaction", "mode": "chat"})
+    items = [*setup.conversations.sent(record, stored, changed=False), asked()]
+    request = record.request(turn, items, False)
+    request.done(
+        json.dumps(_fields(_POINT)), [], Usage(input=3000, cache_read=0, cache_write=0, output=9)
+    )
+    record.note(
+        "context.compacted", turn, {"summary": _SUMMARY, "through": request.seq, "by": "user"}
+    )
+    record.note("turn.closed", turn, {"outcome": "finished", "error": None})
+    await log.written()
+    return request.seq, turn
+
+
+async def test_a_compaction_written_the_old_way_still_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    gem_id = str(setup.gem.id)
+    line, turn = await _compacted_the_old_way(setup)
+    setup.llm.then(_said("Four."))
+    service = GemsServiceV1Class(setup.gems, setup.conversations)
+
+    # `/sent` knows its request by its turn: ours, and the message that asks, last.
+    read = await service.get_log_sent(gem_id, line)
+    assert read["exact"]
+    assert read["items"][-1] == asked()
+    assert read["instructions"] == [{"name": "compaction", "text": INSTRUCTIONS}]
+    # Its request was billed for what it summed up, which the next one is not sent.
+    assert (await setup.compactions.context(gem_id)).tokens < 3000
+    # The next reply is sent the summary, then only what came after it.
+    setup.move(_START + timedelta(minutes=33))
+    setup.socket.send(setup.gem.id, "message 4")
+    await setup.socket.until("chat.done", 4)
+    assert setup.llm.requests[-1]["input"] == [
+        summed_up(_SUMMARY),
+        TIME_LINE,
+        {"role": "user", "content": "message 4"},
+    ]
+    log = await _log(setup)
+    assert _of(log, "turn.opened")[-1]["turn"] == turn + 1
     await _close(setup.socket, setup.linked)
 
 

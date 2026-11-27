@@ -230,10 +230,8 @@ class CompactionEntityClass:
             later = await self._store.last(gem_id, kind)
             if later is not None and later.seq > done.seq:
                 return None
-        if done.turn is not None:
-            opened = await self._store.opened(gem_id, done.turn)
-            if opened is not None and opened.data.get("by") == "compaction":
-                return None
+        if await self._store.of_compaction(gem_id, done):
+            return None
         sent = await self._store.request_sent(gem_id, done.data["request"], before=done.seq)
         if sent is None:
             return None

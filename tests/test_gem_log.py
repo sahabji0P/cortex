@@ -910,7 +910,6 @@ async def test_a_compaction_is_written_at_once_in_its_turn_and_read_back_in_forc
     ]
     [opened] = [d for d in _log(docdb) if d["kind"] == "turn.opened"]
     assert opened["data"]["by"] == "compaction"
-    assert (await store.opened(gem_id, turn.number or 0)) is not None
     [one] = [d for d in _log(docdb) if d["seq"] == first]
     assert (one["turn"], one["data"]) == (
         turn.number,
