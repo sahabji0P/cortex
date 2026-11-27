@@ -76,10 +76,26 @@ def test_the_line_is_at_the_start_of_the_latest_sitting() -> None:
 
 
 def test_the_line_falls_only_before_what_the_user_said() -> None:
-    # The sitting begins with a line of ours and a reply: the first place is the user's.
-    entries = [*_turns(2), _note(5), _gem(6), _user(7), _gem(8)]
+    # The sitting begins with a reply: the first place is the user's.
+    entries = [*_turns(2), _gem(5), _user(6), _gem(7)]
 
+    assert through(entries, cold=4, before=None, compacted=None) == 6
+
+
+def test_the_lines_of_ours_just_before_what_the_user_said_go_with_it() -> None:
+    # A line that says a call started and one that gives the time, then what was said.
+    entries = [*_turns(2), _gem(5), _note(6), _note(7), _user(8), _gem(9)]
+
+    assert through(entries, cold=4, before=None, compacted=None) == 6
+    # A line of ours with a reply after it is no start of a turn.
+    entries = [*_turns(2), _note(5), _gem(6), _user(7), _gem(8)]
     assert through(entries, cold=4, before=None, compacted=None) == 7
+
+
+def test_a_first_turn_with_only_its_lines_before_it_has_nothing_to_compact() -> None:
+    entries = [_note(0), *_turns(2, first=1)]
+
+    assert through(entries, cold=None, before=None, compacted=None) is None
 
 
 def test_the_line_never_parts_a_call_from_its_result() -> None:

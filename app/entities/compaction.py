@@ -20,9 +20,11 @@ Where `through` falls (`through`):
 - moved on, if what it keeps whole is over `KEEP_WHOLE` estimated tokens, until it is
   not, keeping the newest; never past the latest place it can fall;
 - never before the compaction in force: what that one summed up stays summed up;
-- only ever just before what the user said or an event the gem was told (a `user.said`
-  or `event.received`), with every tool call before it answered before it. So a call is
-  never parted from its result.
+- only ever at the start of a turn: before what the user said or an event the gem was
+  told (a `user.said` or `event.received`), and before the lines of ours that go with
+  it, just before it (the line that gives the time, the one that says a call started).
+  Every tool call before it is answered before it, so a call is never parted from its
+  result.
 
 If nothing remembered lies between the compaction in force (or the conversation's
 start) and `through`, there is nothing to compact.
@@ -178,16 +180,19 @@ def through(
     sent = as_sent(entries, before)
     places: list[int] = []
     unanswered: set[str] = set()
+    # Where the lines of ours just before this entry begin, if it follows any.
+    lines: int | None = None
     for index, entry in enumerate(entries):
         item = entry.item
+        if "role" in item and item["role"] == "developer":
+            lines = index if lines is None else lines
+            continue
+        place = index if lines is None else lines
+        lines = None
         if "role" in item:
-            if (
-                item["role"] == "user"
-                and not unanswered
-                and entry.seq is not None
-                and entry.seq >= start
-            ):
-                places.append(index)
+            seq = entries[place].seq
+            if item["role"] == "user" and not unanswered and seq is not None and seq >= start:
+                places.append(place)
         elif item["type"] == "function_call":
             unanswered.add(item["call_id"])
         else:
