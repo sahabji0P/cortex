@@ -494,10 +494,12 @@ A turn is one reply, from when it is asked for to when it is settled. What belon
 turn says so in `turn`: do not group by where an entry falls, since a tool call can end
 long after its turn has closed, and still names it. A turn can have no request: a
 message cut by the next one before the model was asked leaves `turn.opened`, `user.said`
-and `turn.closed` only.
+and `turn.closed` only. A compaction is no turn and takes no turn number: its entries
+name it by `compaction` instead (see [A compaction](#a-compaction)). A request belongs
+either to a turn or to a compaction.
 
-An entry that opens something (`call.opened`, `turn.opened`, `request.sent`,
-`tool.started`) is followed by the one that closes it, with one exception: if the
+An entry that opens something (`call.opened`, `turn.opened`, `compaction.started`,
+`request.sent`, `tool.started`) is followed by the one that closes it, with one exception: if the
 backend stops in between, the closing entry is never written. Show such a thing as not
 ended, not as running.
 
@@ -543,13 +545,15 @@ Every other kind is something that happened. No model is ever sent them.
 | `watch.added` | `watch`, `source`, `about` | The gem made a watch (see [Watches](#watches)). `watch` is its id, `source` is `mcp`, `webhook` or `timer`, and `about` what it is for, in the gem's words. No turn. Never its address or secret |
 | `watch.removed` | `watch`, `by` | A watch was removed: `by` is `gem` (with its `unwatch` tool) or `user` (in the app, or when the gem was reset). No turn. A deleted gem's watches go with its log, and write nothing |
 | `gem.reset` | none | The user reset the gem (see [`POST /v1/gems/{gem_id}/reset`](#post-v1gemsgem_idreset)). No turn. The gem knows nothing from before it: its conversation is the remembered entries after the latest one |
-| `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) `background_result` (results of calls that went on in the background are to be told, with nothing new from the user) or `event` (events that came in are to be told, with nothing new from the user; when results and events are told together, `event`). Or `compaction`: no reply, but the summary of a compaction, which nobody is shown (see [A compaction](#a-compaction)). `mode` is `call` or `chat` |
+| `turn.opened` | `by`, `mode` | A reply was asked for. `by` is `user`, `gem` (the gem speaks first in a call) `background_result` (results of calls that went on in the background are to be told, with nothing new from the user) or `event` (events that came in are to be told, with nothing new from the user; when results and events are told together, `event`). `mode` is `call` or `chat`. An older log may also hold `by` `compaction`: a compaction written as a turn of its own (see [A compaction](#a-compaction)) |
 | `cache.cold` | `reason`, `before` | The conversation starts cold: from here on, long tool results before `before` are sent expired (see [A cold start](#a-cold-start)). `reason` is `settings` (the model, the instructions or the tools changed), `compaction` (the conversation was compacted since the last request) or `quiet` (the provider's cache is taken to have gone). `before` is the `seq` of the last `request.sent` before it. No turn. Written just after the `settings.changed` it follows, if any: in writing before the reply's `turn.opened`, in a call before the call's first line |
 | `event.came` | `watch_id`, `source`, `name`, `about`, `data`, `happened_at`, `event_id` | An event came in for one of the gem's watches (see [An event](#an-event)). No turn. `watch_id` is the watch that caught it. `source` is where it came from: `mcp`, `webhook` or `timer` (not who wrote it, as on what the gem remembers). `name` is what happened, as its source names it, or `watch.failing`, `watch.paused`, `watch.recovered` or `watch.ended` when it is the watch's own: its state changed, or the user removed it (see [Watches](#watches)). `about` is what the watch is for, in the gem's words. `data` is what happened, as text, cut to 20,000 characters (empty for a timer and for `watch.recovered`). `happened_at` is when it happened, by its source, or when it came in. `event_id` is the source's own id for it, or null: an event whose watch and `event_id` are already written down is not written again, so a source that delivers it again does not wake the gem twice. Like a `gem.reset`, it is never lost: it is stored before the event counts as come in |
-| `context.compacted` | `summary`, `through`, `by` | The conversation was compacted (see [A compaction](#a-compaction)). From here on, the remembered entries before `through` are sent as `summary`. `through` is the `seq` of the compaction's own `request.sent`. `by` is always `user`. In the turn of the request that wrote the summary. Like a `gem.reset`, it is never lost: the compaction counts only once it is stored |
+| `compaction.started` | none | A compaction began (see [A compaction](#a-compaction)). No turn. Its `seq` is the compaction's id, which its other entries name in `compaction` |
+| `context.compacted` | `summary`, `through`, `by`, `compaction` | The conversation was compacted (see [A compaction](#a-compaction)). From here on, the remembered entries before `through` are sent as `summary`. `through` is the `seq` of the compaction's own `request.sent`. `by` is always `user`. `compaction` is the `seq` of its `compaction.started`. No turn. Like a `gem.reset`, it is never lost: the compaction counts only once it is stored |
+| `compaction.ended` | `compaction`, `outcome`, `error` | The compaction is over. Written last, whatever happened. `outcome` is `done`, `failed` or `cut` (the backend stopped it). `error` is why it failed, or null. No turn |
 | `settings.changed` | any of `model`, `instructions`, `tools` | What the gem's requests are made with differs from what was last written down. Only the parts that changed are there, each in full (see below). Written before what it applies to: in writing, before the reply's `turn.opened`; in a call, just after `call.opened`, before the call's first line. Then it has no turn, and holds from there on. A change found later, at a request, has that request's turn (see below) |
-| `request.sent` | `request`, `attempt`, `think`, `count` | A request went to the model. `request` is its number for this gem. `attempt` is always 1 for now: a request the provider's library tries again by itself is not seen. `think` is whether the model was asked to think first. `count` is how many items it was sent (see below) |
-| `request.done` | `request`, `attempt`, `outcome`, `text`, `calls`, `first_token_at`, `usage`, `cost_usd`, `priced`, `error` | How that request ended (see below) |
+| `request.sent` | `request`, `attempt`, `think`, `count`, and `compaction` for a compaction's own | A request went to the model. `request` is its number for this gem. `attempt` is always 1 for now: a request the provider's library tries again by itself is not seen. `think` is whether the model was asked to think first. `count` is how many items it was sent (see below). A compaction's own request has no turn and names the compaction (`compaction`, the `seq` of its `compaction.started`); no other request has that field |
+| `request.done` | `request`, `attempt`, `outcome`, `text`, `calls`, `first_token_at`, `usage`, `cost_usd`, `priced`, `error`, and `compaction` for a compaction's own | How that request ended (see below). Its `turn` and `compaction` are its `request.sent`'s |
 | `tool.started` | `request`, `call_id`, `name`, `connection` | A tool call started running. `request` is the request that made it: its arguments are in that request's `request.done`, under `calls`. `connection` is the connection's name, or null for a built-in tool |
 | `tool.backgrounded` | `call_id` | The reply that made the call was over while the call still ran. It carries on in the background, and the gem was given the placeholder as its result |
 | `tool.done` | `call_id`, `outcome`, `seconds`, `background`, and `result` when `background` is true | The tool call ended. `outcome` is `done`, `failed` or `cancelled`. `seconds` is how long it ran. `background` is whether it ended in the background. Only then is `result` here, what the gem will be told, in full: nothing remembers it yet. It is left out for a cancelled call. A call that ended within its reply has its result in its `tool.result`, and only there |
@@ -653,12 +657,23 @@ request follows: a call in which nothing is said leaves `call.opened`,
 
 ### A compaction
 
-A compaction (see [Compaction](#compaction)) sums up the whole conversation. It is a
-turn of its own: `turn.opened` with `by` `compaction`, the request that wrote the
-summary (`request.sent` and `request.done`, with its tokens and its cost), then
-`context.compacted`, then `turn.closed`. It may follow a `settings.changed` and a
-`cache.cold`, as a reply would; that `cache.cold` has its true reason (`quiet` when the
-cache had already gone).
+A compaction (see [Compaction](#compaction)) sums up the whole conversation. It is no
+turn, and takes no turn number. Its entries, in order:
+
+1. `compaction.started`. Its `seq` is the compaction's id.
+2. The request that wrote the summary: `request.sent` and `request.done`, with its
+   tokens and its cost, and `compaction`.
+3. On success, `context.compacted`, with `compaction`.
+4. `compaction.ended`, last, whatever happened: `done`, `failed` or `cut`.
+
+All of them have `turn` null. Between the first two there may be a `settings.changed`
+and a `cache.cold`, as before a reply; that `cache.cold` has its true reason (`quiet`
+when the cache had already gone), and no turn.
+
+An older log may hold a compaction written as a turn of its own: `turn.opened` with `by`
+`compaction`, its request, `context.compacted` and `turn.closed`, all with that turn,
+and no `compaction` field. The backend still reads it: its request is the compaction's
+own for `/sent` and for the context.
 
 The request is one plain call, not a reply. It is sent the whole conversation as the
 gem's next reply would be (after the compaction in force, with a cold start's expiry),
