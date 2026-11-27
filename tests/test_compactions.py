@@ -1,9 +1,8 @@
-"""Compacting a gem's conversation: when the user asks, and by itself before its cache expires.
+"""Compacting a gem's conversation, when the user asks.
 
 The clock is set (`set_clock`), and the gems use an OpenAI model, whose cache is held to
 last 30 minutes. A conversation has something to compact once it has started cold: the
-latest sitting is kept whole, and what came before it is summed up. The size a gem
-compacts itself past is lowered, so a short conversation is over it.
+latest sitting is kept whole, and what came before it is summed up.
 """
 
 import asyncio
@@ -27,44 +26,21 @@ from app.main import app
 from app.routers.gems.service import GemsServiceV1Class, get_gems_service_v1
 from app.routers.link.service import LinkServiceV1Class
 from tests.test_chat import (
-    _WEATHER,
     _chat,
     _close,
-    _cut_while_searching,
     _eventually_asked,
-    _looks,
     _open,
     _said,
-    _Searches,
 )
-from tests.test_gem_events import _came_in
 from tests.test_link_call import _close as _close_link
 from tests.test_link_call import _open as _open_link
 from tests.test_link_call import _Setup as _CallSetup
 from tests.test_link_call import _Voice
-from tests.test_one_conversation import _hang_up, _said_and_heard, _spoken, _world
 from tests.test_voice_conversation import _completed, _delta
 from tests.time_lines import TIME_LINE, set_clock
 
 _START = datetime(2026, 11, 27, 9, 0, tzinfo=UTC)
 _SUMMARY = "What the user wants: to save. Decisions: none."
-
-
-class _Sleeper:
-    """How a compaction set to run waits: each wait is written down, and waits for the test."""
-
-    def __init__(self) -> None:
-        self.waits: list[float] = []
-        self.stopped = 0
-        self.go = asyncio.Event()
-
-    async def __call__(self, seconds: float) -> None:
-        self.waits.append(seconds)
-        try:
-            await self.go.wait()
-        except asyncio.CancelledError:
-            self.stopped += 1
-            raise
 
 
 def _summary(text: str = _SUMMARY, *, used: bool = False) -> list[Any]:
@@ -79,7 +55,7 @@ def _summary(text: str = _SUMMARY, *, used: bool = False) -> list[Any]:
     return [_delta(text), done]
 
 
-async def _compactions(setup: Any, sleep: Any = None) -> CompactionEntityClass:
+async def _compactions(setup: Any) -> CompactionEntityClass:
     adapter = cast("Any", setup.store)._docdb
     return CompactionEntityClass(
         gems=setup.gems,
@@ -87,7 +63,6 @@ async def _compactions(setup: Any, sleep: Any = None) -> CompactionEntityClass:
         store=setup.store,
         conversations=setup.conversations,
         chat=setup.chat,
-        sleep=_Sleeper() if sleep is None else sleep,
     )
 
 
@@ -104,9 +79,8 @@ async def _quiet(entity: CompactionEntityClass) -> None:
 async def _a_new_sitting(monkeypatch: pytest.MonkeyPatch, **gem: Any) -> Any:
     """A gem that answered two messages, then, after its cache expired, a third."""
     move = set_clock(monkeypatch, _START)
-    sleep = gem.pop("sleep", None)
     setup = await _chat(_said("One."), _said("Two."), _said("Three."), **gem)
-    setup.compactions = await _compactions(setup, sleep)
+    setup.compactions = await _compactions(setup)
     setup.socket, setup.linked = await _open(setup.service())
     setup.move = move
     for count in (1, 2):
@@ -532,215 +506,24 @@ async def test_a_reply_being_written_is_not_cut_by_a_compaction(
     await _close(setup.socket, setup.linked)
 
 
-# ---- before the cache expires
+# ---- only when the user asks
 
 
-@pytest.fixture
-def _small(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A gem compacts itself past a size any conversation here is over."""
+async def test_a_gem_over_the_size_is_never_compacted_unless_the_user_asks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(compaction_ent, "COMPACT_OVER", 10)
-
-
-@pytest.mark.usefixtures("_small")
-async def test_a_compaction_is_set_to_run_two_minutes_before_the_cache_expires_and_runs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sleeper = _Sleeper()
-    setup = await _a_new_sitting(monkeypatch, sleep=sleeper)
-    setup.llm.then(_summary())
-
-    # Set after the last reply: the messages before took the gem before it was set.
-    assert len(sleeper.waits) == 1
-    # The cache lasts 30 minutes from the last request; it runs 2 minutes before.
-    assert sleeper.waits[-1] == pytest.approx(28 * 60)
-    setup.move(_START + timedelta(minutes=31 + 28))
-    sleeper.go.set()
+    setup = await _a_new_sitting(monkeypatch)
+    setup.move(_START + timedelta(minutes=31 + 29))
     await _quiet(setup.compactions)
 
-    [compacted] = _of(await _log(setup), "context.compacted")
-    assert (compacted["by"], compacted["through"]) == ("auto", await _sitting_starts(setup))
-    assert setup.llm.requests[-1]["tool_choice"] == "none"
-    # Nothing was said to the user.
-    assert [type_ for type_, _ in setup.socket.chat()].count("chat.done") == 3
-    # It is not set to run again after itself.
-    assert len(sleeper.waits) == 1
-    await _close(setup.socket, setup.linked)
-
-
-@pytest.mark.usefixtures("_small")
-async def test_a_compaction_set_to_run_stops_before_asking_the_model_if_the_settings_changed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sleeper = _Sleeper()
-    setup = await _a_new_sitting(monkeypatch, sleep=sleeper)
-    await setup.gems.update(str(setup.gem.id), {"instructions": "You are terse."})
-
-    setup.move(_START + timedelta(minutes=31 + 28))
-    sleeper.go.set()
-    await _quiet(setup.compactions)
-
-    # Its summary would read no cache: the model is not asked, and nothing is compacted.
+    assert (await setup.compactions.context(str(setup.gem.id))).compact_from is not None
     assert len(setup.llm.requests) == 3
     log = await _log(setup)
-    assert _of(log, "cache.cold")[-1]["reason"] == "settings"
+    assert _of(log, "context.compacted") == []
     assert [e["by"] for e in _of(log, "turn.opened")].count("compaction") == 0
-    assert _of(log, "context.compacted") == []
-    assert setup.conversations.gem(str(setup.gem.id)).writer is None
-    # The next reply starts from the cold start already stored: it is not cold again.
-    setup.llm.then(_said("Four."))
-    setup.socket.send(setup.gem.id, "message 4")
-    await setup.socket.until("chat.done", 4)
-    assert len(_of(await _log(setup), "cache.cold")) == len(_of(log, "cache.cold"))
-    await _close(setup.socket, setup.linked)
-
-
-@pytest.mark.usefixtures("_small")
-async def test_a_compaction_set_to_run_is_stopped_by_a_message(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sleeper = _Sleeper()
-    setup = await _a_new_sitting(monkeypatch, sleep=sleeper)
-    setup.llm.then(_said("Four."))
-
-    setup.socket.send(setup.gem.id, "message 4")
-    await setup.socket.until("chat.done", 4)
-    await _quiet(setup.compactions)
-
-    assert sleeper.stopped == 1
-    assert len(sleeper.waits) == 2  # set again after the reply
-    await _close(setup.socket, setup.linked)
-
-
-@pytest.mark.usefixtures("_small")
-async def test_a_compaction_set_to_run_is_stopped_by_an_event(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sleeper = _Sleeper()
-    setup = await _a_new_sitting(monkeypatch, sleep=sleeper)
-    setup.llm.then(_said("New commits are in."))
-
-    await _came_in(setup, "push")
-    await setup.socket.until("chat.done", 4)
-    await _quiet(setup.compactions)
-
-    assert sleeper.stopped == 1
-    assert len(sleeper.waits) == 2  # set again after the reply to the event
-    assert _of(await _log(setup), "context.compacted") == []
-    await _close(setup.socket, setup.linked)
-
-
-@pytest.mark.usefixtures("_small")
-async def test_a_compaction_set_to_run_is_stopped_by_a_late_result(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    set_clock(monkeypatch, _START)
-    searches = _Searches(_WEATHER)
-    sleeper = _Sleeper()
-    setup = await _chat(_looks(), _said("Noon."), _said("It is sunny in Pune."), search=searches)
-    compactions = await _compactions(setup, sleeper)
-    socket, linked = await _open(setup.service())
-    # The search outlives the reply it was called in: its result comes later.
-    await _cut_while_searching(setup, socket)
-    await _quiet(compactions)
-    assert (len(sleeper.waits), sleeper.stopped) == (1, 0)
-
-    searches.gates[_WEATHER].set()
-    await socket.until("chat.done", 2)
-    await _quiet(compactions)
-
-    assert ("chat.result", _WEATHER) in socket.chat()
-    assert sleeper.stopped == 1
-    assert len(sleeper.waits) == 2  # set again after the reply to the result
-    await _close(socket, linked)
-
-
-@pytest.mark.usefixtures("_small")
-async def test_a_compaction_set_to_run_is_stopped_by_a_call_and_never_runs_in_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sleeper = _Sleeper()
-    setup = await _a_new_sitting(monkeypatch, sleep=sleeper)
-    kept = setup.conversations.gem(str(setup.gem.id))
-
-    kept.call = cast("Any", SimpleNamespace())
-    sleeper.go.set()
-    await _quiet(setup.compactions)
-
-    assert sleeper.stopped == 1
-    assert kept.auto is None
-    assert _of(await _log(setup), "context.compacted") == []
-    await _close(setup.socket, setup.linked)
-
-
-@pytest.mark.usefixtures("_small")
-async def test_a_compaction_is_set_to_run_after_a_call_ends(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    set_clock(monkeypatch, _START)
-    world = await _world(_spoken("Hello."))
-    sleeper = _Sleeper()
-    compactions = CompactionEntityClass(
-        gems=world.chat._gems,
-        darbar=DarbarEntityClass(world.store._docdb),
-        store=world.store,
-        conversations=world.conversations,
-        chat=world.chat,
-        sleep=sleeper,
-    )
-
-    call, f, keeping = await world.call()
-    await _said_and_heard(f, "hello")
-    await _quiet(compactions)
-    assert sleeper.waits == []  # never while the call holds the gem
-    await _hang_up(call, keeping)
-    await _quiet(compactions)
-
-    assert sleeper.waits == [pytest.approx(28 * 60)]
-    sleeper.go.set()
-    await _quiet(compactions)
-
-
-@pytest.mark.usefixtures("_small")
-@pytest.mark.parametrize("setting", ["on_return", "never"])
-async def test_a_gem_not_set_to_compact_before_expiry_is_never_compacted_by_itself(
-    monkeypatch: pytest.MonkeyPatch, setting: str
-) -> None:
-    sleeper = _Sleeper()
-    setup = await _a_new_sitting(monkeypatch, sleep=sleeper, compaction=setting)
-
-    assert sleeper.waits == []
-    await _close(setup.socket, setup.linked)
-
-
-async def test_a_gem_under_the_size_is_not_compacted_by_itself(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sleeper = _Sleeper()
-    setup = await _a_new_sitting(monkeypatch, sleep=sleeper)
-
-    assert sleeper.waits == []
-    await _close(setup.socket, setup.linked)
-
-
-@pytest.mark.usefixtures("_small")
-async def test_a_compaction_that_runs_is_cut_by_a_message_and_stores_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sleeper = _Sleeper()
-    setup = await _a_new_sitting(monkeypatch, sleep=sleeper)
-    gate = asyncio.Event()
-    setup.llm.then([_delta("What the"), gate, *_summary()], _said("Four."))
-    setup.move(_START + timedelta(minutes=31 + 28))
-    sleeper.go.set()
-    await _eventually_asked(setup, 4)
-
-    setup.socket.send(setup.gem.id, "message 4")
-    await setup.socket.until("chat.done", 4)
-
-    log = await _log(setup)
-    assert _of(log, "context.compacted") == []
-    assert [e["outcome"] for e in _of(log, "request.done")][-2] == "cut"
-    assert setup.llm.requests[-1]["input"][0] != summed_up(_SUMMARY)
+    # Nothing is left running for the gem, or holding it.
+    assert setup.conversations.find(str(setup.gem.id)) is None
     await _close(setup.socket, setup.linked)
 
 
@@ -820,10 +603,10 @@ async def test_the_size_is_estimated_from_the_text_after_a_compaction(
     await _close(setup.socket, setup.linked)
 
 
-@pytest.mark.usefixtures("_small")
 async def test_after_a_compaction_no_cache_is_offered_until_the_next_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(compaction_ent, "COMPACT_OVER", 10)
     setup = await _a_new_sitting(monkeypatch, compaction="on_return")
     gem_id = str(setup.gem.id)
     failed = SimpleNamespace(

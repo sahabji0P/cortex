@@ -18,8 +18,6 @@ memory, for each gem, is a `GemConversation`:
   in the call if one holds the gem, and in writing otherwise, and it wakes a gem that is
   quiet. They are written down in the log as they come, so what waits is read again from
   it when needed.
-- a compaction set to run before the gem's cache expires, until it runs (see
-  `compaction_ent.py`). Anything that takes the gem first stops it.
 
 The user can reset a gem (`reset`): it starts again, knowing nothing from before. A
 reset takes the gem as a reply does, so a message sent meanwhile is answered by the
@@ -158,44 +156,15 @@ class GemConversation:
         # the gem woken, in the same way as a late result.
         self.events = PendingEvents(self._came)
         self._written = written
-        # A compaction set to run before the gem's cache expires, until it runs.
-        self.auto: asyncio.Task[None] | None = None
-        self._writer: Writer | None = None
-        self._call: Caller | None = None
-
-    @property
-    def writer(self) -> Writer | None:
-        """The reply being written to the gem, until it is stored: one at a time."""
-        return self._writer
-
-    @writer.setter
-    def writer(self, writer: Writer | None) -> None:
-        # Whatever takes the gem stops a compaction that was set to run.
-        if writer is not None:
-            self.stop_auto()
-        self._writer = writer
-
-    @property
-    def call(self) -> Caller | None:
-        """The call that holds the gem, from its opening until it is stored."""
-        return self._call
-
-    @call.setter
-    def call(self, call: Caller | None) -> None:
-        if call is not None:
-            self.stop_auto()
-        self._call = call
-
-    def stop_auto(self) -> None:
-        """Stop the compaction set to run before the cache expires, if one is."""
-        if self.auto is not None:
-            self.auto.cancel()
-            self.auto = None
+        # The reply being written to the gem, until it is stored: one at a time.
+        self.writer: Writer | None = None
+        # The call that holds the gem, from its opening until it is stored.
+        self.call: Caller | None = None
 
     @property
     def idle(self) -> bool:
         """Whether nothing of it needs keeping."""
-        held = self.writer is not None or self.call is not None or self.auto is not None
+        held = self.writer is not None or self.call is not None
         return not held and not self.late.pending and not self.events.pending
 
     def _came(self) -> None:

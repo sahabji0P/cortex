@@ -1,6 +1,5 @@
 """
-Compaction entity: summing up the older part of a gem's conversation, when asked or by
-itself before its cache expires.
+Compaction entity: summing up the older part of a gem's conversation, when the user asks.
 
 What a compaction is, where its line falls and what is sent with one in force is in
 `compaction.py`. Here is who makes one, and when.
@@ -15,20 +14,11 @@ tokens and cost are in the log. Once the summary is written, the compaction is s
 (`context.compacted`), at once: if it cannot be, the compaction fails and nothing
 changes. It never speaks, and never wakes the gem.
 
-The user's compaction (`compact`) is allowed whenever the gem is between turns, warm or
-cold, and refused while a call holds it. A reply being written is not cut: the
-compaction starts once it is done. A message sent meanwhile waits, and is answered after
-it, as with a reset.
-
-The gem's own (`before_expiry`, the gem's setting): after a reply or a call, if the gem's
-conversation is over `COMPACT_OVER`, a compaction is set to run `BEFORE_EXPIRY` before its
-cache expires, while the summary request still reads the cache. If its cache is gone
-when it runs (the model, the instructions or the tools changed meanwhile), it stops
-before the model is asked: only the cold start is stored. Anything that takes the
-gem first stops it: a message, a call, an event, a late result (see
-`GemConversation.writer`). Once it runs, a message or a call cuts it, as it cuts a reply:
-nothing is stored of it. It never runs during a call. A restart loses it, and the user's
-compaction is left for when they come back.
+A compaction (`compact`) is only ever made when the user asks. It is allowed whenever
+the gem is between turns, warm or cold, and refused while a call holds it. A reply being
+written is not cut: the compaction starts once it is done. A message sent meanwhile
+waits, and is answered after it, as with a reset. Nothing cuts a compaction: a call
+started meanwhile opens once it is done.
 
 Whoever listens is told the gem's key each time what its next request would be sent has
 changed: after a reply, a call, a reset or a compaction (`listen`). The state the app
@@ -40,7 +30,6 @@ request is estimated (`size`).
 
 import asyncio
 import functools
-import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -53,7 +42,6 @@ from app.core.errors import ConflictError, NotFoundError, UpstreamError
 from app.entities.chat_ent import ChatEntityClass
 from app.entities.cold_start import Numbered, cold
 from app.entities.compaction import (
-    BEFORE_EXPIRY,
     COMPACT_OVER,
     SUMMARY_TOKENS,
     Compacted,
@@ -81,8 +69,6 @@ from app.entities.model import MODELS, ModelName, RoundDone, TextDelta, Usage, o
 
 __all__ = ["CompactionEntityClass", "Context", "ContextListener"]
 
-_log = logging.getLogger(__name__)
-
 # Is told the key of a gem whose context has changed.
 type ContextListener = Callable[[str], Awaitable[None]]
 
@@ -107,21 +93,14 @@ class Context:
 class _Compacting:
     """A compaction, which holds the gem as a reply does until it is done.
 
-    The user's is not cut: whoever comes next waits for it. The gem's own is, by
-    stopping it (`stop`), until its summary is written.
+    It is never cut: whoever comes next waits for it.
     """
 
-    def __init__(self, stop: Callable[[], object] | None = None) -> None:
+    def __init__(self) -> None:
         self.over = asyncio.Event()
-        self._stop = stop
 
     def cut(self) -> None:
-        if self._stop is not None:
-            self._stop()
-
-    def keep(self) -> None:
-        """From here on it is not cut: what it wrote is being stored."""
-        self._stop = None
+        pass
 
 
 class CompactionEntityClass:
@@ -133,7 +112,6 @@ class CompactionEntityClass:
         store: ConversationStoreClass,
         conversations: ConversationEntityClass,
         chat: ChatEntityClass,
-        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._gems = gems
         self._darbar = darbar
@@ -141,8 +119,6 @@ class CompactionEntityClass:
         self._conversations = conversations
         # What a compaction's request is made with is what the next reply's would be.
         self._chat = chat
-        # How a compaction set to run waits for its time. Tests hand in their own.
-        self._sleep = sleep
         self._listeners: set[ContextListener] = set()
         # What runs on its own, kept so it is not lost while it runs.
         self._running: set[asyncio.Task[None]] = set()
@@ -176,7 +152,7 @@ class CompactionEntityClass:
             # A reply being written is not cut: it is stored first.
             if previous is not None:
                 await previous.over.wait()
-            compacted = await self._compact(key, holding, "user")
+            compacted = await self._compact(key)
             done = True
             return compacted
         finally:
@@ -248,10 +224,8 @@ class CompactionEntityClass:
         since = [entry.item for entry in entries if entry.seq is not None and entry.seq > sent.seq]
         return usage["input"] + usage["cache_read"] + usage["cache_write"] + size("", since)
 
-    async def _compact(
-        self, key: str, holding: _Compacting, by: Literal["user", "auto"]
-    ) -> Compacted:
-        """Write the summary and store the compaction. The gem must be held by `holding`."""
+    async def _compact(self, key: str) -> Compacted:
+        """Write the summary and store the compaction. The gem must be held."""
         ready = await self._chat.ready(key)
         if isinstance(ready, str):
             raise UpstreamError(f"the summary could not be written: {ready}")
@@ -273,10 +247,6 @@ class CompactionEntityClass:
             raise ConflictError("nothing to compact")
         made = await self._chat.next_request(ready, key, stored, mode=stored.mode)
         if made.record.started_cold:
-            if by == "auto":
-                # The settings changed while it waited: the summary would read no cache,
-                # and it is for a warm one that it runs. The cold start stays stored.
-                raise ConflictError("the cache is cold")
             # The settings changed: it started cold, whatever the time.
             before = stored.cache.sent
         turn = made.record.turn("compaction")
@@ -309,11 +279,10 @@ class CompactionEntityClass:
             _failed(turn, exc)
             raise UpstreamError(f"the summary could not be written: {exc}")
         summary = exact(text, replaced(stored.entries, before, stored.compacted, line))
-        holding.keep()
         # On its own, so that a write under way is finished even if this is stopped.
         writing = asyncio.ensure_future(
             self._conversations.log.record_compacted(
-                gem_id, turn.number, summary=summary, through=line, by=by
+                gem_id, turn.number, summary=summary, through=line
             )
         )
         try:
@@ -363,91 +332,18 @@ class CompactionEntityClass:
         self._conversations.let_go(key)
 
     def _settled(self, key: str, after: Settled) -> None:
-        task = asyncio.get_running_loop().create_task(self._after(key, after))
+        task = asyncio.get_running_loop().create_task(self._tell(key))
         self._running.add(task)
         task.add_done_callback(self._running.discard)
 
-    async def _after(self, key: str, after: Settled) -> None:
-        """Tell whoever listens, and after a reply or a call, set a compaction to run."""
+    async def _tell(self, key: str) -> None:
+        """Tell whoever listens that the gem's context changed."""
         if not ObjectId.is_valid(key):
             return  # no gem's id: nothing was stored
         # Each on its own, so a slow socket holds up neither the others nor what follows.
         await asyncio.gather(
             *(listener(key) for listener in list(self._listeners)), return_exceptions=True
         )
-        if after not in ("reply", "call"):
-            return
-        try:
-            await self._set(key)
-        except Exception:
-            _log.warning("a compaction of gem %s could not be set to run", key, exc_info=True)
-
-    async def _set(self, key: str) -> None:
-        """Set a compaction to run before the cache expires, if the gem is due one."""
-        if not await self._gems.exists(key):
-            return
-        state = await self.context(key)
-        if not _due(state):
-            return
-        assert state.cache_until is not None
-        kept = self._conversations.gem(key)
-        if kept.writer is not None or kept.call is not None:
-            # Taken while it was read: what took it sets one again when it lets it go.
-            self._conversations.let_go(key)
-            return
-        kept.stop_auto()
-        kept.auto = asyncio.get_running_loop().create_task(
-            self._auto(key, state.cache_until - BEFORE_EXPIRY)
-        )
-
-    async def _auto(self, key: str, at: datetime) -> None:
-        """Wait until `at`, then compact the gem if nothing has taken it."""
-        me = asyncio.current_task()
-        try:
-            wait = (at - datetime.now(UTC)).total_seconds()
-            if wait > 0:
-                await self._sleep(wait)
-            # Read again: the setting may have changed, or the cache be gone already.
-            state = await self.context(key)
-            kept = self._conversations.find(key)
-            if kept is None or kept.auto is not me:
-                return  # stopped while it was read
-            kept.auto = None
-            if not _due(state) or kept.writer is not None or kept.call is not None:
-                self._conversations.let_go(key)
-                return
-            assert me is not None
-            holding = _Compacting(me.cancel)
-            kept.writer = holding
-        except asyncio.CancelledError:
-            return  # stopped: something took the gem
-        except Exception:
-            _log.warning("a compaction of gem %s could not start", key, exc_info=True)
-            kept = self._conversations.find(key)
-            if kept is not None and kept.auto is me:
-                kept.auto = None
-                self._conversations.let_go(key)
-            return
-        done = False
-        try:
-            await self._compact(key, holding, "auto")
-            done = True
-        except asyncio.CancelledError:
-            pass  # cut by a message or a call: nothing is stored
-        except Exception as exc:
-            _log.info("gem %s was not compacted: %s", key, exc)
-        finally:
-            self._release(key, holding, done)
-
-
-def _due(state: Context) -> bool:
-    """Whether a gem compacts itself now: set to, over the size, and its cache warm."""
-    return (
-        state.compaction == "before_expiry"
-        and state.tokens > COMPACT_OVER
-        and state.cache_until is not None
-        and datetime.now(UTC) < state.cache_until
-    )
 
 
 def _provider(name: ModelName) -> Literal["OpenAI", "Anthropic"]:

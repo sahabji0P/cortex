@@ -72,11 +72,10 @@ as lost after a restart (a stub whose `source` is `lost-call`).
 
 - `context.compacted`  the conversation was compacted (see `compaction.py`), in the
                      turn of the request that wrote the summary: `summary`, `through`
-                     (the first entry still sent whole) and `by` (the `user`, or `auto`
-                     before the cache expired). From here on, what the gem remembers
-                     before `through` is sent as the summary. Like a reset, it cannot
-                     be lost: the compaction is done only once it is stored
-                     (`record_compacted`).
+                     (the first entry still sent whole) and `by` (always the `user`).
+                     From here on, what the gem remembers before `through` is sent as
+                     the summary. Like a reset, it cannot be lost: the compaction is
+                     done only once it is stored (`record_compacted`).
 - `turn.closed`      the reply was settled into what the gem remembers: `finished`,
                      `cut` or `failed`. What is kept of it is not written here: it is
                      the turn's `gem.said` entries, and a cut reply with none of them
@@ -329,7 +328,6 @@ class LogEntityClass:
         *,
         summary: str,
         through: int,
-        by: Literal["user", "auto"],
     ) -> int:
         """Write down that the conversation is compacted, once it is stored. Return its number.
 
@@ -344,7 +342,7 @@ class LogEntityClass:
             seq=seq,
             at=datetime.now(UTC),
             turn=turn,
-            data={"summary": summary, "through": through, "by": by},
+            data={"summary": summary, "through": through, "by": "user"},
         )
         await asyncio.shield(self._store.write([entry]))
         self._tell(gem_id, entry.shown())

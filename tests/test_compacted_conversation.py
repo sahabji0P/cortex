@@ -47,9 +47,7 @@ async def _said_at(setup: Any, text: str) -> int:
 
 async def _compact(setup: Any, through: int, summary: str = "They talked.") -> None:
     gem_id = ObjectId(setup.gem.id)
-    await setup.conversations.log.record_compacted(
-        gem_id, None, summary=summary, through=through, by="user"
-    )
+    await setup.conversations.log.record_compacted(gem_id, None, summary=summary, through=through)
 
 
 async def test_a_reply_is_sent_the_summary_then_everything_from_its_line_on() -> None:
@@ -188,7 +186,7 @@ async def test_a_call_starts_from_the_summary_and_what_follows_its_line() -> Non
         e.seq for e in log if e.kind == "user.said" and e.data["item"]["content"] == "message 2"
     )
     await world.conversations.log.record_compacted(
-        world.gem.id, None, summary="They talked.", through=second, by="user"
+        world.gem.id, None, summary="They talked.", through=second
     )
 
     world.llm.starts_anew()
