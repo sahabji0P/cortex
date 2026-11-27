@@ -20,7 +20,7 @@ from bson import ObjectId
 
 from app.core.errors import ConflictError, NotFoundError, UpstreamError
 from app.entities import compaction_ent
-from app.entities.compaction import ASK, Compacted, summed_up
+from app.entities.compaction import ASK, SUMMARY_TOKENS, Compacted, summed_up
 from app.entities.compaction_ent import CompactionEntityClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.main import app
@@ -183,6 +183,33 @@ async def test_a_compaction_is_written_down_in_a_turn_of_its_own_with_its_cost(
     assert (compacted["turn"], compacted["by"]) == (opened["turn"], "user")
     assert compacted["summary"] == _SUMMARY
     assert (closed["turn"], closed["outcome"]) == (opened["turn"], "finished")
+    await _close(setup.socket, setup.linked)
+
+
+async def test_the_summary_request_has_room_to_write_more_than_a_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    setup.llm.then(_summary())
+    asked: list[dict[str, Any]] = []
+    made = setup.chat.next_request
+
+    async def next_request(*args: Any, **kwargs: Any) -> Any:
+        found = await made(*args, **kwargs)
+        sent = found.model.round
+
+        def round_(items: Any, **options: Any) -> Any:
+            asked.append(options)
+            return sent(items, **options)
+
+        found.model.round = round_
+        return found
+
+    monkeypatch.setattr(setup.chat, "next_request", next_request)
+    await setup.compactions.compact(str(setup.gem.id))
+
+    [options] = asked
+    assert (options["use_tools"], options["max_tokens"]) == (False, SUMMARY_TOKENS)
     await _close(setup.socket, setup.linked)
 
 

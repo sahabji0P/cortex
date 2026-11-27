@@ -49,6 +49,7 @@ from app.entities.cold_start import cold
 from app.entities.compaction import (
     BEFORE_EXPIRY,
     COMPACT_OVER,
+    SUMMARY_TOKENS,
     Compacted,
     Setting,
     asked,
@@ -234,7 +235,11 @@ class CompactionEntityClass:
         text, usage = "", cast("Usage | None", None)
         try:
             async for event in made.model.round(
-                items, instructions=joined(made.layers), think=think, use_tools=False
+                items,
+                instructions=joined(made.layers),
+                think=think,
+                use_tools=False,
+                max_tokens=SUMMARY_TOKENS,
             ):
                 if isinstance(event, TextDelta):
                     request.first()

@@ -37,8 +37,9 @@ tokenizer is used.
 
 The summary request is the gem's own model, sent the same instructions, tools and items
 as its next request would be, so a warm cache is read, then one line of ours that asks
-for the summary (`ASK`), with tool use off. After what the model writes, the code adds a
-section of its own: identifiers copied exactly from the part being replaced (`exact`).
+for the summary (`ASK`), with tool use off and room to write it (`SUMMARY_TOKENS`). After
+what the model writes, the code adds a section of its own: identifiers copied exactly
+from the part being replaced (`exact`).
 """
 
 import re
@@ -55,6 +56,7 @@ __all__ = [
     "COMPACT_OVER",
     "HEADINGS",
     "KEEP_WHOLE",
+    "SUMMARY_TOKENS",
     "Compacted",
     "Setting",
     "asked",
@@ -71,6 +73,11 @@ COMPACT_OVER = 100_000
 
 # At most about this many estimated tokens of the latest sitting are kept whole.
 KEEP_WHOLE = 20_000
+
+# The most the summary request may write, thinking included, where a provider needs a
+# ceiling (Anthropic's). A reply's is far lower (see `model.py`): a summary that ran out
+# of it would fail. Every model a gem can use allows more.
+SUMMARY_TOKENS = 32_000
 
 # How long before its cache expires a gem whose setting is `before_expiry` is compacted.
 BEFORE_EXPIRY = timedelta(minutes=2)
