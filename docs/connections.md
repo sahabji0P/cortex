@@ -146,9 +146,18 @@ offered at least one deferred tool is also offered one tool of ours, `tool_searc
 deferred. Its description says that more tools are behind it and lists each deferred
 connection by name with how many tools it has.
 
-Cortex runs the search itself: it scores each deferred tool by how many of the query's
-words are in its name, description and argument names, and returns the best eight, by
-name. Each provider's own deferred loading then loads them, and a loaded tool's
+Cortex runs the search itself, and returns the best eight deferred tools, by name:
+
+- **A tool scores for each word of the query** found in its name (without its
+  connection's key), its description or its arguments' names. A word that starts one of
+  them counts: "issue" finds "issues".
+- **A word counts by how rare it is** among the deferred tools, as BM25 weighs it. "get",
+  "list" or "a", which most of a server's tools have, count little. A word only a few
+  have counts much, so the one tool that says "lock" wins over the many that say "get".
+- **A word in the tool's name counts three times.** A query that is a tool's whole name
+  finds that tool first. Ties keep the tools' order.
+
+Each provider's own deferred loading then loads the tools found, and a loaded tool's
 definition lands at the end of the context, where the search was:
 
 - **Anthropic.** Every deferred tool stays in `tools`, with `defer_loading: true`, on

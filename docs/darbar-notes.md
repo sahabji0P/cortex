@@ -172,6 +172,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - A pass running out: a badge in the app only. No pop-up, no notification.
 - Sign-in servers that do not let Cortex register itself (Google's): next, with a client ID, secret and scope the user gives. Scope step-up on a 403: not built.
 - Connections over SSE: not built.
+- `tool_search`: no list of tool names in its description, and no limit the model sets. Either would change every request; the search finds most tools by itself.
 - A connection's pictures and sounds are not passed on to the model, only text.
 - A server telling us its tools changed: not listened to. You refresh.
 - A connection document that cannot be read stops every gem's reply. Skip it and say so instead.

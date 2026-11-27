@@ -15,6 +15,7 @@ the search's result stays in the history.
 """
 
 import json
+import math
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -268,6 +269,8 @@ def _format_search(result: SearchResult) -> str:
 
 # The most tools one search loads.
 _FOUND_MAX = 8
+# How many times a word of the query found in a tool's name counts.
+_NAME_WEIGHT = 3
 
 
 def tool_search_tool(deferred: Sequence[Tool]) -> Tool:
@@ -307,29 +310,49 @@ def tool_search_tool(deferred: Sequence[Tool]) -> Tool:
 def search_tools(query: str, tools: Sequence[Tool]) -> list[str]:
     """The names of the tools that best fit `query`, best first, at most `_FOUND_MAX`.
 
-    A tool scores one for each word of the query found among the words of its name
+    A tool is scored by the words of the query found among the words of its name
     (without its connection's key), its description and its arguments' names (a word
-    found as the start of one counts: "issue" finds "issues"). A query that is a tool's
-    name finds that tool first. Ties keep the tools' own order, and a tool that scores
-    nothing is not found.
+    found as the start of one counts: "issue" finds "issues"). A word counts by how rare
+    it is among `tools`: one most of them have ("get", "list", "a") counts little, one
+    few have counts much. A word found in the tool's name counts `_NAME_WEIGHT` times. A
+    query that is a tool's name finds that tool first. Ties keep the tools' own order,
+    and a tool that has none of the words is not found.
     """
     asked = set(_words(query))
-    scored: list[tuple[int, int, str]] = []
-    for index, tool in enumerate(tools):
-        if tool.name == query.strip():
-            scored.append((-len(asked) - 1, index, tool.name))
-            continue
+    documents: list[tuple[list[str], list[str]]] = []
+    for tool in tools:
         properties = tool.spec.parameters.get("properties")
         named = cast("dict[object, object]", properties) if isinstance(properties, dict) else {}
         arguments = " ".join(str(name) for name in named)
         # A connection's tool is named `{key}__{tool}`. The key is left out: it is in
         # every name of the connection, so a query that names the connection would find
         # all its tools, and load the eight first ones whatever was asked for.
-        own = _words(f"{tool.name.split('__', 1)[-1]} {tool.spec.description} {arguments}")
-        score = sum(1 for word in asked if any(one.startswith(word) for one in own))
+        name = _words(tool.name.split("__", 1)[-1])
+        documents.append((name, [*name, *_words(f"{tool.spec.description} {arguments}")]))
+    # How rare each word is, as BM25 weighs it: a word every tool has still counts a little.
+    weight = {
+        word: math.log(1 + (len(tools) - having + 0.5) / (having + 0.5))
+        for word in asked
+        for having in [sum(1 for _, own in documents if _has(own, word))]
+    }
+    scored: list[tuple[float, int, str]] = []
+    for index, (tool, (name, own)) in enumerate(zip(tools, documents, strict=True)):
+        if tool.name == query.strip():
+            scored.append((-math.inf, index, tool.name))
+            continue
+        score = sum(
+            weight[word] * (_NAME_WEIGHT if _has(name, word) else 1)
+            for word in asked
+            if _has(own, word)
+        )
         if score:
             scored.append((-score, index, tool.name))
-    return [name for _, _, name in sorted(scored)[:_FOUND_MAX]]
+    return [tool_name for _, _, tool_name in sorted(scored)[:_FOUND_MAX]]
+
+
+def _has(words: list[str], word: str) -> bool:
+    """Whether `word` is one of `words`, or the start of one."""
+    return any(one.startswith(word) for one in words)
 
 
 def _words(text: str) -> list[str]:

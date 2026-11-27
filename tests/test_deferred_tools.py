@@ -107,6 +107,29 @@ def test_a_search_ranks_by_the_words_it_shares_caps_and_puts_a_name_first() -> N
     assert search_tools("tracker__issue_11", many)[0] == "tracker__issue_11"
 
 
+def test_a_search_counts_a_rare_word_above_a_common_one() -> None:
+    # Each tool has two of the three words, but most tools say "get" and only one says
+    # "lock": a count alone would tie them and keep their order.
+    tools = [
+        _tool("tracker__get_issue", "Get an issue."),
+        _tool("tracker__get_comments", "Get the comments on an issue."),
+        _tool("tracker__get_labels", "Get the labels of an issue."),
+        _tool("tracker__lock_issue", "Lock an issue."),
+    ]
+
+    assert search_tools("get issue lock", tools)[0] == "tracker__lock_issue"
+
+
+def test_a_word_in_a_tool_s_name_counts_above_one_in_its_description() -> None:
+    mentions = _tool("tracker__close_issue", "Close an issue. Its comments stay.")
+    named = _tool("tracker__add_comment", "Add a note to an issue.")
+
+    assert search_tools("comment", [mentions, named]) == [
+        "tracker__add_comment",
+        "tracker__close_issue",
+    ]
+
+
 def test_a_loaded_tool_that_has_gone_stays_declared_and_deferred() -> None:
     specs = _toolbox(_searched("tracker__gone"), _FIND)
 
