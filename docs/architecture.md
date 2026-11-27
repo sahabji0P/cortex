@@ -50,15 +50,15 @@ config ← core ← adapters ← entities ← routers ← main
 | `written_ent.py` | a conversation in writing: one message in, its reply streamed out |
 | `call_ent.py` | opening a call, and storing what it adds |
 | `chat_ent.py` | written chat with the gems, made from what is stored |
-| `conversation_ent.py` | what is kept in memory of each gem's one conversation: its writer, its background calls, and a compaction set to run; loading and adding to what is stored |
+| `conversation_ent.py` | what is kept in memory of each gem's one conversation: its writer and its background calls; loading and adding to what is stored |
 | `conversation_store.py` | each gem's log in the database (`GemLog`) |
 | `history.py` | the rules for what joins a history and when: the user's words, the lines where the mode changes, what is kept beside an item |
 | `late_results.py` | tool calls that outlive their reply, held until their results are told: one copy for a call and for chat |
 | `pending_events.py` | events that came in for a gem's watches, held until they are told: one copy for a call and for chat |
 | `events_ent.py` | where every watch hands its events (the `EventSink`), and waking gems with events waiting after a restart |
 | `cold_start.py` | when a conversation starts cold, and the items as they are sent from then on, with old long tool results expired |
-| `compaction.py` | where a compaction draws its line, the items as they are sent with one in force (its summary, then the rest), and the estimated size of a request |
-| `compaction_ent.py` | compacting a gem's conversation: when the user asks, and by itself before its cache expires; where its context stands |
+| `compaction.py` | what there is to compact, the items as they are sent with a compaction in force (its summary, then what came after it), the estimated size of a request, and what keeping and compacting would cost |
+| `compaction_ent.py` | compacting a gem's conversation when the user asks, and where its context stands |
 | `gem_log.py` | everything that happens with a gem, numbered and written down as it happens |
 | `model.py` | either provider's model behind one interface, and the list of models |
 | `prices.py` | what a model request cost, from its tokens |
@@ -145,13 +145,12 @@ loses nothing: a socket that closes cuts its replies, and they are stored as cut
   grows with every message, and quickly when tools are used. A message is at most 20,000
   characters, so one stray paste cannot ride along in every request after it. Two
   things are sent other than as stored: after a cold start (rule 3 below), old long tool
-  results are sent expired; and once the conversation is compacted, what came before the
-  compaction's line is sent as its summary (rule 4 below).
-- **A compaction takes the gem as a reply does.** The user's waits for a reply being
-  written, is refused in a call, and a message sent meanwhile waits for it. One the gem
-  makes by itself before its cache expires is stopped by anything that takes the gem
-  first, cut by a message or a call while it runs, and stops by itself if the cache is
-  gone when it runs ([`compaction_ent.py`](../app/entities/compaction_ent.py)).
+  results are sent expired; and once the conversation is compacted, everything before
+  the compaction is sent as its summary (rule 4 below).
+- **A compaction takes the gem as a reply does.** It is made only when the user asks. It
+  waits for a reply being written, is refused in a call, and a message or a call that
+  comes meanwhile waits for it. Nothing cuts it
+  ([`compaction_ent.py`](../app/entities/compaction_ent.py)).
 - **The user can reset the gem.** It then starts again, knowing nothing from before.
   A reset takes the gem as a reply does: one being written is cut first, a message sent
   meanwhile waits and is answered after the reset, and a call refuses it. Background
@@ -194,8 +193,9 @@ writing.
    the same, so a prompt cache stays valid. One consequence: what the model said before
    a tool call is kept whole once it is sent back with the result, even if the user cut
    it off part-way. **One exception: a cold start.** Once the provider's cache has
-   gone (the gem was quiet longer than the cache lasts, or its model,
-   instructions or tools changed), everything is sent at full price anyway. So then, and
+   gone (its model, instructions or tools changed, the conversation was compacted, or
+   the gem was quiet longer than the cache lasts), everything is sent at full price
+   anyway. So then, and
    only then, long tool results that were sent before are sent expired: a fixed line in
    place of their output. Some results are never expired
    ([which](chat-contract.md#a-cold-start)). What is stored never changes, and from
@@ -203,16 +203,15 @@ writing.
    checked for each reply in writing and once when a call starts, and written down as
    `cache.cold` ([`cold_start.py`](../app/entities/cold_start.py), and
    [the contract](chat-contract.md#a-cold-start)).
-4. **Past a size, the older part is sent summed up.** A compaction has the gem's own
-   model write a summary of the conversation, from the very request its next reply would
-   be sent, so a warm cache is read. From then on every request is sent that summary, as
-   one line of ours, then the tool searches from before the line (what they loaded stays
-   loaded), and then everything from the compaction's line on, whole: the latest
-   sitting, at most about 20,000 estimated tokens of it, from the start of a turn. The
-   summary, and in the compaction's own request the line that asks for it, are the only
-   things sent that are not something the gem remembers. What is
-   stored never changes, and each request again starts with the whole of the one
-   before. It is written down as `context.compacted`
+4. **When the user asks, everything is sent summed up.** A compaction has the gem's own
+   model write a summary of the whole conversation, from the very request its next reply
+   would be sent, so a warm cache is read. From then on every request is sent that
+   summary, as one line of ours, then only what was remembered after the compaction's
+   request, whole. The first request after it starts cold (rule 3). The summary, and in
+   the compaction's own request the line that asks for it, are the only things sent that
+   are not something the gem remembers. What is stored never changes, and each request
+   again starts with the whole of the one before. It is written down as
+   `context.compacted`
    ([`compaction.py`](../app/entities/compaction.py), and
    [the contract](chat-contract.md#a-compaction)).
 

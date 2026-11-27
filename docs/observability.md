@@ -31,8 +31,9 @@ it. Every kind of entry and its fields are in
   `event`. One written down and never told is still waiting.
 - **When was the conversation summed up, and what did that cost?** A compaction is a turn
   of its own (`turn.opened` `by` `compaction`): its request, with its tokens and cost,
-  then `context.compacted` with the summary, its line (`through`) and who asked (`user`,
-  or `auto` before the cache expired).
+  then `context.compacted` with the summary, its line (`through`, the `seq` of its own
+  `request.sent`) and who asked (always `user`). The next request's `cache.cold` has
+  the reason `compaction`.
 - **How big is the gem's next request?** The size the app is shown
   ([`/context`](chat-contract.md#get-v1gemsgem_idcontext)) is read from the log: what the
   latest `request.done` was billed, and what was remembered after its `request.sent`.
@@ -111,8 +112,8 @@ the gem: the conversation is what the gem remembers after the latest one, and
 what came before stays in the log. A `cache.cold` is where the conversation started
 cold: from there on, long tool results before its `before` are sent expired (see
 [the contract](chat-contract.md#a-cold-start)). A `context.compacted` is where the
-conversation was summed up: from there on, what the gem remembers before its `through`
-is sent as its `summary` (see [the contract](chat-contract.md#a-compaction)). An `event.came` is an event that came in;
+conversation was summed up: from there on, everything the gem remembered before its
+`through` is sent as its `summary`, and only what came after it whole (see [the contract](chat-contract.md#a-compaction)). An `event.came` is an event that came in;
 the gem knows of it only from the `event.received` that tells it, and an `event.came`
 that none tells is waiting (see [the contract](chat-contract.md#an-event)).
 
@@ -125,7 +126,7 @@ that none tells is waiting (see [the contract](chat-contract.md#an-event)).
 - **A request holds a count, not a copy.** It was sent every remembered entry before it,
   since the latest reset, and `count` says how many, each as stored or, before the line
   of the latest `cache.cold`, expired; with a `context.compacted` before it, its summary
-  in place of what came before its `through`, but the searches; and for a compaction's own request, the
+  in place of everything before its `through`; and for a compaction's own request, the
   line that asks for the summary last. `count` counts those lines too. That is how
   `/sent` rebuilds it, and how a lost entry shows: the numbers do not add up, and
   `exact` is false. A `cache.cold` is kept like what the gem remembers, since what was

@@ -79,16 +79,16 @@ more than input (see [Cost](#cost)).
   tokens is not cached.
 - **How long a cache lasts** is taken to be 5 minutes from its last use on Anthropic
   (ours ask for no longer) and 30 minutes on OpenAI (its default from GPT-5.6 on; through
-  the proxy it is not known). After that, or when the model, the instructions or the
-  tools change, a conversation starts cold (see [the contract](chat-contract.md#a-cold-start)).
+  the proxy it is not known). After that, when the model, the instructions or the tools
+  change, or after a compaction, a conversation starts cold (see
+  [the contract](chat-contract.md#a-cold-start)).
 - **A compaction made while the cache is warm reads it.** The summary request is sent
   the same instructions, tools and items as the gem's next reply would be, with one line
   of ours after them and tool use off (`tool_choice` none). Turning tool use off was
   measured not to lose the cache on Anthropic: on Haiku 5.5, Sonnet 5.5 and Opus 5.5 such
-  a request read everything the request before it wrote. That is why a gem set to
-  `before_expiry` compacts itself 2 minutes before its cache expires (see
-  [the contract](chat-contract.md#compaction)). On OpenAI it was not measured. The request
-  after a compaction starts with the summary, so it writes the cache again.
+  a request read everything the request before it wrote. On OpenAI it was not measured.
+  The request after a compaction starts with the summary, so it writes the cache again:
+  it is a cold start, with the reason `compaction`.
 - **A summary has more room than a reply.** On Anthropic a reply may write at most 8,192
   tokens, thinking included, and one that reaches it fails. The summary request may write
   32,000, which every model a gem can use allows. A larger ceiling was measured not to
@@ -151,3 +151,10 @@ which is kept by hand and dated.
 
 A request's tokens and cost are written to the gem's log
 ([Observability](observability.md)). Speech and search are not costed yet.
+
+From the same table, a gem's context estimates what is to come
+([`/context`](chat-contract.md#get-v1gemsgem_idcontext)): what its next request would
+cost with the conversation kept and the cache gone (writing all of it to the cache), and
+what compacting it would cost (the summary request reading a warm cache or writing a
+cold one, about 2,000 tokens written out, then about 2,000 written to the cache by the
+next request). Both are unknown where a price is.
