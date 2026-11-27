@@ -16,7 +16,7 @@ from app.entities.compaction import (
     through,
     view,
 )
-from app.entities.model import Item, to_input, to_messages
+from app.entities.model import Item, ToolSpec, to_input, to_messages
 
 _LONG = "x" * KEEP_UNDER
 
@@ -64,6 +64,16 @@ def test_the_size_is_the_characters_of_the_instructions_and_the_items_over_four(
 
     assert size("i" * 8, items) == (8 + 10 + 6 + 20) // 4
     assert size("", []) == 0
+
+
+def test_the_size_counts_the_tools_told_in_full_as_json_and_not_the_deferred() -> None:
+    told = ToolSpec("find", "Find it.", {"type": "object"})
+    deferred = ToolSpec("load", "Load it.", {"type": "object"}, deferred=True)
+    schema = json.dumps(
+        {"name": "find", "description": "Find it.", "parameters": {"type": "object"}}
+    )
+
+    assert size("i" * 8, [], [told, deferred]) == (8 + len(schema)) // 4
 
 
 # ---- where the line falls

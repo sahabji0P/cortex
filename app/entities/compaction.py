@@ -31,9 +31,9 @@ Where `through` falls (`through`):
 If nothing remembered lies between the compaction in force (or the conversation's
 start) and `through`, there is nothing to compact.
 
-The size of a conversation is an estimate: the characters of what its next request
-would be sent (the instructions and the items' text), divided by four (`size`). No
-tokenizer is used.
+The size of a conversation is an estimate (`size`): the characters of what its next
+request would be sent (the instructions, the items' text and the tools it is told of in
+full, as JSON), divided by four. No tokenizer is used.
 
 The summary request is the gem's own model, sent the same instructions, tools and items
 as its next request would be, so a warm cache is read, then one line of ours that asks
@@ -42,13 +42,14 @@ what the model writes, the code adds a section of its own: identifiers copied ex
 from the part being replaced (`exact`).
 """
 
+import json
 import re
 from collections.abc import Sequence
 from datetime import timedelta
 from typing import Literal, NamedTuple
 
 from app.entities.cold_start import Numbered, as_sent
-from app.entities.model import SEARCH_TOOL, Item, Message
+from app.entities.model import SEARCH_TOOL, Item, Message, ToolSpec
 
 __all__ = [
     "ASK",
@@ -214,9 +215,18 @@ def _text(item: Item) -> str:
     return item["output"]
 
 
-def size(instructions: str, items: Sequence[Item]) -> int:
-    """The estimated tokens of a request sent these instructions and items."""
-    return (len(instructions) + sum(len(_text(item)) for item in items)) // 4
+def size(instructions: str, items: Sequence[Item], tools: Sequence[ToolSpec] = ()) -> int:
+    """The estimated tokens of a request sent these instructions, items and tools.
+
+    A tool counts as its name, description and parameters, as JSON. A deferred one is not
+    counted: it is not in what the model reads until a search loads it.
+    """
+    told = sum(
+        len(json.dumps({"name": t.name, "description": t.description, "parameters": t.parameters}))
+        for t in tools
+        if not t.deferred
+    )
+    return (len(instructions) + sum(len(_text(item)) for item in items) + told) // 4
 
 
 def through(
