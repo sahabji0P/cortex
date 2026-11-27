@@ -96,7 +96,8 @@ def every_request_is_sent_what_its_gem_remembers(monkeypatch: pytest.MonkeyPatch
         compaction: int | None = None,
     ) -> Any:
         remembered = remembered_now(self)
-        if remembered is not None and list(items[-1:]) == [asked()]:
+        old = list(items[-1:]) == [asked()]  # as an older log wrote one, in a turn
+        if remembered is not None and (compaction is not None or old):
             # A compaction's own request: the message that asks for the summary comes last.
             remembered = [*remembered, asked()]
         if remembered is not None and list(items) != remembered:

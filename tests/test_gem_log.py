@@ -892,28 +892,26 @@ async def test_a_compaction_that_failed_or_was_stopped_ends_so(
     assert ended["data"] == {"compaction": compaction.seq, "outcome": outcome, "error": said}
 
 
-async def test_a_compaction_is_written_at_once_in_its_turn_and_read_back_in_force() -> None:
+async def test_a_compaction_is_written_at_once_and_read_back_in_force() -> None:
     docdb, store, conversations = await _conversations()
     gem_id = ObjectId()
     log = conversations.log
     await log.open(gem_id)
-    turn = conversations.recording(gem_id, "chat").turn("compaction")  # 0
+    compaction = conversations.recording(gem_id, "chat").compaction()  # 0
 
-    first = await log.record_compacted(gem_id, turn.number, summary="One.", through=7)
-    second = await log.record_compacted(gem_id, None, summary="Two.", through=9)
+    first = await log.record_compacted(gem_id, compaction.seq or 0, summary="One.", through=7)
+    second = await log.record_compacted(gem_id, 5, summary="Two.", through=9)
 
     await log.written()
     assert [d["kind"] for d in _log(docdb)] == [
-        "turn.opened",
+        "compaction.started",
         "context.compacted",
         "context.compacted",
     ]
-    [opened] = [d for d in _log(docdb) if d["kind"] == "turn.opened"]
-    assert opened["data"]["by"] == "compaction"
     [one] = [d for d in _log(docdb) if d["seq"] == first]
     assert (one["turn"], one["data"]) == (
-        turn.number,
-        {"summary": "One.", "through": 7, "by": "user"},
+        None,
+        {"summary": "One.", "through": 7, "by": "user", "compaction": 0},
     )
     # The latest is in force, and before it the one before.
     assert await store.compacted(gem_id) == Compacted("Two.", 9)
@@ -933,7 +931,7 @@ async def test_a_compaction_that_cannot_be_stored_raises_and_nothing_is_kept() -
     docdb.breaks_on_kind = "context.compacted"
 
     with pytest.raises(ConnectionError, match="the database went away"):
-        await conversations.log.record_compacted(gem_id, None, summary="One.", through=7)
+        await conversations.log.record_compacted(gem_id, 0, summary="One.", through=7)
 
     assert await store.compacted(gem_id) is None
 

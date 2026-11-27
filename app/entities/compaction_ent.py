@@ -11,12 +11,13 @@ as a reply in writing would (see `ChatEntityClass.next_request`), which may star
 conversation cold, and sends what that request would be sent, with a plain message that
 asks for the summary after it, as one call of its own: our instructions in place of the
 gem's, no tool use, no cache marks, and JSON held to a schema (see `compaction.py`).
-What does not fit the schema fails it, as a refusal does. The request is written down
-like any other, in a turn of its own (`turn.opened` with `by: "compaction"`), so its
-tokens and cost are in the log, and its `request.sent` is the compaction's line
-(`through`). Once the summary is written, the compaction is stored
-(`context.compacted`), at once: if it cannot be, the compaction fails and nothing
-changes. It never speaks, and never wakes the gem.
+What does not fit the schema fails it, as a refusal does. A compaction is no turn, and
+takes no turn number: it is written down from `compaction.started`, before its request
+is made, to `compaction.ended`, whatever happened. Its request is written down like any
+other, naming the compaction, so its tokens and cost are in the log, and its
+`request.sent` is the compaction's line (`through`). Once the summary is written, the
+compaction is stored (`context.compacted`), at once: if it cannot be, the compaction
+fails and nothing changes. It never speaks, and never wakes the gem.
 
 A compaction (`compact`) is only ever made when the user asks. It is allowed whenever
 the gem is between turns, warm or cold, and refused while a call holds it. A reply being
@@ -43,7 +44,7 @@ from bson import ObjectId
 
 from app.config import settings
 from app.core.errors import ConflictError, NotFoundError, UpstreamError
-from app.entities.chat_ent import ChatEntityClass
+from app.entities.chat_ent import ChatEntityClass, Ready
 from app.entities.cold_start import Numbered, cold
 from app.entities.compaction import (
     COMPACT_OVER,
@@ -62,13 +63,14 @@ from app.entities.compaction import (
 from app.entities.conversation_ent import (
     ConversationEntityClass,
     Settled,
+    Stored,
     gem_key,
     numbered,
 )
 from app.entities.conversation_store import COLD, COMPACTED, RESET, ConversationStoreClass
 from app.entities.darbar_ent import DarbarEntityClass
 from app.entities.gem_ent import GemEntityClass
-from app.entities.gem_log import TurnRecord
+from app.entities.gem_log import CompactionRecord, Recording
 from app.entities.instructions import instruction_layers, joined
 from app.entities.model import (
     MODELS,
@@ -250,16 +252,52 @@ class CompactionEntityClass:
             raise ConflictError("nothing to compact")
         # Read before the request: the gem is held, so nothing the user says comes between.
         said = await self._said(gem_id, stored.compacted)
-        made = await self._chat.next_request(ready, key, stored, mode=stored.mode)
-        turn = made.record.turn("compaction")
+        # Begun before its request is made: a cold start it brings is written after this.
+        record = self._conversations.recording(gem_id, stored.mode)
+        compaction = record.compaction()
+        if compaction.seq is None:
+            raise RuntimeError("the compaction could not be written down")
+        landing = False
+        try:
+            summary, line = await self._summary(ready, key, stored, said, record, compaction)
+            # On its own, so that a write under way is finished even if this is stopped.
+            writing = asyncio.ensure_future(
+                self._conversations.log.record_compacted(
+                    gem_id, compaction.seq, summary=summary, through=line
+                )
+            )
+            try:
+                await asyncio.shield(writing)
+            except asyncio.CancelledError:
+                # Stopped while it is stored (the backend shuts down): once it is, it is
+                # done.
+                landing = True
+                writing.add_done_callback(functools.partial(self._landed, key, compaction))
+                raise
+        except BaseException as exc:
+            if not landing:
+                _ended(compaction, exc)
+            raise
+        compaction.ended(done=True)
+        return Compacted(summary, line)
+
+    async def _summary(
+        self,
+        ready: Ready,
+        key: str,
+        stored: Stored,
+        said: list[str],
+        record: Recording,
+        compaction: CompactionRecord,
+    ) -> tuple[str, int]:
+        """Have the model write the summary. Return it, and the compaction's line."""
+        made = await self._chat.next_request(ready, key, stored, mode=stored.mode, record=record)
         items = [*made.sent, asked()]
-        request = turn.sent(items, False)
+        request = compaction.sent(items)
         # Everything remembered before the request is in it, and summed up.
         line = request.seq
         if line is None:
-            exc = RuntimeError("the summary request could not be written down")
-            _failed(turn, exc)
-            raise exc
+            raise RuntimeError("the summary request could not be written down")
         text, usage = "", cast("Usage | None", None)
         try:
             async for event in made.model.round(
@@ -275,34 +313,17 @@ class CompactionEntityClass:
                     usage = event.usage
         except BaseException as exc:
             request.stopped(text, exc)
-            _failed(turn, exc)
             if isinstance(exc, Exception):
+                compaction.failed(exc)
                 raise UpstreamError(f"the summary could not be written: {exc}") from exc
             raise
         request.done(text, [], usage)
         try:
             fields = read(text)
         except ValueError as exc:
-            _failed(turn, exc)
+            compaction.failed(exc)
             raise UpstreamError(f"the summary could not be written: {exc}") from exc
-        summary = written(fields, made.sent, said)
-        # On its own, so that a write under way is finished even if this is stopped.
-        writing = asyncio.ensure_future(
-            self._conversations.log.record_compacted(
-                gem_id, turn.number, summary=summary, through=line
-            )
-        )
-        try:
-            await asyncio.shield(writing)
-        except asyncio.CancelledError:
-            # Stopped while it is stored (the backend shuts down): once it is, it is done.
-            writing.add_done_callback(functools.partial(self._landed, key, turn))
-            raise
-        except BaseException as exc:
-            _failed(turn, exc)
-            raise
-        turn.closed(finished=True, kept=None)
-        return Compacted(summary, line)
+        return written(fields, made.sent, said), line
 
     async def _said(self, gem_id: ObjectId, compacted: Compacted | None) -> list[str]:
         """What the user said in the part a summary is to replace, in order.
@@ -317,13 +338,13 @@ class CompactionEntityClass:
             if entry.kind == "user.said" and entry.seq >= since and "role" in entry.data.item
         ]
 
-    def _landed(self, key: str, turn: TurnRecord, writing: asyncio.Future[int]) -> None:
+    def _landed(self, key: str, compaction: CompactionRecord, writing: asyncio.Future[int]) -> None:
         """A compaction stopped while it was stored is done once it is, or failed."""
         error = asyncio.CancelledError() if writing.cancelled() else writing.exception()
         if error is not None:
-            _failed(turn, error)
+            _ended(compaction, error)
             return
-        turn.closed(finished=True, kept=None)
+        compaction.ended(done=True)
         self._conversations.settled(key, "compaction")
 
     def _release(self, key: str, holding: _Compacting, done: bool) -> None:
@@ -357,8 +378,8 @@ def _provider(name: ModelName) -> Literal["OpenAI", "Anthropic"]:
     return next(info.provider for info in MODELS if info.name == name)
 
 
-def _failed(turn: TurnRecord, error: BaseException) -> None:
-    """Close a compaction's turn as failed, or cut if it was stopped."""
+def _ended(compaction: CompactionRecord, error: BaseException) -> None:
+    """End a compaction that did not finish: failed, or cut if it was stopped."""
     if isinstance(error, Exception):
-        turn.failed(error)
-    turn.closed(finished=False, kept=None)
+        compaction.failed(error)
+    compaction.ended(done=False)

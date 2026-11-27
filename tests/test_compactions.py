@@ -138,11 +138,21 @@ def _of(log: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
     return [entry for entry in log if entry["kind"] == kind]
 
 
+def _compaction(log: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The latest compaction's entries, in order: its `compaction.started`, and every
+    entry that names it."""
+    started = _of(log, "compaction.started")[-1]["seq"]
+    return [e for e in log if e["seq"] == started or e.get("compaction") == started]
+
+
 async def _asked_at(setup: Any) -> int:
     """The number of the latest compaction's own `request.sent`: its line."""
-    log = await _log(setup)
-    turn = [e for e in _of(log, "turn.opened") if e["by"] == "compaction"][-1]["turn"]
-    return next(e["seq"] for e in _of(log, "request.sent") if e["turn"] == turn)
+    return next(e["seq"] for e in _compaction(await _log(setup)) if e["kind"] == "request.sent")
+
+
+async def _ended(setup: Any) -> dict[str, Any]:
+    """How the latest compaction ended."""
+    return _compaction(await _log(setup))[-1]
 
 
 # ---- the user's compaction
@@ -222,20 +232,32 @@ async def test_a_change_of_settings_after_a_compaction_is_the_reason_it_starts_c
     await _close(setup.socket, setup.linked)
 
 
-async def test_a_compaction_is_written_down_in_a_turn_of_its_own_with_its_cost(
+async def test_a_compaction_is_no_turn_and_is_written_down_with_its_cost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     setup = await _a_new_sitting(monkeypatch)
-    setup.llm.then(_summary(used=True))
+    setup.llm.then(_summary(used=True), _said("Four."))
+    turns = len(_of(await _log(setup), "turn.opened"))
 
-    await setup.compactions.compact(str(setup.gem.id))
+    compacted = await setup.compactions.compact(str(setup.gem.id))
 
     log = await _log(setup)
-    opened = _of(log, "turn.opened")[-1]
-    [done] = [e for e in _of(log, "request.done") if e["turn"] == opened["turn"]]
-    [compacted] = _of(log, "context.compacted")
-    closed = _of(log, "turn.closed")[-1]
-    assert (opened["by"], opened["mode"]) == ("compaction", "chat")
+    started = _of(log, "compaction.started")[-1]
+    # Everything from its start on is the compaction's: it names it, and no turn.
+    since = [e for e in log if e["seq"] >= started["seq"]]
+    assert [(e["kind"], e["turn"], e.get("compaction")) for e in since] == [
+        ("compaction.started", None, None),
+        ("request.sent", None, started["seq"]),
+        ("request.done", None, started["seq"]),
+        ("context.compacted", None, started["seq"]),
+        ("compaction.ended", None, started["seq"]),
+    ]
+    _, sent, done, stored, ended = since
+    assert set(started) == {"seq", "at", "kind", "turn"}
+    assert sent["seq"] == compacted.through
+    assert done["request"] == sent["request"]
+    assert ended["outcome"] == "done"
+    assert ended["error"] is None
     assert done["usage"] == {
         "input": 3000,
         "cache_read": 0,
@@ -245,9 +267,18 @@ async def test_a_compaction_is_written_down_in_a_turn_of_its_own_with_its_cost(
     }
     assert done["cost_usd"] is not None and done["cost_usd"] > 0
     assert done["text"] == json.dumps(_fields(_POINT))
-    assert (compacted["turn"], compacted["by"]) == (opened["turn"], "user")
-    assert compacted["summary"] == _SUMMARY
-    assert (closed["turn"], closed["outcome"]) == (opened["turn"], "finished")
+    assert (stored["summary"], stored["through"], stored["by"]) == (
+        _SUMMARY,
+        compacted.through,
+        "user",
+    )
+    # It took no turn number: the next reply's turn follows the last reply's.
+    assert len(_of(log, "turn.opened")) == turns
+    setup.socket.send(setup.gem.id, "message 4")
+    await setup.socket.until("chat.done", 4)
+    log = await _log(setup)
+    assert _of(log, "turn.opened")[-1]["turn"] == _of(log, "turn.opened")[-2]["turn"] + 1
+    assert not [e for e in log if e["kind"] == "turn.opened" and e["by"] == "compaction"]
     await _close(setup.socket, setup.linked)
 
 
@@ -286,11 +317,7 @@ async def test_what_the_summary_request_was_sent_is_read_back_exactly(
     setup.llm.then(_summary())
     await setup.compactions.compact(str(setup.gem.id))
 
-    [sent] = [
-        e
-        for e in _of(await _log(setup), "request.sent")
-        if e["turn"] == _of(await _log(setup), "turn.opened")[-1]["turn"]
-    ]
+    [sent] = [e for e in _compaction(await _log(setup)) if e["kind"] == "request.sent"]
     service = GemsServiceV1Class(setup.gems, setup.conversations)
     read = await service.get_log_sent(str(setup.gem.id), sent["seq"])
 
@@ -393,15 +420,15 @@ async def test_a_cold_gem_is_compacted_whole_and_starts_cold_first(
     compacted = await setup.compactions.compact(str(setup.gem.id))
 
     log = await _log(setup)
-    opened = _of(log, "turn.opened")[-1]
+    started = _of(log, "compaction.started")[-1]
     colds = _of(log, "cache.cold")
     assert compacted.through == await _asked_at(setup)
-    # The compaction's request is the gem's next: it started cold, first, for the
-    # reason it did.
+    # The compaction's request is the gem's next: it started cold, once the compaction
+    # began and before its request, for the reason it did, in no turn.
     assert len(colds) == 2
-    assert colds[-1]["seq"] < opened["seq"]
-    assert colds[-1]["reason"] == "quiet"
-    [sent] = [e for e in _of(log, "request.sent") if e["turn"] == opened["turn"]]
+    assert started["seq"] < colds[-1]["seq"] < compacted.through
+    assert (colds[-1]["reason"], colds[-1]["turn"]) == ("quiet", None)
+    [sent] = [e for e in _compaction(log) if e["kind"] == "request.sent"]
     service = GemsServiceV1Class(setup.gems, setup.conversations)
     assert (await service.get_log_sent(str(setup.gem.id), sent["seq"]))["exact"]
     await _close(setup.socket, setup.linked)
@@ -513,10 +540,49 @@ async def test_a_summary_that_fails_changes_nothing(monkeypatch: pytest.MonkeyPa
 
     log = await _log(setup)
     assert _of(log, "context.compacted") == []
-    assert _of(log, "turn.closed")[-1]["outcome"] == "failed"
+    assert [(e["kind"], e["turn"]) for e in _compaction(log)] == [
+        ("compaction.started", None),
+        ("request.sent", None),
+        ("request.done", None),
+        ("compaction.ended", None),
+    ]
+    _, _, done, ended = _compaction(log)
+    assert done["outcome"] == "failed"
+    assert (ended["outcome"], ended["error"]) == ("failed", "overloaded")
     setup.socket.send(setup.gem.id, "message 4")
     await setup.socket.until("chat.done", 4)
     assert "summed up" not in json.dumps(setup.llm.requests[-1]["input"])
+    await _close(setup.socket, setup.linked)
+
+
+async def test_a_compaction_stopped_while_the_summary_is_written_is_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    turns = len(_of(await _log(setup), "turn.opened"))
+    pause = asyncio.Event()
+    setup.llm.then([_delta('{"user_wants": ['), pause, *_summary()])
+    compacting = asyncio.create_task(setup.compactions.compact(str(setup.gem.id)))
+    await _eventually_asked(setup, 4)
+
+    # Stopped (the backend shuts down) while the model writes.
+    compacting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await compacting
+    await _quiet(setup.compactions)
+
+    log = await _log(setup)
+    assert _of(log, "context.compacted") == []
+    assert [(e["kind"], e["turn"]) for e in _compaction(log)] == [
+        ("compaction.started", None),
+        ("request.sent", None),
+        ("request.done", None),
+        ("compaction.ended", None),
+    ]
+    _, _, done, ended = _compaction(log)
+    assert done["outcome"] == "cut"
+    assert (ended["outcome"], ended["error"]) == ("cut", None)
+    assert len(_of(log, "turn.opened")) == turns
     await _close(setup.socket, setup.linked)
 
 
@@ -546,7 +612,8 @@ async def test_a_summary_that_does_not_fit_the_schema_or_is_refused_fails_and_st
     assert why in answer.json()["message"]
     log = await _log(setup)
     assert _of(log, "context.compacted") == []
-    assert _of(log, "turn.closed")[-1]["outcome"] == "failed"
+    assert (await _ended(setup))["outcome"] == "failed"
+    assert why in (await _ended(setup))["error"]
     await _close(setup.socket, setup.linked)
 
 
@@ -579,7 +646,7 @@ async def test_a_compaction_that_cannot_be_stored_fails_and_changes_nothing(
     setup.docdb.breaks_on_kind = None
     log = await _log(setup)
     assert _of(log, "context.compacted") == []
-    assert _of(log, "turn.closed")[-1]["outcome"] == "failed"
+    assert (await _ended(setup))["outcome"] == "failed"
     setup.socket.send(setup.gem.id, "message 4")
     await setup.socket.until("chat.done", 4)
     assert "summed up" not in json.dumps(setup.llm.requests[-1]["input"])
@@ -614,8 +681,9 @@ async def test_a_compaction_stopped_while_it_is_stored_is_done_once_it_is(
 
     log = await _log(setup)
     [compacted] = _of(log, "context.compacted")
-    [closed] = [e for e in _of(log, "turn.closed") if e["turn"] == compacted["turn"]]
-    assert closed["outcome"] == "finished"
+    ended = _compaction(log)[-1]
+    assert (ended["kind"], ended["outcome"]) == ("compaction.ended", "done")
+    assert compacted["seq"] < ended["seq"]
     assert told == [str(setup.gem.id)]
     await _close(setup.socket, setup.linked)
 
@@ -687,11 +755,10 @@ async def test_a_call_started_during_a_compaction_waits_for_it(
     compacted = await compacting
     await socket.until("call.ready")
 
-    # The compaction was not cut: it is stored, and its turn finished.
+    # The compaction was not cut: it is stored, and it is done.
     log = await _log(setup)
     [stored] = _of(log, "context.compacted")
-    [closed] = [e for e in _of(log, "turn.closed") if e["turn"] == stored["turn"]]
-    assert (stored["through"], closed["outcome"]) == (compacted.through, "finished")
+    assert (stored["through"], (await _ended(setup))["outcome"]) == (compacted.through, "done")
     assert len(voice.made) == 1
     await _close_link(socket, linked)
     await _close(setup.socket, setup.linked)
@@ -734,7 +801,7 @@ async def test_a_gem_over_the_size_is_never_compacted_unless_the_user_asks(
     assert len(setup.llm.requests) == 3
     log = await _log(setup)
     assert _of(log, "context.compacted") == []
-    assert [e["by"] for e in _of(log, "turn.opened")].count("compaction") == 0
+    assert _of(log, "compaction.started") == []
     # Nothing is left running for the gem, or holding it.
     assert setup.conversations.find(str(setup.gem.id)) is None
     await _close(setup.socket, setup.linked)
