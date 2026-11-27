@@ -464,8 +464,8 @@ class McpEventsEntityClass:
         kind = next((event for event in found.events if event.name == watch.event), None)
         if kind is None:
             raise WatchFailed(f"The connection {found.name} does not serve {watch.event}")
-        if found.signs_in and not found.signed_in():
-            raise WatchFailed(f"The user needs to sign in to {found.name} again")
+        # A connection that needs a sign-in is not refused here: its server is asked
+        # with no pass, as for a tool, and only its 401 says a sign-in is needed.
         return found, kind
 
     async def _asking[T](

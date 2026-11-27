@@ -60,6 +60,9 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Closing a tool to a gem holds at once, even in an open call: every call of it reads the connection again.
 - A gem's own `tools` are the built-in ones only.
 - A connection can sign in through the browser (OAuth): add it by address only, and Cortex gets the pass itself. Built.
+- A server that asks for a sign-in only when a tool is called (Gmail's): its sign-in is found at that call. Built.
+- A sign-in a call needs is shown as a card in the chat, drawn by the app, not written by the gem. It never blocks the chat, and goes once the connection is signed in. Next.
+- The gem learns of sign-ins by events, never a note: `connection.signed_in` wakes the gems whose calls were refused; `connection.sign_in_needed` goes only to gems that did not find out by their own call. Next.
 - The browser comes back to a route on the backend, on localhost: the backend runs on your Mac. Rethink when it is deployed or runs on another machine.
 - A pass is renewed by itself when it can. One that cannot is dropped when refused, the app is told, and the gem is told in plain words.
 - A tool call never waits on a browser.
@@ -167,7 +170,7 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Connections by local command (stdio): not until there is a sign-in. A route that starts a command is too open.
 - Connection headers, passes and registrations are kept in the database as given. They move to the vault.
 - A pass running out: a badge in the app only. No pop-up, no notification.
-- Sign-in servers that do not let Cortex register itself, and scope step-up on a 403: not built.
+- Sign-in servers that do not let Cortex register itself (Google's): next, with a client ID, secret and scope the user gives. Scope step-up on a 403: not built.
 - Connections over SSE: not built.
 - A connection's pictures and sounds are not passed on to the model, only text.
 - A server telling us its tools changed: not listened to. You refresh.
@@ -230,5 +233,6 @@ Things that came up while planning. One line each, as a reminder. Started 2026-1
 - Connections: no run with a real model yet. Does each provider take every schema a server lists?
 - Many tools in a call: how much later is the first word?
 - A deferred tool's first use in a call costs one more model round. How long is that wait before the first word?
+- Does a gem search again for a deferred tool it has not loaded? Seen once: Haiku 5.5 loaded only `read_notes`, then said it could not add notes.
 - A connection's result is cut at 20,000 characters. Is that the right number?
 - Cold start: short results are kept. Keep that guard, or expire every result?

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from bson import ObjectId
 
-from app.adapters.mcp_adp import McpAdapterClass, McpFailure
+from app.adapters.mcp_adp import McpAdapterClass, McpAuthServer, McpFailure
 from app.entities.connection_ent import Connection, ConnectionEntityClass, ConnectionEvent
 from app.entities.gem_ent import GemConfig, GemEntityClass
 from app.entities.gem_event import (
@@ -376,6 +376,32 @@ async def test_a_watch_whose_server_refuses_its_pass_says_to_sign_in(setup: _Set
         )
     with pytest.raises(WatchFailed, match="needs to sign in to Events again"):
         await events.watch(_watch(setup.one, connection, "build.finished"), told, None)
+
+
+async def test_a_watch_runs_while_its_connection_needs_a_sign_in_the_server_does_not_ask(
+    setup: _Setup,
+) -> None:
+    # A call of one of its tools found a sign-in, but the server lets anyone watch.
+    connection = await _open_to(setup, setup.one)
+    auth = McpAuthServer(
+        issuer="https://auth.example.com",
+        authorization_endpoint="https://auth.example.com/authorize",
+        token_endpoint="https://auth.example.com/token",
+        grant_types=["authorization_code"],
+    )
+    await setup.connections._store(  # pyright: ignore[reportPrivateUsage]
+        connection.model_copy(update={"oauth": auth}), {"oauth"}
+    )
+    needing = await setup.connections.get(str(connection.id))
+    assert needing.signs_in and not needing.signed_in()
+    setup.served.server.next_poll_ms = 10
+    watching = asyncio.create_task(
+        _events(setup).watch(_watch(setup.one, needing, "build.finished"), _Told(), None)
+    )
+
+    await _asked(setup.served.server, "events/poll", times=2)
+    assert not watching.done()
+    await _stop(watching)
 
 
 async def test_a_watch_stops_when_the_server_ends_it(setup: _Setup) -> None:

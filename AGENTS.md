@@ -51,7 +51,8 @@ What that means in practice:
   A header's value is never sent to the app, only its name.
 - **A connection can sign in through the browser.** Added with only an address, to a
   server that asks for a sign-in, it is kept with no tools and `sign_in.state`
-  `"sign_in_needed"`. The app asks `POST /v1/connections/{id}/sign-in` for an address,
+  `"sign_in_needed"`. A server that asks only when a tool is called (Gmail's) is kept
+  with its tools and becomes so at the first call it refuses. The app asks `POST /v1/connections/{id}/sign-in` for an address,
   opens it in the browser, and the browser comes back to this backend, not to the app
   (on localhost: the backend runs on the user's Mac). The link then says
   `connection.changed` with the connection's `id`, and the app reads it again. The same

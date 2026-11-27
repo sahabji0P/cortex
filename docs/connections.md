@@ -133,7 +133,9 @@ host for one:
   20,000 characters is cut there, with a line saying how long it was: a result is kept
   whole in the conversation and sent with every request after it.
 - **Failures.** A tool that fails comes back as "The tool failed: ...". A server that
-  cannot be reached, answers 401, or takes more than 60 seconds comes back as "`{tool}`
+  cannot be reached, answers 401 with no sign-in Cortex can do (see
+  [A server that asks only when a tool is called](#a-server-that-asks-only-when-a-tool-is-called)),
+  or takes more than 60 seconds comes back as "`{tool}`
   failed: ...", so the gem can say so.
 - One client is kept open for each server and shared by every call to it.
 
@@ -230,6 +232,34 @@ given, like the headers. Two connections to the same address each sign in on the
 A new `url` drops the sign-in (the pass and the registration) and the copy of the tools,
 and signs in again if the new server asks; giving an `Authorization` header of the
 user's own drops it too. Deleting a connection drops everything.
+
+### A server that asks only when a tool is called
+
+Some servers list their tools to anyone and ask for a sign-in only when one is called
+(Gmail's, `https://gmailmcp.googleapis.com/mcp/v1`). Such a connection is added with its
+tools, and no sign-in. The first call its server refuses with 401 has its sign-in looked
+for, from what that 401 said, as when one is added: when there is one, it is kept, the
+connection needs a sign-in, every socket of the app is told `connection.changed`, and the
+gem's call is answered "This tool needs the user to sign in to {name}." A 401 that names
+no sign-in Cortex can do fails the call, and changes nothing.
+
+**A connection that needs a sign-in still asks its server**, with no pass: a server may
+let anyone use some of its tools, and only its 401 says a call needs a sign-in. So the
+tools it lets anyone use keep working, and so does a watch on an event it lets anyone
+watch. A sign-in to such a server begins from the sign-in the call found, since asking
+for its tools says nothing.
+
+A sign-in server's metadata has to name the server it was found for, as a plain string,
+but a root address with and without its trailing slash is one server: Gmail's metadata
+names `https://accounts.google.com/`, which says it without.
+
+To try it, `scripts/sign_in_demo_server.py` runs such a server on this machine: a notes
+server whose `read_notes` anyone may use and whose `add_note` asks for a sign-in, with a
+sign-in server of its own that lets Cortex register itself.
+
+A sign-in server that takes only clients registered by hand (Google's has no
+`registration_endpoint`) is kept all the same, so the connection says it needs a
+sign-in. Beginning one is a 502 until Cortex can be given a client of the user's own.
 
 ## Events
 

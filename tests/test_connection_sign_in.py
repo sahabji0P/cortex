@@ -50,6 +50,19 @@ _AUTH = "https://auth.example.com"
 _BARE = "https://bare.example.com/mcp"
 _PLAIN = "https://plain.example.com/mcp"
 _CALLBACK = "http://127.0.0.1:8000/v1/connections/sign-in/callback"
+# Servers that list their tools to anyone and ask for a sign-in only when `close_issue`
+# is called, as Gmail's does: one signed in to through `_AUTH`, one through a sign-in
+# server that takes only clients registered by hand, and one that publishes nothing.
+_OPEN = "https://open.example.com/mcp"
+_OPEN_PRM = "https://open.example.com/.well-known/oauth-protected-resource/close_issue"
+_HAND = "https://hand.example.com/mcp"
+_HAND_PRM = "https://hand.example.com/.well-known/oauth-protected-resource/close_issue"
+_HAND_AUTH = "https://hand-auth.example.com"
+_SILENT = "https://silent.example.com/mcp"
+# A server that asks for a sign-in at once, through a sign-in server that takes only
+# clients registered by hand.
+_LOCKED = "https://locked.example.com/mcp"
+_LOCKED_PRM = "https://locked.example.com/.well-known/oauth-protected-resource/mcp"
 
 
 class _Transport(httpx2.AsyncBaseTransport):
@@ -100,7 +113,7 @@ class _SignInWorld:
         self.given: list[str] = []  # every pass and refresh token given out
         self.codes: dict[str, dict[str, str]] = {}
         self.renewed = 0
-        self.tool_requests = 0
+        self.bearers: list[str] = []  # the pass each request to the tool server carried
 
     # ---- what the browser does
 
@@ -126,6 +139,27 @@ class _SignInWorld:
             return await self._plain.handle_async_request(request)
         if where == _BARE:
             return httpx2.Response(401)
+        if where in (_OPEN, _HAND, _SILENT):
+            return await self._open_server(request, where)
+        if where == _LOCKED:
+            challenge = f'Bearer resource_metadata="{_LOCKED_PRM}"'
+            return httpx2.Response(401, headers={"WWW-Authenticate": challenge})
+        if where == _LOCKED_PRM:
+            return _json({"resource": _LOCKED, "authorization_servers": [_HAND_AUTH]})
+        if where in (_OPEN_PRM, _HAND_PRM):
+            # Gmail's names its sign-in server with a trailing slash, which the sign-in
+            # server's own metadata does not have: the same server.
+            mcp, auth = (_OPEN, _AUTH) if where == _OPEN_PRM else (_HAND, f"{_HAND_AUTH}/")
+            return _json({"resource": mcp, "authorization_servers": [auth]})
+        if where == f"{_HAND_AUTH}/.well-known/oauth-authorization-server":
+            return _json(
+                {
+                    "issuer": _HAND_AUTH,
+                    "authorization_endpoint": f"{_HAND_AUTH}/authorize",
+                    "token_endpoint": f"{_HAND_AUTH}/token",
+                    "code_challenge_methods_supported": ["S256"],
+                }
+            )
         if where == _PRM:
             return _json(
                 {"resource": _MCP, "authorization_servers": [_AUTH], "scopes_supported": ["tools"]}
@@ -150,13 +184,27 @@ class _SignInWorld:
         return httpx2.Response(404)
 
     async def _tool_server(self, request: httpx2.Request) -> httpx2.Response:
-        self.tool_requests += 1
         bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+        self.bearers.append(bearer)
         if bearer not in self.passes:
             challenge = f'Bearer resource_metadata="{_PRM}", scope="tools"'
             return httpx2.Response(401, headers={"WWW-Authenticate": challenge})
         if self.forbids:
             return httpx2.Response(403)
+        return await self._tools.handle_async_request(request)
+
+    async def _open_server(self, request: httpx2.Request, where: str) -> httpx2.Response:
+        """Every request let in, but a call of `close_issue` without a pass."""
+        body = json.loads(await request.aread() or b"{}")
+        called = body.get("method") == "tools/call" and body["params"]["name"] == "close_issue"
+        bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+        if called and bearer not in self.passes:
+            prm = {_OPEN: _OPEN_PRM, _HAND: _HAND_PRM}.get(where)
+            # Gmail's names where its sign-in is, and no scope.
+            headers = (
+                {} if prm is None else {"WWW-Authenticate": f'Bearer resource_metadata="{prm}"'}
+            )
+            return httpx2.Response(401, headers=headers)
         return await self._tools.handle_async_request(request)
 
     def _register(self, asked: dict[str, Any]) -> httpx2.Response:
@@ -195,7 +243,7 @@ class _SignInWorld:
                 or asked["client_id"] != client["client_id"]
                 or asked["redirect_uri"] != form["redirect_uri"]
                 or asked["code_challenge"] != challenge.decode()
-                or form.get("resource") != _MCP
+                or form.get("resource") not in (_MCP, _OPEN)
             ):
                 return _json({"error": "invalid_grant"}, 400)
             return self._pass()
@@ -587,12 +635,12 @@ async def test_a_refused_call_marks_the_connection_tells_the_app_and_the_gem_fas
     assert sent.sign_in is not None and sent.sign_in.state == "sign_in_needed"
     # Told once at the sign-in, and once now.
     assert await _told(world) == [str(made.id), str(made.id)]
-    # The gem keeps being offered the tool, so a call's tool list does not move, and a
-    # call of it is answered at once, without asking the server.
-    asked = world.servers.tool_requests
+    # The gem keeps being offered the tool, so a call's tool list does not move. A call
+    # of it asks the server with no pass, as a server may let anyone use some tools,
+    # and its 401 is answered at once.
     assert await world.tool(_CLOSE)
-    assert await _run(close, number=4) == _NEEDS
-    assert world.servers.tool_requests == asked
+    async with asyncio.timeout(3):
+        assert await _run(close, number=4) == _NEEDS
 
 
 async def test_a_pass_past_its_time_that_cannot_be_renewed_needs_a_sign_in(
@@ -605,10 +653,10 @@ async def test_a_pass_past_its_time_that_cannot_be_renewed_needs_a_sign_in(
 
     # Worked out when it is read: no timer.
     assert not (await world.get(made)).signed_in()
-    asked = world.servers.tool_requests
+    # Dropped, not sent: the server is asked with no pass.
     assert await _run(await world.tool(_CLOSE), number=4) == _NEEDS
-    assert world.servers.tool_requests == asked
     assert (await world.get(made)).oauth_tokens is None
+    assert world.servers.bearers[-1] == ""
     assert await _told(world) == [str(made.id), str(made.id)]
 
 
@@ -643,6 +691,80 @@ async def test_two_connections_to_one_address_sign_in_on_their_own(world: _World
     assert first.oauth_client.client_id != second.oauth_client.client_id
     assert first.oauth_tokens is not None and second.oauth_tokens is not None
     assert first.oauth_tokens.access_token != second.oauth_tokens.access_token
+
+
+# ---- a server that asks for a sign-in only when a tool is called
+
+
+async def test_a_call_s_401_finds_the_sign_in_and_the_open_tools_keep_working(
+    world: _World,
+) -> None:
+    made = await world.connections.create(name="Open", url=_OPEN, gems="all")
+    assert made.tools and made.oauth is None
+    find, close = await world.tool("open__find_issues"), await world.tool("open__close_issue")
+    assert await _run(find, text="login") == "2 issues mention login: #4 and #9."
+
+    said = await _run(close, number=4)
+
+    assert said == "This tool needs the user to sign in to Open."
+    found = await world.get(made)
+    assert found.oauth is not None and (found.oauth.issuer, found.oauth.resource) == (
+        _AUTH,
+        _OPEN,
+    )
+    assert found.oauth.resource_metadata == _OPEN_PRM
+    assert found.tools == made.tools and found.signs_in and not found.signed_in()
+    sent = ConnectionsServiceV1Class(world.connections)._connection_out(found)  # pyright: ignore[reportPrivateUsage]
+    assert sent.sign_in is not None and sent.sign_in.state == "sign_in_needed"
+    assert await _told(world) == [str(made.id)]
+    # Needing a sign-in does not close what the server lets anyone use.
+    assert await _run(find, text="login") == "2 issues mention login: #4 and #9."
+    # A second refused call finds nothing new, and tells no one again.
+    assert await _run(close, number=4) == said
+    assert await _told(world) == [str(made.id)]
+
+    # It lists its tools to anyone, so the sign-in begins from where the call was sent,
+    # asking for the scope that was found.
+    address = await world.connections.begin_sign_in(str(made.id))
+    assert dict(parse_qsl(urlsplit(address).query))["scope"] == found.oauth.scope
+    back = world.servers.browse(address)
+    assert (await world.connections.finish_sign_in(error=None, **back)).signed_in
+    assert await _run(close, number=4) == "Closed #4."
+
+
+async def test_a_call_s_401_with_a_sign_in_only_by_hand_is_kept_but_cannot_begin(
+    world: _World,
+) -> None:
+    made = await world.connections.create(name="Hand", url=_HAND, gems="all")
+
+    assert await _run(await world.tool("hand__close_issue"), number=4) == (
+        "This tool needs the user to sign in to Hand."
+    )
+    found = await world.get(made)
+    assert found.oauth is not None and found.oauth.registration_endpoint is None
+    with pytest.raises(UpstreamError, match="registered by hand"):
+        await world.connections.begin_sign_in(str(made.id))
+
+
+async def test_a_server_with_a_sign_in_only_by_hand_is_kept_needing_one(world: _World) -> None:
+    made = await world.connections.create(name="Locked", url=_LOCKED)
+
+    assert made.tools == [] and made.oauth is not None
+    assert made.oauth.registration_endpoint is None
+    assert made.signs_in and not made.signed_in()
+    with pytest.raises(UpstreamError, match="registered by hand"):
+        await world.connections.begin_sign_in(str(made.id))
+
+
+async def test_a_call_s_401_with_no_sign_in_published_is_a_failure(world: _World) -> None:
+    made = await world.connections.create(name="Silent", url=_SILENT, gems="all")
+
+    with pytest.raises(McpFailure) as failure:
+        await _run(await world.tool("silent__close_issue"), number=4)
+
+    assert failure.value.sign_in_needed
+    assert (await world.get(made)).oauth is None
+    assert await _told(world) == []
 
 
 async def test_a_403_is_not_a_sign_in(world: _World) -> None:

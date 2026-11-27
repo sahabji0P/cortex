@@ -374,7 +374,9 @@ class McpAuthServer(BaseModel):
     issuer: str
     authorization_endpoint: str
     token_endpoint: str
-    registration_endpoint: str
+    # Where a client registers itself (RFC 7591). None: the sign-in server takes only
+    # clients registered by hand.
+    registration_endpoint: str | None = None
     # What is asked for: the scope, and the grant types registered with. A refresh
     # token is asked for wherever the metadata allows it.
     scope: str | None = None
@@ -1004,9 +1006,10 @@ class McpAdapterClass:
         metadata names where the browser goes, where a pass is asked for, and where a
         client registers. A server that published none, the old way, is looked for at
         its own address. None if the server publishes no sign-in at all. Raises
-        `McpFailure` if it publishes one this backend cannot do: one that needs a client
-        registered by hand, one without PKCE, or one whose metadata does not name the
-        server it was found for.
+        `McpFailure` if it publishes one this backend cannot do: one without PKCE, or
+        one whose metadata does not name the server it was found for. One that takes
+        only clients registered by hand is found all the same: it is `register` that
+        refuses it.
         """
         async with self._sign_in_http() as http:
             prm = await self._protected_resource(http, url, challenge)
@@ -1023,16 +1026,14 @@ class McpAdapterClass:
                     break
         if metadata is None:
             return None
-        if auth_server is None and issuers_match(str(metadata.issuer), expected):
+        # A root issuer with and without its trailing slash names one server: Gmail's
+        # metadata names `https://accounts.google.com/`, whose own says it without.
+        if issuers_match(str(metadata.issuer), expected):
             expected = str(metadata.issuer)
         try:
             validate_metadata_issuer(metadata, expected)
         except OAuthFlowError as exc:
             raise McpFailure("the sign-in server's metadata names another server") from exc
-        if metadata.registration_endpoint is None:
-            raise McpFailure(
-                "the server's sign-in needs a client registered by hand, which Cortex cannot do"
-            )
         if "code" not in metadata.response_types_supported or (
             metadata.code_challenge_methods_supported is not None
             and "S256" not in metadata.code_challenge_methods_supported
@@ -1061,7 +1062,11 @@ class McpAdapterClass:
             issuer=str(metadata.issuer),
             authorization_endpoint=str(metadata.authorization_endpoint),
             token_endpoint=str(metadata.token_endpoint),
-            registration_endpoint=str(metadata.registration_endpoint),
+            registration_endpoint=(
+                None
+                if metadata.registration_endpoint is None
+                else str(metadata.registration_endpoint)
+            ),
             scope=get_client_metadata_scopes(
                 None if challenge is None else challenge.scope,
                 None if prm is None else prm[1],
@@ -1076,9 +1081,14 @@ class McpAdapterClass:
     async def register(self, auth: McpAuthServer, redirect_uri: str) -> McpRegistration:
         """Register this backend as a client of a sign-in server (RFC 7591).
 
-        Raises `McpFailure` if the server refuses, or registers a client this backend
-        could not use.
+        Raises `McpFailure` if the server refuses, registers a client this backend
+        could not use, or takes only clients registered by hand.
         """
+        endpoint = auth.registration_endpoint
+        if endpoint is None:
+            raise McpFailure(
+                "the server's sign-in needs a client registered by hand, which Cortex cannot do"
+            )
         wanted = OAuthClientMetadata(
             redirect_uris=[AnyUrl(redirect_uri)],
             token_endpoint_auth_method=cast("_AuthMethod | None", auth.token_auth_method),
@@ -1090,7 +1100,7 @@ class McpAdapterClass:
             answer = await _send(
                 http,
                 "POST",
-                auth.registration_endpoint,
+                endpoint,
                 json=wanted.model_dump(by_alias=True, mode="json", exclude_none=True),
             )
             try:

@@ -66,8 +66,9 @@ mic ─▶ speech to text ─▶ conversation ─▶ model ─▶ text to speech
   is no longer open to the gem gets "This tool is not available to you now." as its
   result.
 - **A tool whose connection needs a sign-in says so.** (Enforced) A connection that
-  signs in through the browser keeps offering its tools when its pass runs out, so the
-  tool list still does not change. A call of one, when the pass cannot be renewed, gets
+  signs in through the browser keeps offering its tools when its pass runs out, or when
+  a call first finds that its server asks for a sign-in, so the tool list still does not
+  change. A call of one, when the pass cannot be renewed, gets
   "This tool needs the user to sign in to {connection name} again." (or "... to sign in
   to {connection name}." if it was never signed in) as its result within seconds,
   never waiting on the user, so the gem can tell the user why.

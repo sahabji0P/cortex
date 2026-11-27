@@ -32,7 +32,9 @@ call that is already open.
 A server can let us in by a fixed header the user gives, or by a sign-in in the user's
 browser (OAuth), which gives a pass. A sign-in is tried only for a connection with no
 `Authorization` header of its own, when its server answers 401 and publishes how to
-sign in. Then the connection is kept, with no tools, until the user signs in:
+sign in. Then the connection is kept, with no tools, until the user signs in. A server
+that lists its tools to anyone and asks only when one is called is kept with its tools,
+and its sign-in is found at the first call it refuses:
 
 1. `begin_sign_in` finds the server's sign-in, registers this backend with it if need
    be, and gives the address the app opens in the browser. What it needs to finish is
@@ -795,7 +797,12 @@ class ConnectionEntityClass:
                 ) from exc
             challenge = exc.challenge
         else:
-            raise InvalidError(f"The server at {connection.url} lets Cortex in without a sign-in")
+            if connection.oauth is None:
+                raise InvalidError(
+                    f"The server at {connection.url} lets Cortex in without a sign-in"
+                )
+            # It lists its tools to anyone, and a call of one said where its sign-in is.
+            challenge = McpChallenge(connection.oauth.resource_metadata, connection.oauth.scope)
         try:
             auth = await self._mcp.discover(connection.url, challenge)
             if auth is None:
@@ -959,11 +966,15 @@ class ConnectionEntityClass:
                     now, lambda server: self._mcp.call_tool(server, tool.name, sent)
                 )
             except McpFailure as exc:
-                if exc.sign_in_needed and now.signs_in:
-                    # Said plainly, so the gem can tell the user why, and what to do.
-                    again = " again" if now.oauth_client is not None else ""
-                    return f"This tool needs the user to sign in to {now.name}{again}."
-                raise
+                if not exc.sign_in_needed or now.own_authorization:
+                    raise
+                # A server may list its tools to anyone and ask for a sign-in only when
+                # one is called: its sign-in is found now.
+                if not now.signs_in and not await self._learn_sign_in(now, exc.challenge):
+                    raise
+                # Said plainly, so the gem can tell the user why, and what to do.
+                again = " again" if now.oauth_client is not None else ""
+                return f"This tool needs the user to sign in to {now.name}{again}."
             text = _cut(result.text)
             if result.is_error:
                 return f"The tool failed: {text}" if text else "The tool failed."
@@ -985,8 +996,8 @@ class ConnectionEntityClass:
         if failure.sign_in_needed and not connection.own_authorization:
             challenge = failure.challenge
             if challenge is None and connection.oauth is not None:
-                # Not asked, as its pass is known to be gone: where its sign-in was
-                # found before is looked at first.
+                # Its 401 named nothing: where its sign-in was found before is looked
+                # at first.
                 challenge = McpChallenge(connection.oauth.resource_metadata, None)
             try:
                 auth = await self._mcp.discover(connection.url, challenge)
@@ -1009,15 +1020,18 @@ class ConnectionEntityClass:
         A pass about to run out is renewed first, and one the server refuses with 401
         is renewed and the request made once more. A pass that cannot be renewed is
         dropped, so the connection needs a sign-in, and an `McpFailure` that says
-        `sign_in_needed` is raised, without asking the server when it is known. Nothing
-        here waits on the user.
+        `sign_in_needed` is raised. Nothing here waits on the user.
+
+        A connection that needs a sign-in still asks its server, with no pass: a server
+        may let anyone use some of its tools, and only its 401 says a sign-in is needed.
         """
         if connection.signs_in:
             connection = await self._fresh(connection)
-            if not connection.signed_in():
-                if connection.oauth_tokens is not None:
-                    await self._mark(connection, connection.oauth_tokens)
-                raise McpFailure("a sign-in is needed", sign_in_needed=True)
+            stale = connection.oauth_tokens
+            if stale is not None and not connection.signed_in():
+                # Past its time and cannot be renewed: dropped, and not sent.
+                await self._mark(connection, stale)
+                connection = connection.model_copy(update={"oauth_tokens": None})
         try:
             return await ask(connection.server)
         except McpFailure as exc:
@@ -1035,6 +1049,30 @@ class ConnectionEntityClass:
             if exc.sign_in_needed:
                 await self._mark(renewed, tokens)
             raise
+
+    async def _learn_sign_in(self, connection: Connection, challenge: McpChallenge | None) -> bool:
+        """A call was refused with 401 by a server not known to sign in: keep its sign-in.
+
+        Its sign-in is found from what the 401 said. The connection then needs a
+        sign-in, and every listener is told. False, and nothing kept, if the server
+        publishes no sign-in this backend can do, or the connection was changed
+        meanwhile.
+        """
+        try:
+            auth = await self._mcp.discover(connection.url, challenge)
+        except McpFailure as exc:
+            _log.info("a call's 401 named a sign-in Cortex cannot do: %s", exc.reason)
+            return False
+        if auth is None:
+            return False
+        async with self._lock(connection.id):
+            current = await self._docdb.get(Connection, filters={"id": connection.id})
+            if current is None or current.url != connection.url or current.own_authorization:
+                return False
+            if current.oauth is None:
+                await self._store(current.model_copy(update={"oauth": auth}), {"oauth"})
+                self._tell(current.id)
+        return True
 
     async def _fresh(self, connection: Connection) -> Connection:
         """The connection, with its pass renewed if it runs out within a minute and can be.
