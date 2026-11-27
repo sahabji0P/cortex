@@ -18,7 +18,8 @@ one of these holds, the first that does giving the reason:
   own, which caches nothing, and the cache the gem had starts with what is now summed
   up, so no request reads it (see `compaction.py`).
 - `quiet`: the last one was sent longer ago than its provider keeps a cache
-  (`CACHE_LIFETIME`).
+  (`CACHE_LIFETIME`). A compaction's own request is not counted for this: it reads no
+  cache and writes none, so a compaction that failed leaves the cache as old as it was.
 
 It is checked once for each reply in writing, and once when a call starts, never during
 a call. A cold start is written down in the gem's log (`cache.cold`), with `before`: the
@@ -93,7 +94,8 @@ class Numbered(NamedTuple):
 class Cache(NamedTuple):
     """Where a gem's cache stands, since the gem was last reset."""
 
-    # The number of the last request sent, and when it was sent. None if there was none.
+    # The number of the last request sent, and when the last one that could keep a cache
+    # alive was sent: a compaction's own cannot. None if there was none.
     sent: int | None = None
     sent_at: datetime | None = None
     # The line drawn by the latest cold start: results before it are sent expired. None

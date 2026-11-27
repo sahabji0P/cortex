@@ -250,22 +250,29 @@ class ConversationStoreClass:
         """Where the gem's cache stands, since it was last reset (see `cold_start.py`).
 
         The last request sent, the line of the latest cold start, and the latest
-        compaction. With `before`, as it stood just before that entry.
+        compaction. With `before`, as it stood just before that entry. The time is that
+        of the last request that is not a compaction's own: one reads no cache and
+        writes none, so it keeps none alive.
         """
         seq = await self._since(gem_id, before)
         latest = [
             await self._docdb.get_many(
                 LogEntry,
-                filters={"gem_id": gem_id, "kind": kind, "seq": seq},
+                filters={"gem_id": gem_id, "kind": kind, "seq": seq, **more},
                 sort=[("seq", -1)],
                 limit=1,
             )
-            for kind in ("request.sent", COLD, COMPACTED)
+            for kind, more in (
+                ("request.sent", {}),
+                ("request.sent", {"data.compaction": None}),
+                (COLD, {}),
+                (COMPACTED, {}),
+            )
         ]
-        sent, started_cold, compacted = (found[0] if found else None for found in latest)
+        sent, cached, started_cold, compacted = (found[0] if found else None for found in latest)
         return Cache(
             sent=None if sent is None else sent.seq,
-            sent_at=None if sent is None else sent.at,
+            sent_at=None if cached is None else cached.at,
             before=None if started_cold is None else int(started_cold.data["before"]),
             compacted=None if compacted is None else compacted.seq,
         )

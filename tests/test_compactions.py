@@ -456,6 +456,36 @@ async def test_a_cold_gem_whose_summary_failed_is_compacted_the_same_when_asked_
     await _close(setup.socket, setup.linked)
 
 
+async def test_a_failed_compaction_keeps_no_cache_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _a_new_sitting(monkeypatch)
+    replied_at = _START + timedelta(minutes=31)
+    setup.move(replied_at + timedelta(minutes=29))
+    failed = SimpleNamespace(
+        type="response.failed",
+        response=SimpleNamespace(error=SimpleNamespace(message="overloaded")),
+    )
+    setup.llm.then([failed], _said("Four."))
+    with pytest.raises(UpstreamError):
+        await setup.compactions.compact(str(setup.gem.id))
+    # Its request read no cache and wrote none: the cache is as old as the last reply's.
+    assert (await setup.compactions.context(str(setup.gem.id))).cache_until == (
+        replied_at + timedelta(minutes=30)
+    )
+
+    setup.move(replied_at + timedelta(minutes=31))
+    setup.llm.starts_cold()
+    setup.socket.send(setup.gem.id, "message 4")
+    await setup.socket.until("chat.done", 4)
+
+    log = await _log(setup)
+    cold = _of(log, "cache.cold")[-1]
+    assert (cold["reason"], cold["before"]) == ("quiet", await _asked_at(setup))
+    assert _of(log, "compaction.ended")[-1]["seq"] < cold["seq"]
+    await _close(setup.socket, setup.linked)
+
+
 async def test_a_second_compaction_sums_up_the_first_and_moves_the_line_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
