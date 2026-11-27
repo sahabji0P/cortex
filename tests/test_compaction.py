@@ -1,17 +1,22 @@
 """Where a compaction draws its line, what is sent with one in force, and how big a request is."""
 
+import json
+from typing import Any, cast
+
+from app.adapters.openai_adp import OpenAIAdapterClass
 from app.entities.cold_start import EXPIRED, KEEP_UNDER, Numbered
 from app.entities.compaction import (
     KEEP_WHOLE,
     Compacted,
     asked,
     exact,
+    replaced,
     size,
     summed_up,
     through,
     view,
 )
-from app.entities.model import Item
+from app.entities.model import Item, to_input, to_messages
 
 _LONG = "x" * KEEP_UNDER
 
@@ -204,6 +209,102 @@ def test_what_is_sent_only_grows_while_the_lines_stay() -> None:
     second = view([*entries, *_turns(1, first=8)], None, compacted)
 
     assert second[: len(first)] == first
+
+
+def _search(seq: int, call_id: str, loads: str) -> list[Numbered]:
+    """A search, and its result that loads `loads`."""
+    return [
+        Numbered(
+            seq,
+            {"type": "function_call", "call_id": call_id, "name": "tool_search", "arguments": "{}"},
+        ),
+        _result(seq + 1, call_id, json.dumps({"tools": [loads]})),
+    ]
+
+
+def _deferred_call(seq: int, call_id: str) -> Numbered:
+    return Numbered(
+        seq, {"type": "function_call", "call_id": call_id, "name": _DEFERRED, "arguments": "{}"}
+    )
+
+
+_DEFERRED = "server__lookup"
+
+
+def _loaded_then_called() -> list[Numbered]:
+    """A deferred tool loaded in the part summed up, and called in the part kept whole."""
+    return [
+        _user(0),
+        *_search(1, "s", _DEFERRED),
+        _call(3, "w"),
+        _result(4, "w", _LONG),
+        _gem(5),
+        _note(6, "the time"),
+        _user(7),
+        _deferred_call(8, "d"),
+        _result(9, "d", "found it"),
+        _gem(10),
+    ]
+
+
+def test_the_searches_before_the_line_are_sent_after_the_summary() -> None:
+    entries = [*_loaded_then_called(), _user(None, "added since")]
+
+    sent = view(entries, 11, Compacted("Looked it up.", through=6))
+
+    assert sent == [
+        summed_up("Looked it up."),
+        *(entry.item for entry in _search(1, "s", _DEFERRED)),
+        *(entry.item for entry in entries[6:]),
+    ]
+    # Every request after it starts the same.
+    assert view([*entries, _gem(None)], 11, Compacted("Looked it up.", through=6))[:-1] == sent
+
+
+def test_a_search_kept_after_the_summary_still_loads_the_tool_on_openai() -> None:
+    sent = view(_loaded_then_called(), None, Compacted("Looked it up.", through=6))
+    spec = OpenAIAdapterClass.Tools.function(
+        name=_DEFERRED, description="Look up.", parameters={}, strict=False, defer_loading=True
+    )
+
+    request = to_input(sent, {_DEFERRED: spec})
+
+    types = [cast("dict[str, Any]", item).get("type") for item in request]
+    assert types[1:3] == ["tool_search_call", "tool_search_output"]
+    assert cast("dict[str, Any]", request[2])["tools"] == [spec]
+    # The call after the line names a tool the request defines.
+    called = [cast("dict[str, Any]", item) for item in request]
+    assert any(item.get("name") == _DEFERRED for item in called[3:])
+
+
+def test_a_search_kept_after_the_summary_still_loads_the_tool_on_anthropic() -> None:
+    sent = view(_loaded_then_called(), None, Compacted("Looked it up.", through=6))
+
+    messages = cast("list[dict[str, Any]]", to_messages(sent, {_DEFERRED, "web_search"}))
+
+    roles = [message["role"] for message in messages]
+    assert roles == ["user", "assistant", "user", "assistant", "user", "assistant"]
+    assert messages[0]["content"][0]["text"].startswith("<note>The conversation before")
+    assert messages[1]["content"][0]["name"] == "tool_search"
+    # The search's result opens the next user message, the kept part's lines after it.
+    loaded, *rest = messages[2]["content"]
+    assert loaded["type"] == "tool_result"
+    assert loaded["content"] == [{"type": "tool_reference", "tool_name": _DEFERRED}]
+    assert [block["type"] for block in rest] == ["text", "text"]
+    assert messages[3]["content"][0]["name"] == _DEFERRED
+
+
+def test_what_a_compaction_replaces_leaves_out_the_searches_it_keeps() -> None:
+    entries = _loaded_then_called()
+    earlier = Compacted("Earlier.", through=1)
+
+    assert replaced(entries, 6, earlier, 6) == [
+        summed_up("Earlier."),
+        _call(3, "w").item,
+        {"type": "function_call_output", "call_id": "w", "output": EXPIRED},
+        _gem(5).item,
+    ]
+    assert replaced(entries, None, None, 6)[0] == _user(0).item
 
 
 def test_the_ask_is_a_line_of_ours() -> None:

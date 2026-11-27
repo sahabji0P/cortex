@@ -53,6 +53,7 @@ from app.entities.compaction import (
     Setting,
     asked,
     exact,
+    replaced,
     size,
     through,
     view,
@@ -223,6 +224,9 @@ class CompactionEntityClass:
         if line is None:
             raise ConflictError("nothing to compact")
         made = await self._chat.next_request(ready, key, stored, mode=stored.mode)
+        if made.record.started_cold:
+            # The settings changed: it started cold, whatever the time.
+            before = stored.cache.sent
         turn = made.record.turn("compaction")
         items = [*made.sent, asked()]
         think = self._conversations.gem(key).late.pending
@@ -248,12 +252,7 @@ class CompactionEntityClass:
             exc = RuntimeError("the model wrote no summary")
             _failed(turn, exc)
             raise UpstreamError(f"the summary could not be written: {exc}")
-        # What it stands for, as the model was sent it: the summary before it among them.
-        floor = 0 if stored.compacted is None else stored.compacted.through
-        count = (stored.compacted is not None) + sum(
-            1 for entry in stored.entries if entry.seq is not None and floor <= entry.seq < line
-        )
-        summary = exact(text, made.sent[:count])
+        summary = exact(text, replaced(stored.entries, before, stored.compacted, line))
         holding.keep()
         try:
             await self._conversations.log.record_compacted(

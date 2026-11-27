@@ -5,11 +5,15 @@ The compaction here is written straight into the log, as a compaction leaves it 
 """
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from bson import ObjectId
 
 from app.entities.compaction import summed_up
+from app.entities.history import Added
+from app.entities.model import SEARCH_TOOL, ToolSpec, to_messages
+from app.entities.tools import Tool
 from app.routers.gems.service import GemsServiceV1Class
 from tests.test_chat import _chat, _close, _open, _said
 from tests.test_one_conversation import _hang_up, _said_and_heard, _spoken, _world
@@ -69,8 +73,46 @@ async def test_a_reply_is_sent_the_summary_then_everything_from_its_line_on() ->
     await _close(setup.socket, setup.linked)
 
 
+async def _remember(setup: Any, *items: Any) -> None:
+    """Add items to the gem's conversation, as a reply would have, and store them."""
+    gem_id = ObjectId(setup.gem.id)
+    await setup.conversations.log.open(gem_id)
+    for item in items:
+        setup.conversations.log.remember(gem_id, Added(item, datetime.now(UTC)), "chat")
+    await setup.conversations.log.stored(gem_id)
+
+
+_LOADED = "tracker__find_issues"
+
+
+async def _found(arguments: str) -> str:
+    return "4"
+
+
+class _Connected:
+    """A connection open to every gem, whose one tool is deferred."""
+
+    async def tools_for(self, gem_id: object) -> list[Tool]:
+        spec = ToolSpec(_LOADED, "Find issues.", {"type": "object"}, strict=False, deferred=True)
+        return [Tool(spec, _found, connection="Tracker")]
+
+
 async def test_the_requests_after_a_compaction_keep_every_byte() -> None:
-    setup = await _talked("One.", "Two.")
+    # A deferred tool is loaded by a search in the part summed up, and called after it.
+    setup = await _talked("One.")
+    setup.chat._connections = _Connected()
+    search = {"type": "function_call", "call_id": "s1", "name": SEARCH_TOOL, "arguments": "{}"}
+    found = {
+        "type": "function_call_output",
+        "call_id": "s1",
+        "output": f'{{"tools": ["{_LOADED}"]}}',
+    }
+    await _remember(setup, search, found)
+    setup.llm.then(_said("Two."))
+    setup.socket.send(setup.gem.id, "message 2")
+    await setup.socket.until("chat.done", 2)
+    called = {"type": "function_call", "call_id": "c1", "name": _LOADED, "arguments": "{}"}
+    await _remember(setup, called, {"type": "function_call_output", "call_id": "c1", "output": "4"})
     await _compact(setup, await _said_at(setup, "message 2"))
     setup.llm.then(_said("Three."), _said("Four."))
 
@@ -78,9 +120,29 @@ async def test_the_requests_after_a_compaction_keep_every_byte() -> None:
         setup.socket.send(setup.gem.id, f"message {count}")
         await setup.socket.until("chat.done", count)
 
-    before, after = (json.dumps(request["input"]) for request in setup.llm.requests[-2:])
-    assert after.startswith(before[:-1])
+    before, after = setup.llm.requests[-2:]
+    assert json.dumps(after["input"]).startswith(json.dumps(before["input"])[:-1])
+    assert (after["instructions"], after["tools"]) == (before["instructions"], before["tools"])
+    # The search is sent after the summary, so the tool it loaded is defined in the request.
+    assert [item.get("type") for item in after["input"][1:3]] == [
+        "tool_search_call",
+        "tool_search_output",
+    ]
+    assert [tool["name"] for tool in after["input"][2]["tools"]] == [_LOADED]
+    # On Anthropic, each request's messages start with all of the one before.
+    sent = [
+        (await _sent(setup, request["seq"]))["items"]
+        for request in [e for e in await _log(setup) if e["kind"] == "request.sent"][-2:]
+    ]
+    tools = {_LOADED, SEARCH_TOOL}
+    first, second = (json.dumps(to_messages(items, tools)) for items in sent)
+    assert second.startswith(first[:-1])
     await _close(setup.socket, setup.linked)
+
+
+async def _sent(setup: Any, seq: int) -> dict[str, Any]:
+    service = GemsServiceV1Class(setup.gems, setup.conversations)
+    return await service.get_log_sent(str(setup.gem.id), seq)
 
 
 async def test_what_a_request_was_sent_is_read_back_with_the_compaction_in_force() -> None:

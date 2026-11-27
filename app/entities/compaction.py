@@ -8,8 +8,10 @@ writes. The log is never changed: a compaction is an entry of its own
 is still sent whole. The latest one since the gem was last reset is in force.
 
 What is sent, with a compaction in force (`view`): the summary, as one line of ours,
-then every remembered entry numbered `through` or after, with the latest cold start's
-expiry still applied (see `cold_start.py`). Like the expiry, it is worked out from what is
+then every search made before `through` (`tool_search`, its call and its result: what it
+loaded stays loaded, so a deferred tool it loaded can still be called), then every
+remembered entry numbered `through` or after, with the latest cold start's expiry still
+applied (see `cold_start.py`). Like the expiry, it is worked out from what is
 stored and the lines in force alone, so every request of a sitting starts with the same
 bytes as the one before it.
 
@@ -45,7 +47,7 @@ from datetime import timedelta
 from typing import Literal, NamedTuple
 
 from app.entities.cold_start import Numbered, as_sent
-from app.entities.model import Item, Message
+from app.entities.model import SEARCH_TOOL, Item, Message
 
 __all__ = [
     "ASK",
@@ -57,6 +59,7 @@ __all__ = [
     "Setting",
     "asked",
     "exact",
+    "replaced",
     "size",
     "summed_up",
     "through",
@@ -140,12 +143,59 @@ def view(
 ) -> list[Item]:
     """The items as the model is sent them: summed up before `through`, expired before `before`.
 
-    An entry with no number came after every request so far, so it is always sent.
+    The searches before `through` stay, after the summary. An entry with no number came
+    after every request so far, so it is always sent.
     """
     if compacted is None:
         return as_sent(entries, before)
-    kept = [entry for entry in entries if entry.seq is None or entry.seq >= compacted.through]
+    searches = _searches(entries, compacted.through)
+    kept = [
+        entry
+        for entry in entries
+        if entry.seq is None or entry.seq >= compacted.through or _call_id(entry) in searches
+    ]
     return [summed_up(compacted.summary), *as_sent(kept, before)]
+
+
+def replaced(
+    entries: Sequence[Numbered], before: int | None, compacted: Compacted | None, line: int
+) -> list[Item]:
+    """What a compaction drawn at `line` stands for, as the model was sent it.
+
+    The summary in force, then every entry from its line up to `line`, but the searches:
+    they are still sent after the new summary.
+    """
+    floor = 0 if compacted is None else compacted.through
+    searches = _searches(entries, line)
+    sent = as_sent(entries, before)
+    return [
+        *([] if compacted is None else [summed_up(compacted.summary)]),
+        *(
+            item
+            for entry, item in zip(entries, sent, strict=True)
+            if entry.seq is not None
+            and floor <= entry.seq < line
+            and _call_id(entry) not in searches
+        ),
+    ]
+
+
+def _searches(entries: Sequence[Numbered], line: int) -> set[str]:
+    """The call ids of the searches made before `line`."""
+    return {
+        entry.item["call_id"]
+        for entry in entries
+        if entry.seq is not None
+        and entry.seq < line
+        and "type" in entry.item
+        and entry.item["type"] == "function_call"
+        and entry.item["name"] == SEARCH_TOOL
+    }
+
+
+def _call_id(entry: Numbered) -> str | None:
+    """The call an entry is or answers, if it is a call or a call's result."""
+    return entry.item["call_id"] if "type" in entry.item else None
 
 
 def _text(item: Item) -> str:
