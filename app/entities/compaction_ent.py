@@ -205,8 +205,7 @@ class CompactionEntityClass:
             # The last request was a compaction's own, which caches nothing: no request
             # after it is sent what came before its line.
             cache_until = None
-        warm = cache_until is not None and datetime.now(UTC) < cache_until
-        keep, compact = costs(name, tokens, warm=warm)
+        keep, compact = costs(name, tokens)
         return Context(
             tokens=tokens,
             cache_until=cache_until,

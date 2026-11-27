@@ -28,10 +28,10 @@ says more, the estimate starts from what it was billed (see `compaction_ent.py`)
 
 What keeping a conversation and compacting it would cost is estimated from its size and
 the prices (`costs`, see `prices.py`). Keeping it: its next request writes all of it to
-the cache, as it does once the cache is gone. Compacting it: the summary request reads
-all of it from the cache if the cache is warm, or writes it if not, and writes a summary
-of about `SUMMARY_ESTIMATE` tokens; then the next request writes the much smaller
-conversation to the cache, about `AFTER_ESTIMATE` tokens.
+the cache, as it does once the cache is gone. Compacting it: the summary request is
+read in full, at the plain input price, and writes a summary of about
+`SUMMARY_ESTIMATE` tokens; then the next request writes the much smaller conversation to
+the cache, about `AFTER_ESTIMATE` tokens.
 
 The summary request is one plain call of the gem's own model, not a reply. It is told
 our instructions (`INSTRUCTIONS`), not the gem's, and sent the items the gem's next
@@ -233,21 +233,13 @@ def size(instructions: str, items: Sequence[Item], tools: Sequence[ToolSpec] = (
     return (len(instructions) + sum(len(_text(item)) for item in items) + told) // 4
 
 
-def costs(model: ModelName, tokens: int, *, warm: bool) -> tuple[float | None, float | None]:
+def costs(model: ModelName, tokens: int) -> tuple[float | None, float | None]:
     """What keeping a conversation of `tokens` and compacting it would cost, in US dollars.
 
-    `warm` is whether its cache is. Each is None where a price it needs is not known.
+    Each is None where a price it needs is not known.
     """
     keep = cost(model, Usage(input=0, cache_read=0, cache_write=tokens, output=0))
-    summary = cost(
-        model,
-        Usage(
-            input=0,
-            cache_read=tokens if warm else 0,
-            cache_write=0 if warm else tokens,
-            output=SUMMARY_ESTIMATE,
-        ),
-    )
+    summary = cost(model, Usage(input=tokens, cache_read=0, cache_write=0, output=SUMMARY_ESTIMATE))
     after = cost(model, Usage(input=0, cache_read=0, cache_write=AFTER_ESTIMATE, output=0))
     compact = None if summary is None or after is None else summary + after
     return (None if keep is None else float(keep), None if compact is None else float(compact))

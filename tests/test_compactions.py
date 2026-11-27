@@ -711,12 +711,11 @@ async def test_the_context_says_its_size_when_the_cache_expires_and_when_to_comp
     assert after.cache_until == _START + timedelta(minutes=30)
     assert after.compact_from is None  # under the size
     assert over.compact_from == over.cache_until == _START + timedelta(minutes=30)
-    # What each choice costs, at the gem's model's prices: the summary request reads a
-    # warm cache, and writes a cold one.
-    assert (after.keep_cost_usd, after.compact_cost_usd) == costs("6 Luna", after.tokens, warm=True)
-    assert (gone.keep_cost_usd, gone.compact_cost_usd) == costs("6 Luna", gone.tokens, warm=False)
-    assert after.compact_cost_usd is not None and gone.compact_cost_usd is not None
-    assert gone.compact_cost_usd > after.compact_cost_usd > 0
+    # What each choice costs, at the gem's model's prices.
+    assert (after.keep_cost_usd, after.compact_cost_usd) == costs("6 Luna", after.tokens)
+    assert (gone.keep_cost_usd, gone.compact_cost_usd) == costs("6 Luna", gone.tokens)
+    # The summary request reads no cache: compacting costs the same, warm or cold.
+    assert after.compact_cost_usd is not None and after.compact_cost_usd > 0
     with pytest.raises(NotFoundError):
         await compactions.context(str(ObjectId()))
     await _close(socket, linked)
@@ -787,7 +786,7 @@ async def test_after_a_compaction_no_cache_is_offered_until_the_next_request(
     # What the compaction's own request cached is read by no request after it: a second
     # compaction would write it all again.
     assert (compacted.cache_until, compacted.compact_from) == (None, None)
-    assert compacted.compact_cost_usd == costs("6 Luna", compacted.tokens, warm=False)[1]
+    assert compacted.compact_cost_usd == costs("6 Luna", compacted.tokens)[1]
     assert after.cache_until is not None
     assert after.compact_from == after.cache_until
     await _close(setup.socket, setup.linked)
