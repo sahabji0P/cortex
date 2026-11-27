@@ -87,14 +87,21 @@ def every_request_is_sent_what_its_gem_remembers(monkeypatch: pytest.MonkeyPatch
         compacted = compactions[-1][1] if compactions else None
         return view(remembered, cold[-1] if cold else None, compacted)
 
-    def requesting(self: Recording, turn: int | None, items: Sequence[Item], think: bool) -> Any:
+    def requesting(
+        self: Recording,
+        turn: int | None,
+        items: Sequence[Item],
+        think: bool,
+        *,
+        compaction: int | None = None,
+    ) -> Any:
         remembered = remembered_now(self)
         if remembered is not None and list(items[-1:]) == [asked()]:
             # A compaction's own request: the message that asks for the summary comes last.
             remembered = [*remembered, asked()]
         if remembered is not None and list(items) != remembered:
             differed.append((list(items), remembered))
-        return request(self, turn, items, think)
+        return request(self, turn, items, think, compaction=compaction)
 
     monkeypatch.setattr(LogEntityClass, "remember", remembering)
     monkeypatch.setattr(LogEntityClass, "give_up", giving_up)

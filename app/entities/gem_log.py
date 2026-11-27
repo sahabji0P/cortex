@@ -147,7 +147,14 @@ from app.entities.model import MODELS, Item, ModelCall, ModelName, Provider, Usa
 from app.entities.prices import PRICED, cost
 from app.entities.tools import Tool
 
-__all__ = ["Listener", "LogEntityClass", "Recording", "RequestRecord", "TurnRecord"]
+__all__ = [
+    "CompactionRecord",
+    "Listener",
+    "LogEntityClass",
+    "Recording",
+    "RequestRecord",
+    "TurnRecord",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -609,13 +616,24 @@ class Recording:
         self.note("turn.opened", number, {"by": by, "mode": self.mode})
         return record
 
+    def compaction(self) -> "CompactionRecord":
+        """A compaction begins: write that down. Its number is the compaction's id."""
+        return CompactionRecord(self, self.note("compaction.started", None, {}))
+
     def note(self, kind: str, turn: int | None, data: dict[str, Any]) -> int | None:
         """Write down one thing that happened, and return its number, if it has one."""
         if self._log is not None and self._gem_id is not None:
             return self._log.note(self._gem_id, kind, turn, data)
         return None
 
-    def request(self, turn: int | None, items: Sequence[Item], think: bool) -> "RequestRecord":
+    def request(
+        self,
+        turn: int | None,
+        items: Sequence[Item],
+        think: bool,
+        *,
+        compaction: int | None = None,
+    ) -> "RequestRecord":
         """A request is about to be sent: write down what changed, and that it is sent.
 
         Most changes are written when the conversation is described. What is written
@@ -623,19 +641,24 @@ class Recording:
         or all of it again when the last change could not be written down.
 
         It is sent `items`, which are what the gem remembers by now: every one of them
-        is in the log already, before this entry.
+        is in the log already, before this entry. A compaction's own request belongs to
+        no turn, and names the compaction instead (`compaction`).
         """
         number = seq = None
         self._changes(turn)
         with contextlib.suppress(Exception):
             if self._log is not None and self._gem_id is not None:
                 number = self._log.request_number(self._gem_id)
-                seq = self.note(
-                    "request.sent",
-                    turn,
-                    {"request": number, "attempt": 1, "think": think, "count": len(items)},
-                )
-        record = RequestRecord(self, turn, number, self._model)
+                data: dict[str, Any] = {
+                    "request": number,
+                    "attempt": 1,
+                    "think": think,
+                    "count": len(items),
+                }
+                if compaction is not None:
+                    data["compaction"] = compaction
+                seq = self.note("request.sent", turn, data)
+        record = RequestRecord(self, turn, number, self._model, compaction)
         record.seq = seq
         return record
 
@@ -726,15 +749,66 @@ class TurnRecord:
             self._recording.note("tool.done", self.number, data)
 
 
+class CompactionRecord:
+    """What is written down of one compaction, from when it begins.
+
+    A compaction is no turn: its entries name it (`compaction`) by the number of its
+    `compaction.started`, which is `seq`, and belong to no turn. None if it was not
+    written down.
+    """
+
+    def __init__(self, recording: Recording, seq: int | None) -> None:
+        self._recording = recording
+        self.seq = seq
+        self._error: str | None = None
+        self._ended = False
+
+    def sent(self, items: Sequence[Item]) -> "RequestRecord":
+        """The summary request is about to be sent."""
+        return self._recording.request(None, items, False, compaction=self.seq)
+
+    def failed(self, error: BaseException) -> None:
+        """The compaction failed. Said when it ends; the first error is the one said."""
+        if self._error is None:
+            self._error = str(error) or type(error).__name__
+
+    def ended(self, *, done: bool) -> None:
+        """The compaction is over: `done`, or `failed`, or `cut` if it was stopped.
+
+        Written once, last, whatever happened.
+        """
+        if self._ended:
+            return
+        self._ended = True
+        if self._error is not None:
+            outcome = "failed"
+        elif done:
+            outcome = "done"
+        else:
+            outcome = "cut"
+        self._recording.note(
+            "compaction.ended",
+            None,
+            {"compaction": self.seq, "outcome": outcome, "error": self._error},
+        )
+
+
 class RequestRecord:
     """What is written down of one request to a model, from when it is sent."""
 
     def __init__(
-        self, recording: Recording, turn: int | None, number: int | None, model: ModelName | None
+        self,
+        recording: Recording,
+        turn: int | None,
+        number: int | None,
+        model: ModelName | None,
+        compaction: int | None = None,
     ) -> None:
         self._recording = recording
         self._turn = turn
         self.number = number
+        # The compaction it is the summary request of, if it is one.
+        self._compaction = compaction
         # The number of its `request.sent` in the gem's log, once that is written down.
         self.seq: int | None = None
         self._model: ModelName | None = model
@@ -773,30 +847,29 @@ class RequestRecord:
         with contextlib.suppress(Exception):
             priced = None if self._model is None else cost(self._model, usage)
         with contextlib.suppress(Exception):
-            self._recording.note(
-                "request.done",
-                self._turn,
-                {
-                    "request": self.number,
-                    "attempt": 1,
-                    "outcome": outcome,
-                    "text": text,
-                    "calls": [
-                        {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
-                        for call in calls
-                    ],
-                    "first_token_at": self._first,
-                    "usage": None
-                    if usage is None
-                    else {
-                        "input": usage.input,
-                        "cache_read": usage.cache_read,
-                        "cache_write": usage.cache_write,
-                        "output": usage.output,
-                        "thinking": usage.thinking,
-                    },
-                    "cost_usd": None if priced is None else float(priced),
-                    "priced": None if priced is None else PRICED,
-                    "error": error,
+            data: dict[str, Any] = {
+                "request": self.number,
+                "attempt": 1,
+                "outcome": outcome,
+                "text": text,
+                "calls": [
+                    {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
+                    for call in calls
+                ],
+                "first_token_at": self._first,
+                "usage": None
+                if usage is None
+                else {
+                    "input": usage.input,
+                    "cache_read": usage.cache_read,
+                    "cache_write": usage.cache_write,
+                    "output": usage.output,
+                    "thinking": usage.thinking,
                 },
-            )
+                "cost_usd": None if priced is None else float(priced),
+                "priced": None if priced is None else PRICED,
+                "error": error,
+            }
+            if self._compaction is not None:
+                data["compaction"] = self._compaction
+            self._recording.note("request.done", self._turn, data)

@@ -8,7 +8,7 @@ import pytest
 from bson import ObjectId
 
 from app.entities.cold_start import Cache
-from app.entities.compaction import Compacted
+from app.entities.compaction import Compacted, asked
 from app.entities.conversation_ent import ConversationEntityClass, Stored
 from app.entities.conversation_store import (
     REMEMBERED,
@@ -830,6 +830,66 @@ async def test_a_request_knows_the_number_of_its_request_sent() -> None:
     assert request.seq == sent["seq"]
     # With no log, nothing is written down, and it has no number.
     assert Recording().turn("user").sent([], False).seq is None
+
+
+async def test_a_compaction_is_no_turn_and_its_entries_name_it() -> None:
+    docdb, _, conversations = await _conversations()
+    gem_id = ObjectId()
+    await conversations.log.open(gem_id)
+    recording = conversations.recording(gem_id, "chat")
+
+    compaction = recording.compaction()  # 0
+    request = compaction.sent([asked()])  # 1
+    request.done("{}", [], Usage(input=10, cache_read=0, cache_write=0, output=2))  # 2
+    compaction.ended(done=True)  # 3
+    compaction.ended(done=False)  # written once
+    # The next reply's turn is the first: a compaction takes no turn number.
+    reply = recording.turn("user")  # 4
+    reply.sent([], False).done("Hi.", [], None)  # 5, 6
+
+    await conversations.log.written()
+    log = _log(docdb)
+    assert compaction.seq == 0
+    assert [(d["kind"], d["turn"]) for d in log] == [
+        ("compaction.started", None),
+        ("request.sent", None),
+        ("request.done", None),
+        ("compaction.ended", None),
+        ("turn.opened", 1),
+        ("request.sent", 1),
+        ("request.done", 1),
+    ]
+    assert log[0]["data"] == {}
+    assert (log[1]["data"]["compaction"], log[2]["data"]["compaction"]) == (0, 0)
+    assert log[3]["data"] == {"compaction": 0, "outcome": "done", "error": None}
+    # Every other request is as it was: it names no compaction.
+    assert "compaction" not in log[5]["data"]
+    assert "compaction" not in log[6]["data"]
+
+
+@pytest.mark.parametrize(
+    ("error", "outcome", "said"),
+    [
+        (RuntimeError("the model went away"), "failed", "the model went away"),
+        (asyncio.CancelledError(), "cut", None),
+    ],
+)
+async def test_a_compaction_that_failed_or_was_stopped_ends_so(
+    error: BaseException, outcome: str, said: str | None
+) -> None:
+    docdb, _, conversations = await _conversations()
+    gem_id = ObjectId()
+    await conversations.log.open(gem_id)
+    compaction = conversations.recording(gem_id, "chat").compaction()
+
+    if isinstance(error, Exception):
+        compaction.failed(error)
+        compaction.failed(RuntimeError("a later one"))
+    compaction.ended(done=False)
+
+    await conversations.log.written()
+    [ended] = [d for d in _log(docdb) if d["kind"] == "compaction.ended"]
+    assert ended["data"] == {"compaction": compaction.seq, "outcome": outcome, "error": said}
 
 
 async def test_a_compaction_is_written_at_once_in_its_turn_and_read_back_in_force() -> None:
